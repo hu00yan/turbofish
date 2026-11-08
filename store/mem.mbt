@@ -56,7 +56,7 @@ pub fn MemStore::new() -> MemStore {
 }
 
 ///|
-fn classify_key(key : String) -> String {
+pub fn classify_key(key : String) -> String {
   if contains(key, "/_meta/") {
     return "meta"
   }

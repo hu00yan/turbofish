@@ -1,0 +1,13 @@
+options(
+  "is-main": true,
+)
+
+import {
+  "turbofish/build" @build,
+  "turbofish/query" @query,
+  "turbofish/store" @store,
+  "turbofish/format" @format,
+  "turbofish/core" @core,
+  "moonbitlang/core/math" @math,
+  "moonbitlang/core/bench" @bench,
+}

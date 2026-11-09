@@ -2,4 +2,5 @@ import {
   "turbofish/core" @core,
   "turbofish/store" @store,
   "moonbitlang/core/encoding/utf8" @utf8,
+  "moonbitlang/core/math" @math,
 }

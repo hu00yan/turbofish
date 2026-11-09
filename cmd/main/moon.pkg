@@ -6,6 +6,7 @@ import {
   "turbofish/build" @build,
   "turbofish/query" @query,
   "turbofish/store" @store,
+  "turbofish/simstore" @simstore,
   "turbofish/format" @format,
   "turbofish/core" @core,
   "moonbitlang/core/math" @math,

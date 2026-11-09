@@ -612,4 +612,21 @@ fn main {
   println(
     "total storage: \{store.total_object_bytes()} bytes, \{store.object_count()} objects",
   )
+  // ---- SimStore 场景（NOTES2.md 第 5 节）：数据生成一次、ingest 两次的第二次。
+  // MemStore 流程保持原样；SimConfig 按 aws_default(42U) 拷贝构造，显式设
+  // nvme_capacity_bytes = 512MB（≥ 全量 ~35MB → NVMe 可全热）。
+  // 存根阶段延迟/计费为 0 属预期，simstore 实装后自动变真。
+  if built {
+    let base = @simstore.SimConfig::aws_default(42U)
+    let sim_cfg = { ..base, nvme_capacity_bytes: 536870912 } // 512MB
+    let store_sim = @simstore.SimStore::new(sim_cfg)
+    try {
+      run_sim(
+        store, store_sim, "bench", docs, bm25_gate_qs, vec_gate_qvs,
+        bm25_cost_qs, vec_cost_qvs,
+      )
+    } catch {
+      e => println("SimStore 场景失败: \{err_msg(e)}")
+    }
+  }
 }

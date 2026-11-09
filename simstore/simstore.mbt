@@ -1,6 +1,20 @@
-// SimStore 存根：模拟器 v2（三档存储层 + 延迟模型 + AWS 费率计费）。
-// 契约见 NOTES2.md。当前为退化实现（零延迟/零计费，数据面与 MemStore 等价），
-// 由工人 S 替换为真实模型；签名不得更改（bench 已依赖）。
+// SimStore：模拟器 v2 —— 三档存储层 + 延迟模型 + AWS 费率计费（契约见 NOTES2.md）。
+//
+// 三档判定（get / get_range，顺序严格）：
+// 1. 内存常驻档（@store.classify_key(key) ∈ cfg.resident_classes）：
+//    延迟 += mem_us（固定值）；不打 S3 → 不计 GET 费、不消耗 rng。
+// 2. NVMe 缓存档（cfg.nvme_capacity_bytes > 0 且 整对象在 nvme / 区间已登记 ranges）：
+//    延迟 += nvme_read_p50_us 对数正态样本 + bytes/nvme 带宽；不计 GET 费。
+// 3. S3 冷读：延迟 += s3_get_ttfb_p50_us 对数正态样本 + bytes/s3 带宽；计 1 次 GET 费；
+//    get 整对象读回后准入 NVMe（LRU 逐出；单对象超容量不缓存，优先保留小对象）；
+//    get_range 只登记命中区间（ranges 语义同 MemStore），不做整对象准入。
+//
+// 写路径：put/put_if_match 每次尝试计 PUT 延迟样本 + PUT 费（CAS 失败也是一次真实
+// 请求）；成功写入 write-through 进 NVMe（受容量约束）。list/delete 各自样本 + 费用。
+//
+// 延迟单位统一微秒，累加进虚拟时钟（SimSnapshot.total_latency_us）；
+// 不真睡、不建线程；查询延迟 = 顺序累加（保守上界）。
+// rng 全模拟器共享单流，顺序稳定性原则见 latency.mbt 头注释。
 
 ///|
 /// AWS S3 Standard（us-east-1，2026-02 公开价）费率表，单位：美元。
@@ -95,7 +109,10 @@ pub struct SimStore {
   versions : Map[String, Int]
   ranges : Map[String, Array[(Int, Int)]]
   nvme : Set[String] // NVMe 缓存命中的整对象
+  last_used : Map[String, Int] // LRU recency：key -> 全局时钟 tick
+  mut lru_clock : Int // 全局单调时钟：每次 NVMe 触碰 +1（tick 唯一，逐出无并列）
   mut nvme_used : Int
+  rng : @core.Rng // 全模拟器共享的确定性随机流（种子 = cfg.seed）
   mut next_ver : Int
   mut total_latency_us : Double
   mut op_count : Int
@@ -123,7 +140,10 @@ pub fn SimStore::new(cfg : SimConfig) -> SimStore {
     versions: Map::new(),
     ranges: Map::new(),
     nvme: Set::new(),
+    last_used: Map::new(),
+    lru_clock: 0,
     nvme_used: 0,
+    rng: @core.Rng::new(cfg.seed),
     next_ver: 1,
     total_latency_us: 0.0,
     op_count: 0,
@@ -150,24 +170,86 @@ fn version_string(v : Int) -> String {
 }
 
 ///|
-/// 存根数据面：与 MemStore 等价的直读直写，零延迟零计费。
-pub impl @store.ObjectStore for SimStore with get(self : SimStore, key : String) -> Bytes? {
-  self.op_count += 1
-  self.data.get(key)
+/// key 是否属于内存常驻档。
+fn SimStore::is_resident(self : SimStore, cls : String) -> Bool {
+  for c in self.cfg.resident_classes {
+    if c == cls {
+      return true
+    }
+  }
+  false
 }
 
 ///|
+/// 三档 get：内存常驻 → NVMe 命中 → S3 冷读（详见文件头注释）。
+pub impl @store.ObjectStore for SimStore with get(self : SimStore, key : String) -> Bytes? {
+  self.op_count += 1
+  self.gets += 1
+  if self.is_resident(@store.classify_key(key)) {
+    // 第 1 档：内存常驻。固定 mem_us，不打 S3（无 GET 费），不消耗 rng。
+    self.total_latency_us += self.cfg.mem_us
+    return self.data.get(key)
+  }
+  match self.data.get(key) {
+    Some(value) => {
+      let size = value.length()
+      if self.nvme.contains(key) {
+        // 第 2 档：NVMe 命中（无 GET 费）。
+        self.nvme_hits += 1
+        self.bytes_nvme_read += size
+        let lat = self.sample_lognormal(self.cfg.nvme_read_p50_us) +
+          bandwidth_us(size, self.cfg.nvme_bandwidth_mbps)
+        self.total_latency_us += lat
+        self.nvme_admit(key, size) // 刷新 LRU recency（已是成员，不改变容量）
+        return Some(value)
+      }
+      // 第 3 档：S3 冷读：计 1 次 GET 费；整对象读回后准入 NVMe。
+      self.s3_gets += 1
+      self.bytes_s3_read += size
+      self.charge_get(size)
+      let lat = self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us) +
+        bandwidth_us(size, self.cfg.s3_bandwidth_mbps)
+      self.total_latency_us += lat
+      self.nvme_admit(key, size)
+      Some(value)
+    }
+    None => {
+      // miss 同样是一次真实 S3 GET（404 也产生请求与延迟），0 字节，无缓存副作用。
+      self.s3_gets += 1
+      self.charge_get(0)
+      self.total_latency_us += self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us)
+      None
+    }
+  }
+}
+
+///|
+/// 成功写入的数据面：版本推进、旧区间记录失效、write-through 进 NVMe。
 fn SimStore::put_raw(self : SimStore, key : String, value : Bytes) -> Unit {
-  self.puts += 1
+  // 覆盖写：旧对象若在 NVMe，先按旧大小回收容量，再按新大小重新准入。
+  match self.data.get(key) {
+    Some(old) => {
+      if self.nvme.contains(key) {
+        self.nvme_used -= old.length()
+      }
+    }
+    None => ()
+  }
+  self.nvme.remove(key)
+  self.last_used.remove(key)
   self.data.set(key, value)
   self.versions.set(key, self.next_ver)
   self.next_ver += 1
-  self.ranges.remove(key)
+  self.ranges.remove(key) // 新版本使旧区间记录失效
+  self.nvme_admit(key, value.length()) // write-through（受容量约束）
 }
 
 ///|
 pub impl @store.ObjectStore for SimStore with put(self : SimStore, key : String, value : Bytes) -> Unit {
   self.op_count += 1
+  self.puts += 1
+  self.total_latency_us += self.sample_lognormal(self.cfg.s3_put_ttfb_p50_us)
+  self.charge_put()
   self.put_raw(key, value)
 }
 
@@ -178,6 +260,11 @@ pub impl @store.ObjectStore for SimStore with put_if_match(
   expected : String?,
   value : Bytes,
 ) -> Bool {
+  self.op_count += 1
+  self.puts += 1
+  // 真 S3 条件写：无论 CAS 成败都是一次 PUT 请求（延迟 + 费用）。
+  self.total_latency_us += self.sample_lognormal(self.cfg.s3_put_ttfb_p50_us)
+  self.charge_put()
   let current = match self.versions.get(key) {
     Some(v) => Some(version_string(v))
     None => None
@@ -197,6 +284,7 @@ pub impl @store.ObjectStore for SimStore with put_if_match(
 }
 
 ///|
+/// 范围读 [offset, offset+len)，返回可能截短的 payload（独立拷贝）。
 pub impl @store.ObjectStore for SimStore with get_range(
   self : SimStore,
   key : String,
@@ -204,6 +292,14 @@ pub impl @store.ObjectStore for SimStore with get_range(
   len : Int,
 ) -> Bytes? {
   self.op_count += 1
+  if self.is_resident(@store.classify_key(key)) {
+    // 内存档范围读：对象整体在内存，区间拷贝，固定 mem_us，不打 S3。
+    self.total_latency_us += self.cfg.mem_us
+    match self.data.get(key) {
+      Some(value) => return Some(slice_bytes(value, offset, len))
+      None => return None
+    }
+  }
   match self.data.get(key) {
     Some(value) => {
       let lo = if offset < 0 { 0 } else { offset }
@@ -213,24 +309,50 @@ pub impl @store.ObjectStore for SimStore with get_range(
         offset + len
       }
       if hi <= lo {
+        // 退化空区间：不产生请求。
         return Some(Bytes::make(0, b'\x00'))
       }
       let ranged_hit = match self.ranges.get(key) {
         Some(rs) => rs.iter().any(r => r.0 <= lo && r.1 >= hi)
         None => false
       }
-      let hit = self.nvme.contains(key) || ranged_hit
-      if !hit {
-        match self.ranges.get(key) {
-          Some(rs) => rs.push((lo, hi))
-          None => self.ranges.set(key, [(lo, hi)])
+      let nbytes = hi - lo
+      if self.nvme.contains(key) || ranged_hit {
+        // 第 2 档：整对象或命中区间已缓存（无 GET 费）。
+        self.nvme_hits += 1
+        self.bytes_nvme_read += nbytes
+        let lat = self.sample_lognormal(self.cfg.nvme_read_p50_us) +
+          bandwidth_us(nbytes, self.cfg.nvme_bandwidth_mbps)
+        self.total_latency_us += lat
+        // 只刷新 recency，不把范围读提升为整对象缓存。
+        if self.nvme.contains(key) {
+          self.nvme_admit(key, value.length())
+        }
+      } else {
+        // 第 3 档：S3 冷区间读。bytes 口径 = 区间长度；
+        // 只登记命中区间（同 MemStore 语义），不做整对象准入。
+        self.s3_gets += 1
+        self.bytes_s3_read += nbytes
+        self.charge_get(nbytes)
+        let lat = self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us) +
+          bandwidth_us(nbytes, self.cfg.s3_bandwidth_mbps)
+        self.total_latency_us += lat
+        if self.cfg.nvme_capacity_bytes > 0 {
+          match self.ranges.get(key) {
+            Some(rs) => rs.push((lo, hi))
+            None => self.ranges.set(key, [(lo, hi)])
+          }
         }
       }
-      let b = Buffer()
-      b.write_bytesview(value.view(start=lo, end=hi))
-      Some(b.to_bytes())
+      Some(slice_bytes(value, offset, len))
     }
-    None => None
+    None => {
+      // miss：一次真实 S3 range GET（404）。
+      self.s3_gets += 1
+      self.charge_get(0)
+      self.total_latency_us += self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us)
+      None
+    }
   }
 }
 
@@ -238,6 +360,8 @@ pub impl @store.ObjectStore for SimStore with get_range(
 pub impl @store.ObjectStore for SimStore with list(self : SimStore, prefix : String) -> Array[String] {
   self.op_count += 1
   self.lists += 1
+  self.total_latency_us += self.sample_lognormal(self.cfg.s3_list_p50_us)
+  self.charge_list()
   let out : Array[String] = Array::new()
   for kv in self.data.iter() {
     if kv.0.has_prefix(prefix) {
@@ -252,10 +376,92 @@ pub impl @store.ObjectStore for SimStore with list(self : SimStore, prefix : Str
 pub impl @store.ObjectStore for SimStore with delete(self : SimStore, key : String) -> Unit {
   self.op_count += 1
   self.deletes += 1
+  // S3 DELETE：即使 key 不存在也是一次真实请求（延迟 + 费用，S3 Standard 费率默认 0）。
+  self.total_latency_us += self.sample_lognormal(self.cfg.s3_delete_p50_us)
+  self.charge_delete()
+  match self.data.get(key) {
+    Some(v) => {
+      if self.nvme.contains(key) {
+        self.nvme_used -= v.length()
+      }
+    }
+    None => ()
+  }
   self.data.remove(key)
   self.versions.remove(key)
   self.nvme.remove(key)
+  self.last_used.remove(key)
   self.ranges.remove(key)
+}
+
+///|
+/// NVMe 准入（LRU）：刷新 recency；新对象受容量约束，
+/// 超容量逐出最久未用；单对象超过全容量则不缓存（优先保留小对象）。
+fn SimStore::nvme_admit(self : SimStore, key : String, size : Int) -> Unit {
+  if self.cfg.nvme_capacity_bytes <= 0 {
+    return // NVMe 层未启用
+  }
+  if size > self.cfg.nvme_capacity_bytes {
+    return // 单对象装不下：不缓存，避免为巨型对象清空全部小对象
+  }
+  self.lru_clock += 1
+  self.last_used.set(key, self.lru_clock)
+  if self.nvme.contains(key) {
+    return // 已缓存：只刷新 recency
+  }
+  self.nvme.add(key)
+  self.nvme_used += size
+  while self.nvme_used > self.cfg.nvme_capacity_bytes {
+    // 逐出最久未用（tick 全局单调唯一，无并列）。
+    match self.nvme_lru_victim() {
+      Some(victim) => {
+        match self.data.get(victim) {
+          Some(v) => self.nvme_used -= v.length()
+          None => ()
+        }
+        self.nvme.remove(victim)
+        self.last_used.remove(victim)
+      }
+      None => break // 缓存空了还超容量：理论不可达（size <= capacity 已挡），防御性退出
+    }
+  }
+}
+
+///|
+/// 当前 NVMe 中最久未用的 key（last_used 最小）；空缓存返回 None。
+fn SimStore::nvme_lru_victim(self : SimStore) -> String? {
+  let mut victim = ""
+  let mut best_tick = -1
+  for k in self.nvme {
+    match self.last_used.get(k) {
+      Some(t) => if best_tick < 0 || t < best_tick {
+        victim = k
+        best_tick = t
+      }
+      None => ()
+    }
+  }
+  if best_tick < 0 {
+    return None
+  }
+  Some(victim)
+}
+
+///|
+/// 切片拷贝（模拟网络传出的独立缓冲区），钳位语义与 MemStore 一致。
+fn slice_bytes(value : Bytes, offset : Int, len : Int) -> Bytes {
+  let lo = if offset < 0 { 0 } else { offset }
+  let hi = if offset + len > value.length() {
+    value.length()
+  } else {
+    offset + len
+  }
+  if hi <= lo {
+    return Bytes::make(0, b'\x00')
+  }
+  let b = Buffer()
+  b.write_bytesview(value.view(start=lo, end=hi))
+  b.to_bytes()
 }
 
 ///|
@@ -302,22 +508,52 @@ pub fn SimStore::reset_cost(self : SimStore) -> Unit {
 pub fn SimStore::cold(self : SimStore) -> Unit {
   self.nvme.clear()
   self.nvme_used = 0
+  self.last_used.clear()
   self.ranges.clear()
 }
 
 ///|
-/// 全部数据进 NVMe（超出容量按 key 字典序优先保留小对象）。
+/// 全部数据进 NVMe：按（体积升序, key 字典序）依次装入，小对象优先保留，
+/// 装不下即止（升序排列，后续只会更大）。装入顺序即 LRU 顺序（先装入的更冷）。
+/// 不消耗 rng、不产生延迟与费用。
 pub fn SimStore::prime_nvme(self : SimStore) -> Unit {
-  ignore(self)
+  self.nvme.clear()
+  self.last_used.clear()
+  self.nvme_used = 0
+  if self.cfg.nvme_capacity_bytes <= 0 {
+    return
+  }
+  let entries : Array[(Int, String)] = Array::new()
+  for kv in self.data.iter() {
+    entries.push((kv.1.length(), kv.0))
+  }
+  entries.sort_by(fn(a, b) {
+    if a.0 == b.0 {
+      a.1.compare(b.1)
+    } else {
+      a.0.compare(b.0)
+    }
+  })
+  for e in entries {
+    let size = e.0
+    if self.nvme_used + size > self.cfg.nvme_capacity_bytes {
+      return // 后续对象只会更大，不必继续尝试
+    }
+    self.lru_clock += 1
+    self.last_used.set(e.1, self.lru_clock)
+    self.nvme.add(e.1)
+    self.nvme_used += size
+  }
 }
 
 ///|
-/// 当前总对象字节的月度存储费。
+/// 当前总对象字节的月度存储费：bytes / 2^30 × storage_per_gb_month。
 pub fn SimStore::storage_monthly_bill(self : SimStore) -> Double {
   self.total_object_bytes().to_double() / 1073741824.0 * self.cfg.rates.storage_per_gb_month
 }
 
 ///|
+/// 全部数据进 NVMe 的总字节数（存储量口径）。
 pub fn SimStore::total_object_bytes(self : SimStore) -> Int {
   let mut total = 0
   for kv in self.data.iter() {

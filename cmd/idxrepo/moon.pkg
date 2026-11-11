@@ -1,0 +1,24 @@
+import {
+  "turbofish/core",
+  "turbofish/build",
+  "turbofish/store",
+  "turbofish/query",
+  "turbofish/s3store",
+  "turbofish/s3http",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+}
+
+options(
+  "is-main": true,
+  targets: {
+    "idxfs_native.mbt": [ "native", "llvm" ],
+    "idxfs_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+  "native-stub": [ "idxfs.c" ],
+  link: {
+    "native": {
+      "cc-link-flags": "-lcurl",
+    },
+  },
+)

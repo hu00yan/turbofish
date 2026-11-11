@@ -1,0 +1,22 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/cmd/idxrepo"
+
+import {
+  "turbofish/s3store",
+}
+
+// Values
+
+// Errors
+
+// Types and methods
+type Chunk
+
+type CorpusStats
+
+type CountingTransport
+pub impl @s3store.HttpTransport for CountingTransport
+
+// Type aliases
+
+// Traits

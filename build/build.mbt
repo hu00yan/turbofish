@@ -32,6 +32,7 @@ pub(all) struct BuildConfig {
   global_vec_parts : Bool // 写 namespace 级全局 IVF 分区（跨 segment 合并）
   write_fts_bloom : Bool // seg meta 内嵌 FTS term Bloom（跳过不可能命中的段）
   global_pack_size : Int // 全局分区分包：>1 时相邻 cid 打包成 pack-{i}.bin（1 = 每 cid 一对象）
+  fts_tokenizer : @core.Tokenizer // 全文分词器（默认 Word = 旧行为；CJK 命名空间选 smartcn/kuromoji/nori）
 }
 
 ///|
@@ -55,6 +56,7 @@ pub fn BuildConfig::default(ns : String) -> BuildConfig {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
 }
 
@@ -142,6 +144,16 @@ pub fn BuildConfig::with_global_pack_size(
   v : Int,
 ) -> BuildConfig {
   { ..self, global_pack_size: if v < 1 { 1 } else { v } }
+}
+
+///|
+/// 函数式更新：全文分词器（CJK 命名空间用 smartcn/kuromoji/nori；
+/// 构建与查询必须同一选择，否则索引与查询 term 不一致）。
+pub fn BuildConfig::with_fts_tokenizer(
+  self : BuildConfig,
+  v : @core.Tokenizer,
+) -> BuildConfig {
+  { ..self, fts_tokenizer: v }
 }
 
 ///|

@@ -119,6 +119,7 @@ fn[S : @store.ObjectStore] init_namespace(
     },
     k1: @core.K1,
     b: @core.BM25_B,
+    fts_tokenizer: None,
   }
   let key = ns_meta_key(cfg.ns)
   let bs = json_bytes(meta.to_json())
@@ -438,7 +439,7 @@ fn[S : @store.ObjectStore] write_segment(
       flat.push(f)
     }
     // fts：段内行号 r + tf（按行号升序追加，encode_fts 的 delta 恒 >= 1）
-    let toks = @core.tokenize(d.text)
+    let toks = @core.tokenize_with(cfg.fts_tokenizer, d.text)
     doc_len.push(toks.length())
     doc_len_sum += toks.length()
     let row_tf : Map[String, Int] = Map([])

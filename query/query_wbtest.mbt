@@ -68,6 +68,7 @@ fn make_test_store(deleted : Array[UInt64]) -> @store.MemStore {
     vector_dtype: "f32",
     k1: 1.2,
     b: 0.75,
+    fts_tokenizer: None,
   }
   tput(
     s,
@@ -488,6 +489,7 @@ fn make_wand_store() -> @store.MemStore {
     vector_dtype: "f32",
     k1: 1.2,
     b: 0.75,
+    fts_tokenizer: None,
   }
   tput(
     s,
@@ -706,6 +708,7 @@ test "Q1 parse stats and seg_may_match" {
     vector_dtype: "",
     k1: 0.0,
     b: 0.0,
+    fts_tokenizer: None,
   }
   let man : @format.ManifestData = {
     id: "",
@@ -760,6 +763,7 @@ test "Q1 dict/bitmap filter matchers avoid expansion" {
     vector_dtype: "",
     k1: 0.0,
     b: 0.0,
+    fts_tokenizer: None,
   }
   let man : @format.ManifestData = {
     id: "",
@@ -964,6 +968,7 @@ test "Q1 metadata cache hits and reloads on head change" {
     vector_dtype: n1.meta.vector_dtype,
     k1: n1.meta.k1,
     b: n1.meta.b,
+    fts_tokenizer: n1.meta.fts_tokenizer,
   }
   tput(
     s,
@@ -1039,6 +1044,7 @@ test "Q1 global IVF partition path matches per-segment" {
     vector_dtype: n0.meta.vector_dtype,
     k1: n0.meta.k1,
     b: n0.meta.b,
+    fts_tokenizer: n0.meta.fts_tokenizer,
   }
   tput(
     s,

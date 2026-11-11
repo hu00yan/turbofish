@@ -241,6 +241,7 @@ test "ingest small batch: objects complete and columns roundtrip" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -419,6 +420,7 @@ test "second ingest appends and reuses centroids" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs1 = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs1)
@@ -513,6 +515,7 @@ test "delete_docs merges and dedups tombstones" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -588,6 +591,7 @@ test "delete_docs on missing namespace raises" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   try {
     delete_docs(store, cfg, [1UL])
@@ -611,6 +615,7 @@ test "delete_docs before first publish raises" {
     vector_dtype: "f16",
     k1: 1.2,
     b: 0.75,
+    fts_tokenizer: None,
   }
   store.put(
     "fresh/_meta/namespace.json",
@@ -633,6 +638,7 @@ test "delete_docs before first publish raises" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   try {
     delete_docs(store, cfg, [1UL])
@@ -678,6 +684,7 @@ test "B1 stats, dense id, dict/bitmap encodings, sq8 and blockmax" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -770,6 +777,7 @@ test "B1 vec_storage pq16 writes SPNDPQP1 parts" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   ingest(store, cfg, mkdocs(20, 8, 1UL, 9U))
   let man = head_manifest_of(store, "b1pq")
@@ -812,6 +820,7 @@ test "B1 compact merges segments and physicalizes tombstones" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -872,6 +881,7 @@ test "B1 CAS conflict: stale writer loses, build reports CommitConflict" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   ingest(store, cfg, mkdocs(8, 8, 1UL, 7U))
   let h1 = head_manifest_of(store, "b1cas").id
@@ -1101,6 +1111,7 @@ test "B1 normalize_vecs stores unit vectors and meta flag" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   ingest(store, cfg, mkdocs(12, 8, 1UL, 7U))
   let man = head_manifest_of(store, "b1n")
@@ -1145,6 +1156,7 @@ test "B1 delete_docs writes roaring tombstone object" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   ingest(store, cfg, mkdocs(20, 8, 1UL, 7U))
   delete_docs(store, cfg, [2UL, 4UL, 999UL])
@@ -1182,6 +1194,7 @@ test "B1 blockstats stores 256-row ts min/max" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1217,6 +1230,7 @@ test "B1 global vec parts merge segments" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   ingest(store, cfg, mkdocs(20, 8, 1UL, 7U))
   let man = head_manifest_of(store, "b1g")
@@ -1277,6 +1291,7 @@ test "B1 seg meta embeds FTS bloom" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1321,6 +1336,7 @@ test "B1 compact global single-copy keeps one generation" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1388,6 +1404,7 @@ test "B1 no-CAS store falls back to append-only head log" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1423,6 +1440,7 @@ test "B1 publish_head uses build baseline, not publish-time head" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   ingest(store, cfg, mkdocs(8, 8, 1UL, 7U))
   let base = head_manifest_of(store, "b1base")
@@ -1474,6 +1492,7 @@ test "B1 legacy namespace without head log can still publish" {
     global_vec_parts: false,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1824,6 +1843,7 @@ test "S1 ingest_delta appends one delta and leaves base untouched" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   // 第一次：全量 base（旧 ingest 行为不变：global_gen = None，单向全量代）
   ingest(store, cfg, mkdocs(400, 8, 1UL, 7U))
@@ -1942,6 +1962,7 @@ test "S1 ingest_delta without old global writes full base" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   // 首次写者用 ingest_delta：没有旧 global ⇒ 全量 base，deltas 为空
   ingest_delta(store, cfg, mkdocs(16, 8, 1UL, 7U))
@@ -2071,6 +2092,7 @@ test "S2b ingest after ingest_delta keeps delta rows in new base" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)
@@ -2160,6 +2182,7 @@ test "S2b compact reads global delta chain and folds it into one base" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)
@@ -2238,6 +2261,7 @@ test "S3 ingest_delta auto compacts global chain at third delta" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)
@@ -2316,6 +2340,7 @@ test "S3 compact_global folds one delta and no-ops on empty chain" {
     global_vec_parts: true,
     write_fts_bloom: true,
     global_pack_size: 1,
+    fts_tokenizer: @core.Word,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)

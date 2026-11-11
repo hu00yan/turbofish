@@ -1,0 +1,22 @@
+import {
+  "turbofish/core",
+  "turbofish/store",
+  "turbofish/format",
+  "turbofish/build",
+  "turbofish/query",
+  "turbofish/s3store",
+  "turbofish/s3http",
+  "moonbitlang/core/env",
+  "moonbitlang/core/bench",
+}
+
+options(
+  "is-main": true,
+  link: {
+    "native": {
+      // macOS 与 Linux 都用系统 libcurl（macOS 自带 /usr/lib/libcurl.4.dylib；
+      // Linux 需 libcurl4-openssl-dev）。不再依赖 Homebrew curl 的绝对路径。
+      "cc-link-flags": "-lcurl",
+    },
+  },
+)

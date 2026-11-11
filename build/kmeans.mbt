@@ -13,7 +13,7 @@ fn append_normalized(out : Array[Float], v : Array[Float], dim : Int) -> Unit {
   let norm = @core.norm_f32(v, 0, dim)
   for i in 0..<dim {
     if norm > 0.0 {
-      out.push((v[i].to_double() / norm).to_float())
+      out.push(Float::from_double(v[i].to_double() / norm))
     } else {
       out.push(v[i])
     }
@@ -26,7 +26,7 @@ fn normalize_center(data : Array[Float], base : Int, dim : Int) -> Unit {
   let norm = @core.norm_f32(data, base, dim)
   if norm > 0.0 && norm != 1.0 {
     for i in 0..<dim {
-      data[base + i] = (data[base + i].to_double() / norm).to_float()
+      data[base + i] = Float::from_double(data[base + i].to_double() / norm)
     }
   }
 }
@@ -51,16 +51,12 @@ pub fn train_centroids(
     return { dim, data: [] }
   }
   let n = docs.length()
-  let sample_n = if nlist * 8 < n {
-    nlist * 8
-  } else {
-    n
-  }
-  let k = if nlist < sample_n {
-    nlist
-  } else {
-    sample_n
-  }
+  // 样本量 = min(max(nlist*8, 8192), N)：旧上限 nlist*8 会让小 nlist（如 64 → 512 条）
+  // 的中心质量成为 recall 瓶颈（1M 精确 GT 实测：nlist=64 封顶 0.916）；下限 8192
+  // 保证中心见到足够分布。8192×nlist×dim×iters 的训练量在 native 上秒级。
+  let want = if nlist * 8 < 8192 { 8192 } else { nlist * 8 }
+  let sample_n = if want < n { want } else { n }
+  let k = if nlist < sample_n { nlist } else { sample_n }
   let rng = @core.Rng::new(42U)
   // 部分 Fisher-Yates：idx 前 sample_n 个即确定性采样结果
   let idx : Array[Int] = Array::new(capacity=n)
@@ -69,7 +65,8 @@ pub fn train_centroids(
   }
   for i in 0..<sample_n {
     // 注意 UInt::to_int 是位重解释：先在 UInt 域取模再转 Int，避免高位翻负
-    let j = i + (rng.next_u32() % (n - i).to_uint()).to_int()
+    let j = i +
+      (rng.next_u32() % (n - i).reinterpret_as_uint()).reinterpret_as_int()
     let t = idx[i]
     idx[i] = idx[j]
     idx[j] = t
@@ -116,13 +113,15 @@ pub fn train_centroids(
     for c in 0..<k {
       let base = c * dim
       if counts[c] == 0 {
-        let v = docs[idx[(rng.next_u32() % sample_n.to_uint()).to_int()]].vector
+        let v = docs[idx[(rng.next_u32() % sample_n.reinterpret_as_uint()).reinterpret_as_int()]].vector
         for f in 0..<dim {
           data[base + f] = v[f]
         }
       } else {
         for f in 0..<dim {
-          data[base + f] = (sums[base + f] / counts[c].to_double()).to_float()
+          data[base + f] = Float::from_double(
+            sums[base + f] / counts[c].to_double(),
+          )
         }
       }
       normalize_center(data, base, dim)

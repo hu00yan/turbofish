@@ -981,7 +981,7 @@ fn run() -> Unit raise @core.SpndError {
     "docs=\{docs_n} dim=\{dim} batch=\{batch_size} queries=\{nq} seed=\{seed} => batches=\{batches}",
   )
   println(
-    "cfg: single_copy(global IVF, normalize_vecs) segment_rows=2000 nlist=\{nlist} vector_dim=\{dim} use_f16=true",
+    "cfg: single_copy(global IVF, normalize_vecs) segment_rows=2000 nlist=\{nlist} vector_dim=\{dim} use_f16=\{cfg.use_f16} pack=\{cfg.global_pack_size}",
   )
   println("vec nprobe=\{nprobe} (BENCH_NPROBE)")
   println(

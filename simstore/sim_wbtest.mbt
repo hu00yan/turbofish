@@ -1,3 +1,6 @@
+///|
+using @test {assert_eq}
+
 // SimStore 白盒测试（NOTES2.md 第 6 节工人 S 验收标准）：
 // 计费数学精确、延迟确定性、采样分布、三档行为、LRU 逐出、get_range、CAS、存储费。
 
@@ -56,7 +59,10 @@ test "billing exact: 1000 PUTs = $0.005; CAS failure also billed" {
   assert_eq(abs_f64(c.bill_put - 0.005) < 1.0e-12, true)
   // CAS 失败也计一次 PUT 费（真 S3 条件写失败也是一次请求）
   s.reset_cost()
-  assert_eq(s.put_if_match("ns/_segments/seg0/rows/id.bin", Some("v999"), b"x"), false)
+  assert_eq(
+    s.put_if_match("ns/_segments/seg0/rows/id.bin", Some("v999"), b"x"),
+    false,
+  )
   let c2 = s.cost()
   assert_eq(c2.puts, 1)
   assert_eq(abs_f64(c2.bill_put - 0.005 / 1000.0) < 1.0e-12, true)
@@ -162,7 +168,10 @@ test "three-tier: resident mem_us exact, cold read, NVMe warm, cold(), prime_nvm
   assert_eq(abs_f64(c1.bill_get - 0.0004 / 1000.0) < 1.0e-15, true)
   assert_eq(c1.nvme_hits, 0)
   // TTFB 对数正态样本可能低于 p50，但必在 S3 量级（几十 ms），远大于 NVMe 的 ~80µs
-  assert_eq(c1.total_latency_us > 5000.0 && c1.total_latency_us < 200000.0, true)
+  assert_eq(
+    c1.total_latency_us > 5000.0 && c1.total_latency_us < 200000.0,
+    true,
+  )
   // —— 第 2 档：第二次读 NVMe 命中，无 GET 费 ——
   let _ = s.get("ns/_segments/seg0/rows/id.bin")
   let c2 = s.cost()
@@ -326,7 +335,7 @@ test "prime_nvme prefers small objects; oversized object never cached" {
 }
 
 ///|
-test "egress billing folds into bill_get when enabled" {
+test "egress billing is separate from request bill" {
   let base = SimConfig::aws_default(12U)
   let cfg : SimConfig = { ..base, egress_enabled: true }
   let s = SimStore::new(cfg)
@@ -335,7 +344,287 @@ test "egress billing folds into bill_get when enabled" {
   s.reset_cost()
   let _ = s.get("ns/_segments/seg0/rows/id.bin")
   let c = s.cost()
-  // GET 请求费 + (1/1024) GB × $0.09
-  let expected = 0.0004 / 1000.0 + 0.09 / 1024.0
-  assert_eq(abs_f64(c.bill_get - expected) < 1.0e-12, true)
+  // GET 请求费与出口费分开记；bill_total 是两者之和。
+  assert_eq(abs_f64(c.bill_get - 0.0004 / 1000.0) < 1.0e-12, true)
+  assert_eq(abs_f64(c.bill_egress - 0.09 / 1024.0) < 1.0e-12, true)
+  assert_eq(
+    abs_f64(c.bill_total - (0.0004 / 1000.0 + 0.09 / 1024.0)) < 1.0e-12,
+    true,
+  )
+}
+
+///|
+test "concurrency makespan models parallel fetches" {
+  let base = SimConfig::aws_default(20U)
+  let cfg : SimConfig = { ..base, concurrency: 4, nvme_capacity_bytes: 0 }
+  let s = SimStore::new(cfg)
+  for i in 0..<100 {
+    s.put("obj/\{i}.bin", b"xxxxxxxx")
+  }
+  s.reset_cost()
+  for i in 0..<100 {
+    let _ = s.get("obj/\{i}.bin")
+  }
+  let c = s.cost()
+  assert_eq(c.concurrent_latency_us < c.total_latency_us, true)
+  // 4 worker 的 makespan 应远低于顺序累加（至少 2x 加速）
+  assert_eq(c.total_latency_us / c.concurrent_latency_us > 2.0, true)
+  // concurrency=1 时两者相等
+  let base1 = SimConfig::aws_default(21U)
+  let cfg1 : SimConfig = { ..base1, concurrency: 1, nvme_capacity_bytes: 0 }
+  let s1 = SimStore::new(cfg1)
+  s1.put("a.bin", b"x")
+  s1.reset_cost()
+  let _ = s1.get("a.bin")
+  let c1 = s1.cost()
+  assert_eq(c1.concurrent_latency_us, c1.total_latency_us)
+}
+
+///|
+test "latency injection: jitter/spike/retry deterministic" {
+  let base = SimConfig::aws_default(30U)
+  let cfg : SimConfig = {
+    ..base,
+    nvme_capacity_bytes: 0,
+    wan_jitter_p50_us: 2000.0,
+    spike_probability: 0.5,
+    spike_p50_us: 50000.0,
+    retry_probability: 0.5,
+    retry_p50_us: 10000.0,
+  }
+  let mk = fn() -> SimStore {
+    let s = SimStore::new(cfg)
+    s.put("warm", b"x")
+    s.reset_cost()
+    for i in 0..<100 {
+      let _ = s.get("missing/\{i}.bin")
+    }
+    s
+  }
+  let s1 = mk()
+  let s2 = mk()
+  let c1 = s1.cost()
+  let c2 = s2.cost()
+  assert_eq(c1.total_latency_us, c2.total_latency_us)
+  assert_eq(c1.retries, c2.retries)
+  assert_eq(c1.retries > 0, true)
+  // 额外延迟 + spike/retry 必须显著高于纯 TTFB
+  assert_eq(c1.total_latency_us > 100.0 * 30000.0, true)
+  // 关闭注入时行为与旧一致（0 额外延迟/0 retry）
+  let plain = SimStore::new(SimConfig::aws_default(31U))
+  plain.put("warm", b"x")
+  plain.reset_cost()
+  for i in 0..<100 {
+    let _ = plain.get("missing/\{i}.bin")
+  }
+  let cp = plain.cost()
+  assert_eq(cp.retries, 0)
+  assert_eq(cp.total_latency_us < c1.total_latency_us, true)
+}
+
+///|
+test "egress billing: enabled S3 read adds separate bill_egress" {
+  let base = SimConfig::aws_default(77U)
+  let cfg : SimConfig = { ..base, egress_enabled: true }
+  let s = SimStore::new(cfg)
+  let key = "ns/_segments/seg0/rows/id.bin"
+  s.put(key, Bytes::make(1048576, b'\x01')) // 1 MiB
+  s.cold()
+  s.reset_cost()
+  let _ = s.get(key)
+  let c = s.cost()
+  assert_eq(c.s3_gets, 1)
+  // 1 MiB / 1 GiB * $0.09 = 0.09 / 1024
+  assert_eq(abs_f64(c.bill_egress - 0.09 / 1024.0) < 1.0e-15, true)
+  assert_eq(c.bill_requests_total, 0.0004 / 1000.0)
+  assert_eq(
+    abs_f64(c.bill_total - (0.0004 / 1000.0 + 0.09 / 1024.0)) < 1.0e-15,
+    true,
+  )
+}
+
+///|
+test "fault injection: put/get/list/delete failures are counted and observable" {
+  let base = SimConfig::aws_default(78U)
+  let cfg : SimConfig = {
+    ..base,
+    put_error_probability: 1.0,
+    get_error_probability: 1.0,
+    list_error_probability: 1.0,
+    delete_error_probability: 1.0,
+  }
+  let s = SimStore::new(cfg)
+  let key = "ns/_segments/seg0/rows/id.bin"
+  s.put(key, b"v")
+  assert_eq(s.get(key), None)
+  assert_eq(s.list("ns/"), [])
+  s.delete(key)
+  let c = s.cost()
+  assert_eq(c.errors, 4) // put + get + list + delete
+  // 失败请求仍然计费：1 PUT + 1 GET + 1 LIST + 1 DELETE
+  assert_eq(c.puts, 1)
+  assert_eq(c.s3_gets, 1)
+  assert_eq(c.lists, 1)
+  assert_eq(c.deletes, 1)
+}
+
+///|
+test "turbopuffer scan bill: 1.28GB minimum and $1/PB above it" {
+  assert_eq(abs_f64(tpu_scan_bill(0) - 1.28e-6) < 1.0e-18, true)
+  assert_eq(abs_f64(tpu_scan_bill(1024) - 1.28e-6) < 1.0e-18, true)
+  let two_gb = 2000000000L
+  let bill = tpu_scan_bill(two_gb)
+  assert_eq(bill > 1.99e-6 && bill < 2.01e-6, true)
+}
+
+///|
+test "resident disabled: _meta/ falls through to S3 (s3_gets grows)" {
+  let s = SimStore::new(SimConfig::aws_default(50U))
+  s.put("ns/_meta/namespace.json", b"meta")
+  // resident enabled：内存档，不打 S3
+  s.reset_cost()
+  let _ = s.get("ns/_meta/namespace.json")
+  assert_eq(s.cost().s3_gets, 0)
+  // 关闭后同一 SimStore 上 _meta/ 也走 S3；set_resident_enabled(false)
+  // 会 evict resident 类，下面的 cold() 只是清数据面，不是必须的。
+  s.set_resident_enabled(false)
+  s.cold()
+  s.reset_cost()
+  let _ = s.get("ns/_meta/namespace.json")
+  let c1 = s.cost()
+  assert_eq(c1.s3_gets, 1)
+  assert_eq(c1.nvme_hits, 0) // 冷读，首次必打 S3
+  assert_eq(c1.total_latency_us == 2.0, false) // 不再是 mem_us
+  // resident miss 也不再是内存档：404 也是真实 S3 GET
+  let _ = s.get("ns/_meta/nope.json")
+  assert_eq(s.cost().s3_gets, 2)
+  // get_range 同样穿透（cold 后无 NVMe/区间缓存）
+  s.cold()
+  let _ = s.get_range("ns/_meta/namespace.json", 0, 2)
+  assert_eq(s.cost().s3_gets, 3)
+  // 重新打开恢复内存档
+  s.set_resident_enabled(true)
+  s.reset_cost()
+  let _ = s.get("ns/_meta/namespace.json")
+  let c2 = s.cost()
+  assert_eq(c2.s3_gets, 0)
+  assert_eq(c2.total_latency_us, 2.0)
+}
+
+///|
+test "require_latency: aws_default passes, zero TTFB raises Corrupt" {
+  let s = SimStore::new(SimConfig::aws_default(51U))
+  assert_eq(SimConfig::aws_default(51U).latency_ready(), true)
+  let ok = try {
+    s.require_latency()
+    true
+  } catch {
+    _ => false
+  }
+  assert_eq(ok, true)
+  let base = SimConfig::aws_default(51U)
+  let cfg : SimConfig = { ..base, s3_get_ttfb_p50_us: 0.0 }
+  assert_eq(cfg.latency_ready(), false)
+  let s0 = SimStore::new(cfg)
+  let raised = try {
+    s0.require_latency()
+    false
+  } catch {
+    @core.Corrupt(msg) => msg.has_prefix("SimStore latency disabled")
+    _ => false
+  }
+  assert_eq(raised, true)
+  // 并发度 < 1 同样不满足前提
+  let cfg2 : SimConfig = { ..base, concurrency: 0 }
+  assert_eq(cfg2.latency_ready(), false)
+}
+
+///|
+test "admit_all is a synonym for prime_nvme; label marks all-hot" {
+  let mk = fn() -> SimStore {
+    let base = SimConfig::aws_default(52U)
+    let cfg : SimConfig = { ..base, nvme_capacity_bytes: 150 }
+    let s = SimStore::new(cfg)
+    s.put("ns/_segments/segA/rows/id.bin", Bytes::make(100, b'\x01'))
+    s.put("ns/_segments/segB/rows/id.bin", Bytes::make(100, b'\x02'))
+    s.put("ns/_segments/segC/fts/dir.bin", Bytes::make(50, b'\x03'))
+    s
+  }
+  let s1 = mk()
+  let s2 = mk()
+  s1.prime_nvme()
+  s2.admit_all()
+  s1.reset_cost()
+  s2.reset_cost()
+  for k in [
+    "ns/_segments/segC/fts/dir.bin", // 先读已装入的两个，再读未装入的
+    "ns/_segments/segA/rows/id.bin",
+    "ns/_segments/segB/rows/id.bin",
+  ] {
+    let _ = s1.get(k)
+    let _ = s2.get(k)
+  }
+  let c1 = s1.cost()
+  let c2 = s2.cost()
+  // 容量 150：只装得下 tiny(50) + 一个 100B → 两次命中、一次冷读，两者完全一致
+  assert_eq(c1.nvme_hits, 2)
+  assert_eq(c1.s3_gets, 1)
+  assert_eq(c1.nvme_hits, c2.nvme_hits)
+  assert_eq(c1.s3_gets, c2.s3_gets)
+  assert_eq(c1.total_latency_us, c2.total_latency_us)
+  // 标签直接供 benchmark 打标
+  assert_eq(
+    SimStore::admit_all_label(),
+    "all-hot (synthetic upper bound, not a workload-achievable warm state)",
+  )
+}
+
+///|
+test "cache_stats: five fields incl nvme_hits sane around hits" {
+  let s = SimStore::new(SimConfig::aws_default(53U))
+  let key = "ns/_segments/seg0/rows/id.bin"
+  s.put(key, Bytes::make(100, b'\x01'))
+  s.cold()
+  s.reset_cost()
+  let (n0, b0, r0, l0, h0, nb0) = s.cache_stats()
+  assert_eq(n0, 0)
+  assert_eq(b0, 0)
+  assert_eq(r0, 0)
+  assert_eq(l0, 0)
+  assert_eq(h0, 0)
+  assert_eq(nb0, 0)
+  // 冷读：1 次 S3、100 逻辑字节、回填后 nvme 1 对象 / 100 字节
+  let _ = s.get(key)
+  let (n1, b1, r1, l1, h1, nb1) = s.cache_stats()
+  assert_eq(n1, 1)
+  assert_eq(b1, 100)
+  assert_eq(r1, 1)
+  assert_eq(l1, 100)
+  assert_eq(h1, 0)
+  assert_eq(nb1, 0)
+  // 命中：S3 读数不变，逻辑读翻倍（每次逻辑读摊到的 S3 读远小于 1）
+  let _ = s.get(key)
+  let (n2, b2, r2, l2, h2, nb2) = s.cache_stats()
+  assert_eq(n2, 1)
+  assert_eq(b2, 100)
+  assert_eq(r2, 1)
+  assert_eq(l2, 200)
+  assert_eq(h2, 1)
+  assert_eq(nb2, 100)
+}
+
+///|
+test "resident disabled: put does not re-admit resident key into NVMe" {
+  let s = SimStore::new(SimConfig::aws_default(54U))
+  s.set_resident_enabled(false)
+  s.reset_cost()
+  s.put("ns/_meta/namespace.json", b"meta")
+  // 写入后不应在 NVMe；紧接着 get 必须走 S3
+  let c0 = s.cost()
+  let (n0, _, _, _, _, _) = s.cache_stats()
+  assert_eq(n0, 0)
+  let _ = s.get("ns/_meta/namespace.json")
+  let c1 = s.cost()
+  assert_eq(c1.s3_gets > c0.s3_gets, true)
+  s.set_resident_enabled(true)
 }

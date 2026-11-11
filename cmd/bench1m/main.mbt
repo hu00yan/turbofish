@@ -576,8 +576,8 @@ fn measure(
   let mut prev_lat = 0.0
   let mut prev_gets = 0
   let mut prev_lists = 0
-  let mut prev_s3 = 0
-  let mut prev_log = 0
+  let mut prev_s3 : Int64 = 0L
+  let mut prev_log : Int64 = 0L
   let mut prev_err = 0
   for i in 0..<n {
     let idx = if cold_meta { i } else { burn + i }
@@ -591,8 +591,10 @@ fn measure(
     lat.push(c.total_latency_us - prev_lat)
     gets.push(c.s3_gets - prev_gets)
     lists.push(c.lists - prev_lists)
-    s3b.push(c.bytes_s3_read - prev_s3)
-    logical.push(c.bytes_logical_read - prev_log)
+    // 累计计数器已扩为 Int64（大 pack 单对象 >130MB，100 查询累计会溢出 32 位）；
+    // 单查询差值仍 < 2^31，转回 Int 保持下游不变。
+    s3b.push((c.bytes_s3_read - prev_s3).to_int())
+    logical.push((c.bytes_logical_read - prev_log).to_int())
     prev_lat = c.total_latency_us
     prev_gets = c.s3_gets
     prev_lists = c.lists
@@ -605,7 +607,7 @@ fn measure(
   let c = store.inner.cost()
   let mut tpu = 0.0
   for b in logical {
-    tpu += @simstore.tpu_scan_bill(b)
+    tpu += @simstore.tpu_scan_bill(b.to_int64())
   }
   {
     cls,

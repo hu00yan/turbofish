@@ -11,6 +11,13 @@
 //   optimized: BuildConfig::single_copy（global IVF + normalize + bloom）
 //              + MetadataCache/open_cached
 // 统计每种查询的 p50 和 HTTP 请求数。
+//
+// R2 计费口径（https://developers.cloudflare.com/r2/pricing/）：
+//   Class A $4.50/1M：PutObject/PutBucket/POST/ListObjects(ListObjectsV2)/CopyObject 等
+//   Class B $0.36/1M：GetObject/HeadObject/HeadBucket/GetBucketLocation 等
+//   免费：DeleteObject/DeleteBucket/AbortMultipartUpload
+// CountingTransport 按 HTTP method + LIST 查询特征分类，并按场景输出
+// 次数 × 单价 = $ 的成本表（baseline vs optimized）。
 
 ///|
 fn env_or(key : String, fallback : String) -> String {
@@ -67,7 +74,65 @@ fn mkdocs(n : Int, dim : Int) -> Array[@core.Doc] {
 }
 
 ///|
-/// 计数 HTTP transport：委托 CurlTransport，并记录请求数/响应字节。
+/// R2 计费单价（每 100 万次请求，USD）：
+///   Class A（List/Put/Copy/Post 等"改状态"操作）$4.50
+///   Class B（Get/Head 等"读状态"操作）$0.36
+///   Delete 类操作免费（DeleteObject/DeleteBucket/AbortMultipartUpload）
+/// 来源：https://developers.cloudflare.com/r2/pricing/
+const R2_CLASS_A_USD_PER_M : Double = 4.50
+
+///|
+const R2_CLASS_B_USD_PER_M : Double = 0.36
+
+///|
+/// 按操作类型累计的请求数（cumulative，不受 reset 影响）。
+/// 分类规则（R2 口径，按 HTTP method + 查询特征）：
+///   PUT  → PutObject/PutBucket（Class A）
+///   POST →（Class A；本探针目前不产生 POST，保留口径）
+///   GET  + ?list-type=… → ListObjectsV2（Class A）
+///   GET  其它 → GetObject/GetBucketLocation（Class B）
+///   HEAD → HeadObject/HeadBucket（Class B）
+///   DELETE → DeleteObject（免费，单列）
+struct OpCounts {
+  mut puts : Int
+  mut posts : Int
+  mut lists : Int
+  mut gets : Int
+  mut heads : Int
+  mut deletes : Int
+}
+
+///|
+fn OpCounts::new() -> OpCounts {
+  { puts: 0, posts: 0, lists: 0, gets: 0, heads: 0, deletes: 0 }
+}
+
+///|
+/// after - before（场景级 delta）
+fn OpCounts::delta(before : OpCounts, after : OpCounts) -> OpCounts {
+  {
+    puts: after.puts - before.puts,
+    posts: after.posts - before.posts,
+    lists: after.lists - before.lists,
+    gets: after.gets - before.gets,
+    heads: after.heads - before.heads,
+    deletes: after.deletes - before.deletes,
+  }
+}
+
+///|
+fn OpCounts::class_a(self : OpCounts) -> Int {
+  self.puts + self.posts + self.lists
+}
+
+///|
+fn OpCounts::class_b(self : OpCounts) -> Int {
+  self.gets + self.heads
+}
+
+///|
+/// 计数 HTTP transport：委托 CurlTransport，并记录请求数/响应字节 +
+/// R2 Class A/B 计费口径的操作分类（cum_* 累计，reset 不清零）。
 struct CountingTransport {
   inner : @s3http.CurlTransport
   mut reqs : Int
@@ -75,11 +140,12 @@ struct CountingTransport {
   mut puts : Int
   mut bytes : Int
   mut head_reqs : Int
+  cum : OpCounts
 }
 
 ///|
 fn CountingTransport::new(inner : @s3http.CurlTransport) -> CountingTransport {
-  { inner, reqs: 0, gets: 0, puts: 0, bytes: 0, head_reqs: 0 }
+  { inner, reqs: 0, gets: 0, puts: 0, bytes: 0, head_reqs: 0, cum: OpCounts::new() }
 }
 
 ///|
@@ -89,6 +155,18 @@ fn CountingTransport::reset(self : CountingTransport) -> Unit {
   self.puts = 0
   self.bytes = 0
   self.head_reqs = 0
+}
+
+///|
+fn CountingTransport::cumulative(self : CountingTransport) -> OpCounts {
+  {
+    puts: self.cum.puts,
+    posts: self.cum.posts,
+    lists: self.cum.lists,
+    gets: self.cum.gets,
+    heads: self.cum.heads,
+    deletes: self.cum.deletes,
+  }
 }
 
 ///|
@@ -109,9 +187,91 @@ pub impl @s3store.HttpTransport for CountingTransport with fn execute(
   } else if http_method == "PUT" {
     self.puts += 1
   }
+  // R2 计费分类（cumulative）
+  if http_method == "PUT" {
+    self.cum.puts += 1
+  } else if http_method == "POST" {
+    self.cum.posts += 1
+  } else if http_method == "DELETE" {
+    self.cum.deletes += 1
+  } else if http_method == "HEAD" {
+    self.cum.heads += 1
+  } else if http_method == "GET" {
+    // ListObjectsV2：GET /{bucket}?list-type=2&…（GET 桶根 + list-type 查询）
+    match url.find("list-type=") {
+      Some(_) => self.cum.lists += 1
+      None => self.cum.gets += 1
+    }
+  }
   let (st, hs, b) = self.inner.execute(http_method, url, headers, body)
   self.bytes += b.length()
   (st, hs, b)
+}
+
+///|
+/// 右对齐填充 ASCII 空格（成本表列对齐用；表内全是 ASCII）
+fn pad_right(s : String, w : Int) -> String {
+  let n = s.length()
+  if n >= w {
+    return s
+  }
+  let mut out = s
+  for _ in n..<w {
+    out = out + " "
+  }
+  out
+}
+
+///|
+/// 定点格式化（digits 位小数，四舍五入），避免 Double Show 的可变长度。
+fn fmt_dec(x : Double, digits : Int) -> String {
+  if digits <= 0 {
+    return (x + 0.5).to_int().to_string()
+  }
+  let mut p = 1.0
+  for _ in 0..<digits {
+    p = p * 10.0
+  }
+  let n = (x * p + 0.5).to_int64()
+  let pi = p.to_int64()
+  let mut frac = (n % pi).to_int()
+  let mut fbuf = ""
+  for _ in 0..<digits {
+    fbuf = "\{frac % 10}" + fbuf
+    frac = frac / 10
+  }
+  "\{(n / pi).to_int()}.\{fbuf}"
+}
+
+///|
+/// 输出单个场景的 R2 成本表：各操作次数 × 单价（$/1M）= 实际 $
+fn print_r2_cost_table(label : String, c : OpCounts) -> Unit {
+  let rows : Array[(String, Int, Double, String)] = [
+    ("PUT   Class A", c.puts, R2_CLASS_A_USD_PER_M, "$4.50/1M"),
+    ("POST  Class A", c.posts, R2_CLASS_A_USD_PER_M, "$4.50/1M"),
+    ("LIST  Class A", c.lists, R2_CLASS_A_USD_PER_M, "$4.50/1M"),
+    ("GET   Class B", c.gets, R2_CLASS_B_USD_PER_M, "$0.36/1M"),
+    ("HEAD  Class B", c.heads, R2_CLASS_B_USD_PER_M, "$0.36/1M"),
+    ("DELETE 免费", c.deletes, 0.0, "free"),
+  ]
+  println(
+    "  [R2 成本表 \{label}] 次数 × 单价 = $（Class A $4.50/1M，Class B $0.36/1M，DELETE 免费）",
+  )
+  let mut total_usd = 0.0
+  for r in rows {
+    let usd = r.1.to_double() * r.2 / 1000000.0
+    total_usd += usd
+    println(
+      "    \{pad_right(r.0, 14)} n=\{pad_right(r.1.to_string(), 6)} \{pad_right(r.3, 9)} $\{fmt_dec(usd, 6)}",
+    )
+  }
+  let ca = c.class_a()
+  let cb = c.class_b()
+  let usd_a = ca.to_double() * R2_CLASS_A_USD_PER_M / 1000000.0
+  let usd_b = cb.to_double() * R2_CLASS_B_USD_PER_M / 1000000.0
+  println(
+    "    合计: Class A=\{ca} ($\{fmt_dec(usd_a, 6)})  Class B=\{cb} ($\{fmt_dec(usd_b, 6)})  总计 $\{fmt_dec(total_usd, 6)}",
+  )
 }
 
 ///|
@@ -131,6 +291,7 @@ fn run_case(
   use_cache : Bool,
 ) -> Unit raise @core.SpndError {
   let ns = cfg.ns
+  let c0 = transport.cumulative()
   transport.reset()
   let ti = @bench.monotonic_clock_start()
   @build.ingest(store, cfg, docs)
@@ -184,6 +345,8 @@ fn run_case(
   for key in store.list("\{ns}/") {
     store.delete(key)
   }
+  // 场景级 R2 成本表：ingest + 查询 + 清理全程的 HTTP 分类计数
+  print_r2_cost_table(label, OpCounts::delta(c0, transport.cumulative()))
 }
 
 ///|

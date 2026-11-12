@@ -1,0 +1,36 @@
+{
+  "name": "@turbofish/client",
+  "version": "0.1.0",
+  "description": "Minimal TypeScript client for the turbofish HTTP API v0",
+  "type": "module",
+  "main": "dist/client.js",
+  "types": "dist/client.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/",
+    "test:unit": "node --test test/client.test.ts",
+    "e2e": "node test/e2e.mts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "turbofish",
+    "search",
+    "vector",
+    "fts"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

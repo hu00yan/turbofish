@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turbofish-client"
+version = "0.1.0"
+description = "Minimal pure-stdlib Python client for the turbofish HTTP API v0"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "turbofish" }]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+]
+keywords = ["turbofish", "search", "vector", "fts"]
+
+[tool.setuptools]
+# Single-file client module; keeps `pip install -e sdk/python` working.
+py-modules = ["turbofish_client"]

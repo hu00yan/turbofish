@@ -1,7 +1,9 @@
 import {
-  "turbofish/core" @core,
-  "turbofish/store" @store,
-  "turbofish/format" @format,
-  "moonbitlang/core/encoding/utf8" @utf8,
-  "moonbitlang/core/json" @json,
+  "moonbitlang/core/test",
+  "turbofish/core",
+  "turbofish/store",
+  "turbofish/format",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
 }

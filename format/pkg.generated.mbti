@@ -1,0 +1,322 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/format"
+
+import {
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/json",
+  "turbofish/core",
+}
+
+// Values
+pub const BLK_MAGIC : String = "SPNDBLK1"
+
+pub const BLOCKSTATS_MAGIC : String = "SPNDBST1"
+
+pub const CEN_MAGIC : String = "SPNDCEN1"
+
+pub const COL_FLAG_BITMAP : Int32 = 2
+
+pub const COL_FLAG_DICT : Int32 = 1
+
+pub const COL_MAGIC : String = "SPNDCOL1"
+
+pub const COMPACT_FOOTER_MAGIC : String = "SPNDFOOT"
+
+pub const COMPACT_TRAILER_LEN : Int32 = 16
+
+pub const COMPACT_TRAILER_MAGIC : String = "CPT1"
+
+pub const DIR_MAGIC : String = "SPNDDIR1"
+
+pub const DT_BOOL : Int32 = 6
+
+pub const DT_F16 : Int32 = 7
+
+pub const DT_F32 : Int32 = 4
+
+pub const DT_I64 : Int32 = 3
+
+pub const DT_SQ8 : Int32 = 8
+
+pub const DT_STR : Int32 = 5
+
+pub const DT_U32 : Int32 = 2
+
+pub const DT_U64 : Int32 = 1
+
+pub const GLOBAL_PACK_MAGIC : String = "SPNDGVPK"
+
+pub const GLOBAL_VEC_MAGIC : String = "SPNDGVP1"
+
+pub const PART_MAGIC : String = "SPNDPRT1"
+
+pub const POS_MAGIC : String = "SPNDPOS1"
+
+pub const PQ_CB_MAGIC : String = "SPNDPQB1"
+
+pub const PQ_MAGIC : String = "SPNDPQP1"
+
+pub const PQ_SHARED_MAGIC : String = "SPNDPQS1"
+
+pub const ROAR_MAGIC : String = "SPNDROAR"
+
+pub const VEC_MAGIC : String = "SPNDVEC1"
+
+pub fn bloom_from_hex(Int32, Int32, String) -> Bloom raise @core.SpndError
+
+pub fn bloom_may_contain(Bloom, String) -> Bool
+
+pub fn bloom_to_hex(Bloom) -> String
+
+pub fn build_bloom(Array[String], Int32) -> Bloom
+
+pub fn decode_blockmax(Bytes) -> Array[Array[(Int32, Int32)]] raise @core.SpndError
+
+pub fn decode_blockstats(Bytes) -> (Int32, Int32, Array[(Int64, Int64)]) raise @core.SpndError
+
+pub fn decode_centroids(Bytes) -> Centroids raise @core.SpndError
+
+pub fn decode_col(Bytes) -> ColData raise @core.SpndError
+
+pub fn decode_col_dict(Bytes) -> (Array[String], Array[UInt16]) raise @core.SpndError
+
+pub fn decode_compact_part_docs(Bytes, CompactFooter) -> Array[@core.Doc] raise @core.SpndError
+
+pub fn decode_compact_part_footer(Bytes, Int32, Int32) -> CompactFooter raise @core.SpndError
+
+pub fn decode_compact_part_trailer(Bytes) -> (Int32, Int32) raise @core.SpndError
+
+pub fn decode_fts_dir(Bytes) -> Array[FtsDirEntry] raise @core.SpndError
+
+pub fn decode_global_pack_index(Bytes) -> Array[(Int32, Int32, Int32)] raise @core.SpndError
+
+pub fn decode_global_part(Bytes) -> GlobalVecPart raise @core.SpndError
+
+pub fn decode_global_part_at(Bytes, Int32, Int32) -> GlobalVecPart raise @core.SpndError
+
+pub fn decode_part(Bytes) -> VecPart raise @core.SpndError
+
+pub fn decode_part_sq8_raw(Bytes) -> (Array[Float], Array[Float], Array[UInt32]) raise @core.SpndError
+
+pub fn decode_pq_codebook(Bytes) -> (Int32, Int32, Int32, Array[Float]) raise @core.SpndError
+
+pub fn decode_pq_part(Bytes) -> PQPart raise @core.SpndError
+
+pub fn decode_pq_part_shared(Bytes) -> PQPart raise @core.SpndError
+
+pub fn decode_roaring(Bytes) -> Array[UInt64] raise @core.SpndError
+
+pub fn decode_vec_col(Bytes) -> (Int32, Array[Float]) raise @core.SpndError
+
+pub fn decode_vec_payload(Bytes, Int32, Int32, Int32) -> Array[Float] raise @core.SpndError
+
+pub fn demo_schema_json() -> Bytes
+
+pub fn encode_blockmax(Array[Array[(Int32, Int32)]], Int32) -> Bytes
+
+pub fn encode_blockstats(Array[(Int64, Int64)], Int32, Int32) -> Bytes
+
+pub fn encode_centroids(Centroids) -> Bytes
+
+pub fn encode_col(ColData) -> Bytes
+
+pub fn encode_col_bool_plain(Array[Bool]) -> Bytes
+
+pub fn encode_col_str_plain(Array[String]) -> Bytes
+
+pub fn encode_compact_part(Array[@core.Doc], Int32, Bool, Centroids?) -> (Bytes, CompactFooter)
+
+pub fn encode_fts(Array[(String, Array[Posting])]) -> FtsBuilt
+
+pub fn encode_global_pack(Array[(Int32, Bytes)]) -> Bytes
+
+pub fn encode_global_part(Int32, Array[(Int32, Int32)], Int32, Array[Float], Bool) -> Bytes
+
+pub fn encode_part(VecPart, Bool) -> Bytes
+
+pub fn encode_part_sq8(VecPart, Array[Float], Array[Float]) -> Bytes
+
+pub fn encode_part_sq8_auto(VecPart) -> Bytes
+
+pub fn encode_pq_codebook(Int32, Int32, Array[Float]) -> Bytes
+
+pub fn encode_pq_part(Array[Int32], Int32, Int32, Array[Float], Array[UInt32]) -> Bytes
+
+pub fn encode_pq_part_shared(Array[Int32], Int32, Int32, Array[UInt32]) -> Bytes
+
+pub fn encode_roaring(Array[UInt64]) -> Bytes
+
+pub fn encode_vec_col(Int32, Array[Float], Bool) -> Bytes
+
+pub fn encode_vec_col_sq8(Int32, Array[Float], Array[Float], Array[Float]) -> Bytes
+
+pub fn encode_vec_col_sq8_auto(Int32, Array[Float]) -> Bytes
+
+pub fn encode_vec_into(@buffer.Buffer, Int32, Array[Float], Bool) -> Unit
+
+pub fn fa_uvarint(FixedArray[Byte], Int32, Int32) -> (UInt32, Int32) raise @core.SpndError
+
+pub fn is_bitmap_bool(Bytes) -> Bool
+
+pub fn is_dict_col(Bytes) -> Bool
+
+pub fn is_pq_part(Bytes) -> Bool
+
+pub fn is_pq_shared_part(Bytes) -> Bool
+
+pub fn manifest_from_json(@json.Json) -> ManifestData raise @core.SpndError
+
+pub fn namespace_from_json(@json.Json) -> NamespaceMeta raise @core.SpndError
+
+pub fn read_compact_section(Bytes, CompactSection) -> Bytes raise @core.SpndError
+
+pub fn read_postings(Bytes, FtsDirEntry) -> Array[Posting] raise @core.SpndError
+
+pub fn roaring_contains(Bytes, UInt64) -> Bool
+
+pub fn sq8_params_of(Int32, Array[Float]) -> (Array[Float], Array[Float])
+
+pub fn term_compare(String, String) -> Int32
+
+pub fn vec_col_info(Bytes) -> (Int32, Int32, Int32) raise @core.SpndError
+
+// Errors
+
+// Types and methods
+pub(all) struct Bloom {
+  m : Int32
+  k : Int32
+  bits : FixedArray[UInt64]
+}
+
+#derive(@debug.Debug)
+pub(all) struct Centroids {
+  dim : Int32
+  data : Array[Float]
+}
+pub fn Centroids::k(Self) -> Int32
+
+#derive(@debug.Debug)
+pub(all) enum ColData {
+  ColU64(Array[UInt64])
+  ColU32(Array[Int32])
+  ColI64(Array[Int64])
+  ColF32(Array[Float])
+  ColStr(Array[String])
+  ColBool(Array[Bool])
+  ColVec(Int32, Array[Float])
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct CompactFooter {
+  sections : Array[CompactSection]
+}
+pub fn CompactFooter::get(Self, String) -> CompactSection?
+pub fn CompactFooter::has(Self, String) -> Bool
+
+#derive(Eq, @debug.Debug)
+pub(all) struct CompactSection {
+  name : String
+  offset : Int32
+  length : Int32
+  extra : Int32
+}
+
+#derive(@debug.Debug)
+pub(all) struct FtsBuilt {
+  dir : Bytes
+  postings : Bytes
+  entries : Array[FtsDirEntry]
+  doc_count : Int32
+}
+
+#derive(@debug.Debug)
+pub(all) struct FtsDirEntry {
+  term : String
+  offset : Int32
+  size : Int32
+  df : Int32
+}
+
+#derive(@debug.Debug)
+pub(all) struct GlobalGen {
+  base : String
+  deltas : Array[String]
+}
+
+#derive(@debug.Debug)
+pub(all) struct GlobalVecPart {
+  cid : Int32
+  rows : Array[(Int32, Int32)]
+  dim : Int32
+  data : Array[Float]
+}
+
+#derive(@debug.Debug)
+pub(all) struct ManifestData {
+  id : String
+  parent : String?
+  segments : Array[SegmentMeta]
+  deleted : Array[UInt64]
+  deleted_roar : String?
+  vec_global_version : String?
+  global_gen : GlobalGen?
+  centroid_version : String
+  num_docs : Int32
+  avg_doc_len : Double
+}
+pub fn ManifestData::to_json(Self) -> @json.Json
+
+#derive(@debug.Debug)
+pub(all) struct NamespaceMeta {
+  format : String
+  ns_name : String
+  head_manifest : String
+  vec_global_version : String?
+  distance_metric : String
+  vector_dim : Int32
+  vector_dtype : String
+  k1 : Double
+  b : Double
+  fts_tokenizer : String?
+}
+pub fn NamespaceMeta::to_json(Self) -> @json.Json
+
+#derive(@debug.Debug)
+pub(all) struct PQPart {
+  rows : Array[Int32]
+  dim : Int32
+  m : Int32
+  dsub : Int32
+  codebooks : Array[Float]
+  codes : Array[UInt32]
+}
+
+#derive(@debug.Debug)
+pub(all) struct Posting {
+  row : Int32
+  tf : Int32
+}
+
+#derive(@debug.Debug)
+pub(all) struct SegmentMeta {
+  id : String
+  row_count : Int32
+  min_id : UInt64
+  max_id : UInt64
+  doc_len_sum : Int32
+  size_bytes : Int32
+}
+
+#derive(@debug.Debug)
+pub(all) struct VecPart {
+  cid : Int32
+  rows : Array[Int32]
+  dim : Int32
+  data : Array[Float]
+}
+
+// Type aliases
+
+// Traits

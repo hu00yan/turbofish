@@ -5,15 +5,15 @@
 
 ///|
 pub(open) trait ObjectStore {
-  get(Self, String) -> Bytes?
-  put(Self, String, Bytes) -> Unit
+  fn get(Self, String) -> Bytes?
+  fn put(Self, String, Bytes) -> Unit
   /// CAS 写入：expected 为 None 时要求 key 不存在；返回 true 表示写入成功。
-  put_if_match(Self, String, String?, Bytes) -> Bool
+  fn put_if_match(Self, String, String?, Bytes) -> Bool
   /// 范围读 [offset, offset+len)，返回可能截短的 payload。
-  get_range(Self, String, Int, Int) -> Bytes?
+  fn get_range(Self, String, Int, Int) -> Bytes?
   /// 返回 prefix 下所有 key，升序。
-  list(Self, String) -> Array[String]
-  delete(Self, String) -> Unit
+  fn list(Self, String) -> Array[String]
+  fn delete(Self, String) -> Unit
 }
 
 ///|
@@ -45,13 +45,13 @@ pub fn CostSnapshot::total_read_bytes(self : CostSnapshot) -> Int {
 ///|
 pub fn CostSnapshot::show_table(self : CostSnapshot) -> String {
   let b = Buffer()
-  b.write_string_utf8(
-    "class          reqs      KB\n".view(),
-  )
+  b.write_string_utf8("class          reqs      KB\n".view())
   for kv in self.classes {
     let (cls, reqs, bytes) = kv
     let kb = bytes.to_double() / 1024.0
-    b.write_string_utf8("\{pad(cls, 15)}\{pad(reqs.to_string(), 6)}\{pad(kb.to_string(), 10)}\n")
+    b.write_string_utf8(
+      "\{pad(cls, 15)}\{pad(reqs.to_string(), 6)}\{pad(kb.to_string(), 10)}\n",
+    )
   }
   b.write_string_utf8(
     "TOTAL reqs=\{self.total_requests()} readKB=\{self.total_read_bytes().to_double() / 1024.0} puts=\{self.puts} putKB=\{self.put_bytes.to_double() / 1024.0}\n".view(),

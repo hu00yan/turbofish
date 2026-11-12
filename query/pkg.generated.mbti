@@ -1,0 +1,109 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/query"
+
+import {
+  "moonbitlang/core/debug",
+  "moonbitlang/core/set",
+  "turbofish/core",
+  "turbofish/format",
+  "turbofish/store",
+}
+
+// Values
+pub fn[S : @store.ObjectStore] bm25_search(Namespace[S], String, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] hybrid_search(Namespace[S], String, Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] open(S, String) -> Namespace[S] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] open_cached(MetadataCache[S], S, String) -> Namespace[S] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] vec_search(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] vec_search_rerank(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+
+// Errors
+
+// Types and methods
+pub(all) struct CachedSeg {
+  row_count : Int32
+  partitions : Array[Int32]
+  min_id : UInt64
+  id_dense : Bool
+  vec_storage : String
+  vec_normalized : Bool
+  stats : SegStats?
+  bloom : @format.Bloom?
+  mut dir : Array[@format.FtsDirEntry]?
+  mut doc_len : Array[Int32]?
+  mut ids : Array[UInt64]?
+  mut blockmax : Array[Array[(Int32, Int32)]]?
+  mut blockmax_size : Int32
+  mut blockmax_tried : Bool
+  mut pq_m : Int32
+  mut pq_dsub : Int32
+  mut pq_codebook : Array[Float]?
+  mut vec_info : (Int32, Int32, Int32)?
+  mut block_stats : (Int32, Int32, Array[(Int64, Int64)])?
+  mut block_stats_tried : Bool
+  matchers : Map[String, RowMatcher]
+}
+
+pub(all) enum Filter {
+  FStr(String, String)
+  FBool(String, Bool)
+  FI64(String, Int64)
+}
+
+pub(all) struct MetadataCache[S] {
+  entries : Map[String, Namespace[S]]
+  mut hits : Int32
+  mut misses : Int32
+  mut head_ttl_ms : UInt64
+}
+pub fn[S : @store.ObjectStore] MetadataCache::invalidate(Self[S], String) -> Unit
+pub fn[S : @store.ObjectStore] MetadataCache::new() -> Self[S]
+
+pub(all) struct Namespace[S] {
+  store : S
+  ns : String
+  meta : @format.NamespaceMeta
+  manifest : @format.ManifestData
+  mut centroids : @format.Centroids?
+  mut cache : Map[String, CachedSeg]
+  mut tombstones : @set.Set[UInt64]?
+  mut vec_global_cids : Array[Int32]?
+  mut global_gen_cids : Map[String, Array[Int32]]
+  mut global_gen_packs : Map[String, Int32]
+  mut head_checked_ms : UInt64
+}
+
+#derive(@debug.Debug)
+pub(all) struct QueryResult {
+  id : UInt64
+  score : Double
+}
+
+pub(all) enum RowMatcher {
+  MStr(Array[String], String)
+  MDict(Array[UInt16], UInt16)
+  MBool(Array[Bool], Bool)
+  MBitmap(Bytes, Bool)
+  MI64(Array[Int64], Int64)
+  MMask(FixedArray[Bool])
+}
+
+#derive(@debug.Debug)
+pub(all) struct SegStats {
+  has_ts : Bool
+  ts_min : Int64
+  ts_max : Int64
+  has_cat : Bool
+  cat_values : Array[String]
+  has_pub : Bool
+  pub_values : Array[Bool]
+}
+
+// Type aliases
+
+// Traits

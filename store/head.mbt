@@ -98,13 +98,17 @@ pub fn[S : ObjectStore] read_head_state(
 }
 
 ///|
-/// 列举 `_heads/` 取最大 id；没有记录时回退到 fallback。
+/// 列举 `_heads/` 取最大 id；优先用 1 次 GET 探测 `_head_ptr`（0 LIST），
+/// 缺失时回退到列举 `_heads/` 或 fallback。
 pub fn[S : ObjectStore] read_head(
   store : S,
   ns : String,
   fallback : String,
 ) -> String {
-  read_head_state(store, ns, fallback).0
+  match read_head_pointer(store, ns) {
+    Some(ptr) => if ptr != "" { ptr } else { fallback }
+    None => read_head_state(store, ns, fallback).0
+  }
 }
 
 ///|

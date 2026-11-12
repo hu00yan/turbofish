@@ -1,3 +1,12 @@
 import {
+  "moonbitlang/core/test",
   "moonbitlang/core/encoding/utf8",
 }
+
+options(
+  targets: {
+    "entropy_native.mbt": [ "native", "llvm" ],
+    "entropy_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+  "native-stub": [ "entropy.c" ],
+)

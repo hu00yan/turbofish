@@ -1,0 +1,139 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/simstore"
+
+import {
+  "moonbitlang/core/set",
+  "turbofish/core",
+  "turbofish/store",
+}
+
+// Values
+pub fn tpu_scan_bill(Int64) -> Double
+
+// Errors
+
+// Types and methods
+pub(all) struct BillRates {
+  get_per_1k : Double
+  put_per_1k : Double
+  list_per_1k : Double
+  delete_per_1k : Double
+  storage_per_gb_month : Double
+  egress_per_gb : Double
+}
+pub fn BillRates::aws_default() -> Self
+
+pub(all) struct SimConfig {
+  seed : UInt32
+  s3_get_ttfb_p50_us : Double
+  s3_ttfb_lognormal_sigma : Double
+  s3_bandwidth_mbps : Double
+  s3_put_ttfb_p50_us : Double
+  s3_list_p50_us : Double
+  s3_delete_p50_us : Double
+  nvme_read_p50_us : Double
+  nvme_bandwidth_mbps : Double
+  nvme_capacity_bytes : Int32
+  mem_us : Double
+  resident_classes : Array[String]
+  rates : BillRates
+  egress_enabled : Bool
+  concurrency : Int32
+  wan_jitter_p50_us : Double
+  spike_probability : Double
+  spike_p50_us : Double
+  retry_probability : Double
+  retry_p50_us : Double
+  get_error_probability : Double
+  put_error_probability : Double
+  list_error_probability : Double
+  delete_error_probability : Double
+}
+pub fn SimConfig::aws_default(UInt32) -> Self
+pub fn SimConfig::latency_ready(Self) -> Bool
+
+pub(all) struct SimSnapshot {
+  total_latency_us : Double
+  concurrent_latency_us : Double
+  retries : Int32
+  errors : Int32
+  op_count : Int32
+  bill_get : Double
+  bill_put : Double
+  bill_list : Double
+  bill_delete : Double
+  bill_egress : Double
+  bill_requests_total : Double
+  bill_total : Double
+  s3_gets : Int32
+  bytes_s3_read : Int64
+  bytes_nvme_read : Int64
+  bytes_logical_read : Int64
+  nvme_hits : Int32
+  puts : Int32
+  lists : Int32
+  deletes : Int32
+  storage_bytes : Int32
+}
+
+pub struct SimStore {
+  cfg : SimConfig
+  data : Map[String, Bytes]
+  versions : Map[String, Int32]
+  ranges : Map[String, Array[(Int32, Int32)]]
+  nvme : @set.Set[String]
+  last_used : Map[String, Int32]
+  mut lru_clock : Int32
+  mut nvme_used : Int32
+  mut resident_enabled : Bool
+  rng : @core.Rng
+  mut next_ver : Int32
+  mut total_latency_us : Double
+  mut concurrent_latency_us : Double
+  workers : Array[Double]
+  mut retries : Int32
+  mut errors : Int32
+  mut op_count : Int32
+  mut gets : Int32
+  mut s3_gets : Int32
+  mut bytes_s3_read : Int64
+  mut bytes_nvme_read : Int64
+  mut bytes_logical_read : Int64
+  mut nvme_hits : Int32
+  mut puts : Int32
+  mut lists : Int32
+  mut deletes : Int32
+  mut cas_ok : Int32
+  mut cas_fail : Int32
+  mut bill_get : Double
+  mut bill_put : Double
+  mut bill_list : Double
+  mut bill_delete : Double
+  mut bill_egress : Double
+}
+pub fn SimStore::admit_all(Self) -> Unit
+pub fn SimStore::admit_all_label() -> String
+pub fn SimStore::cache_stats(Self) -> (Int32, Int32, Int32, Int64, Int32, Int64)
+pub fn SimStore::clear_nvme(Self) -> Unit
+pub fn SimStore::clear_ranges(Self) -> Unit
+pub fn SimStore::cold(Self) -> Unit
+pub fn SimStore::cost(Self) -> SimSnapshot
+pub fn SimStore::evict_class(Self, String) -> Unit
+pub fn SimStore::evict_key(Self, String) -> Unit
+pub fn SimStore::evict_resident_classes(Self) -> Unit
+pub fn SimStore::head_version(Self, String) -> String?
+pub fn SimStore::is_resident_enabled(Self) -> Bool
+pub fn SimStore::new(SimConfig) -> Self
+pub fn SimStore::prime_nvme(Self) -> Unit
+pub fn SimStore::record_latency(Self, Double) -> Unit
+pub fn SimStore::require_latency(Self) -> Unit raise @core.SpndError
+pub fn SimStore::reset_cost(Self) -> Unit
+pub fn SimStore::set_resident_enabled(Self, Bool) -> Unit
+pub fn SimStore::storage_monthly_bill(Self) -> Double
+pub fn SimStore::total_object_bytes(Self) -> Int32
+pub fn SimStore::tpu_query_bill(Self) -> Double
+pub impl @store.ObjectStore for SimStore
+
+// Type aliases
+
+// Traits

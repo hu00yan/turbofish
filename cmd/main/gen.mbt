@@ -6,25 +6,28 @@
 ///|
 let vocab_en : Array[String] = [
   "time", "year", "people", "way", "day", "man", "thing", "woman", "life", "child",
-  "world", "school", "state", "family", "student", "group", "country", "problem", "hand", "part",
-  "place", "case", "week", "company", "system", "program", "question", "work", "government", "number",
-  "night", "point", "home", "water", "room", "mother", "area", "money", "story", "fact",
-  "month", "lot", "right", "study", "book", "eye", "job", "word", "business", "issue",
-  "side", "kind", "head", "house", "service", "friend", "father", "power", "hour", "game",
-  "line", "end", "member", "law", "car", "city", "community", "name", "team", "minute",
-  "idea", "kid", "body", "information", "back", "parent", "face", "level", "office", "door",
-  "health", "person", "art", "war", "history", "party", "result", "change", "morning", "reason",
-  "research", "girl", "moment", "air", "teacher", "force", "education", "foot", "boy", "age",
-  "policy", "process", "music", "market", "sense", "nation", "plan", "college", "interest", "death",
-  "experience", "effect", "light", "machine", "salt", "storm", "ocean", "river", "forest", "mountain",
+  "world", "school", "state", "family", "student", "group", "country", "problem",
+  "hand", "part", "place", "case", "week", "company", "system", "program", "question",
+  "work", "government", "number", "night", "point", "home", "water", "room", "mother",
+  "area", "money", "story", "fact", "month", "lot", "right", "study", "book", "eye",
+  "job", "word", "business", "issue", "side", "kind", "head", "house", "service",
+  "friend", "father", "power", "hour", "game", "line", "end", "member", "law", "car",
+  "city", "community", "name", "team", "minute", "idea", "kid", "body", "information",
+  "back", "parent", "face", "level", "office", "door", "health", "person", "art",
+  "war", "history", "party", "result", "change", "morning", "reason", "research",
+  "girl", "moment", "air", "teacher", "force", "education", "foot", "boy", "age",
+  "policy", "process", "music", "market", "sense", "nation", "plan", "college", "interest",
+  "death", "experience", "effect", "light", "machine", "salt", "storm", "ocean",
+  "river", "forest", "mountain",
 ]
 
 ///|
 let vocab_zh : Array[String] = [
-  "星光", "大海", "山川", "月色", "河流", "森林", "风雪", "云海", "花开", "春天",
-  "秋雨", "夏夜", "冬雪", "江湖", "古城", "灯火", "远方", "时光", "梦想", "自由",
-  "勇气", "希望", "温暖", "孤独", "安静", "热闹", "旅途", "归来", "少年", "故事",
-  "天空", "大地", "流星", "清风", "明月", "落花", "潮汐", "峡谷", "草原", "极光",
+  "星光", "大海", "山川", "月色", "河流", "森林", "风雪", "云海",
+  "花开", "春天", "秋雨", "夏夜", "冬雪", "江湖", "古城", "灯火",
+  "远方", "时光", "梦想", "自由", "勇气", "希望", "温暖", "孤独",
+  "安静", "热闹", "旅途", "归来", "少年", "故事", "天空", "大地",
+  "流星", "清风", "明月", "落花", "潮汐", "峡谷", "草原", "极光",
 ]
 
 ///|
@@ -97,17 +100,21 @@ fn gen_docs(rng : @core.Rng, cum : Array[Double]) -> Array[@core.Doc] {
   let centers : Array[Float] = Array::new(capacity=n_clusters * dim)
   for _c in 0..<n_clusters {
     for _d in 0..<dim {
-      centers.push(rng.next_range(-1.0, 1.0).to_float())
+      centers.push(Float::from_double(rng.next_range(-1.0, 1.0)))
     }
   }
   let docs : Array[@core.Doc] = Array::new(capacity=10000)
   for i in 0..<10000 {
     let target = 30 + (rng.next_f64() * 51.0).to_int()
     let text = gen_text(rng, cum, target)
-    let base = (i % n_clusters) * dim
+    let base = i % n_clusters * dim
     let vec : Array[Float] = Array::new(capacity=dim)
     for d in 0..<dim {
-      vec.push((centers[base + d].to_double() + rng.next_range(-0.05, 0.05)).to_float())
+      vec.push(
+        Float::from_double(
+          centers[base + d].to_double() + rng.next_range(-0.05, 0.05),
+        ),
+      )
     }
     docs.push({
       id: i.to_uint64(),
@@ -123,7 +130,11 @@ fn gen_docs(rng : @core.Rng, cum : Array[Double]) -> Array[@core.Doc] {
 
 ///|
 /// 生成 count 条 BM25 查询（1~2 个词，zipf 高频词保证命中）。
-fn gen_bm25_queries(rng : @core.Rng, cum : Array[Double], count : Int) -> Array[String] {
+fn gen_bm25_queries(
+  rng : @core.Rng,
+  cum : Array[Double],
+  count : Int,
+) -> Array[String] {
   let out : Array[String] = Array::new()
   for i in 0..<count {
     let t1 = sample_term(rng, cum)
@@ -150,7 +161,7 @@ fn gen_vec_queries(
     let base = docs[di].vector
     let v : Array[Float] = Array::new(capacity=base.length())
     for x in base {
-      v.push((x.to_double() + rng.next_range(-0.01, 0.01)).to_float())
+      v.push(Float::from_double(x.to_double() + rng.next_range(-0.01, 0.01)))
     }
     out.push(v)
   }

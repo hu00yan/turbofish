@@ -14,12 +14,12 @@
 
 ///|
 /// wbtest 辅助：trait 方法跨包不能直接点调用，走泛型分发。
-fn tput[S : @store.ObjectStore](s : S, key : String, val : Bytes) -> Unit {
+fn[S : @store.ObjectStore] tput(s : S, key : String, val : Bytes) -> Unit {
   tput(s, key, val)
 }
 
 ///|
-fn tget_range[S : @store.ObjectStore](
+fn[S : @store.ObjectStore] tget_range(
   s : S,
   key : String,
   off : Int,
@@ -36,7 +36,7 @@ fn seg_meta_json_bytes(
   max_id : UInt64,
   parts : Array[Int],
 ) -> Bytes {
-  let m : Map[String, Json] = Map::new()
+  let m : Map[String, Json] = Map([])
   m.set("id", Json::string(seg_id))
   m.set("row_count", Json::number(row_count.to_double()))
   m.set("min_id", Json::number(min_id.to_double()))
@@ -57,8 +57,9 @@ fn make_test_store(deleted : Array[UInt64]) -> @store.MemStore {
   // namespace.json
   let meta : @format.NamespaceMeta = {
     format: "seekpond/v1",
-    namespace: "test",
+    ns_name: "test",
     head_manifest: "manifest-01",
+    vec_global_version: None,
     distance_metric: "cosine",
     vector_dim: 2,
     vector_dtype: "f32",

@@ -1,0 +1,19 @@
+// benchx：native micro-bench 包（X 工人）。
+// kernel.c 仅在 native 后端经 "native-stub" 编译链接；
+// kernel_native.mbt 只在 native/llvm 后端编译（extern "C" 声明），
+// kernel_stub.mbt 给其余后端（wasm-gc/wasm/js）提供同签名占位实现，
+// 使包在默认 target 下可编译、可测试（C 内核行标注 N/A）。
+import {
+  "moonbitlang/core/test",
+  "turbofish/core",
+  "turbofish/format",
+  "moonbitlang/core/bench",
+}
+
+options(
+  targets: {
+    "kernel_native.mbt": [ "native", "llvm" ],
+    "kernel_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+  "native-stub": [ "kernel.c" ],
+)

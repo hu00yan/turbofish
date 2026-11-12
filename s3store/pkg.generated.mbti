@@ -1,0 +1,139 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/s3store"
+
+import {
+  "moonbitlang/core/debug",
+  "turbofish/core",
+  "turbofish/store",
+}
+
+// Values
+pub fn byte_order_compare(String, String) -> Int32
+
+pub fn bytes_to_hex(Bytes) -> String
+
+pub fn canonical_header_block(Array[(String, String)]) -> (String, String)
+
+pub fn canonical_query(Array[(String, String)]) -> String
+
+pub fn header_get(Array[(String, String)], String) -> String?
+
+pub fn hmac_sha256(Bytes, Bytes) -> Bytes
+
+pub fn hmac_sha256_hex(Bytes, Bytes) -> String
+
+pub fn sha256(Bytes) -> Bytes
+
+pub fn sha256_hex(Bytes) -> String
+
+pub fn sigv4_canonical_request(String, String, String, Array[(String, String)], String) -> String
+
+pub fn sigv4_sign_request(String, String, String, String, Array[(String, String)], Array[(String, String)], Bytes, S3Credentials, String, String, String) -> SignedRequest
+
+pub fn sigv4_signing_key(String, String, String, String) -> Bytes
+
+pub fn sigv4_string_to_sign(String, String, String) -> String
+
+pub fn uri_encode(String, Bool) -> String
+
+pub fn url_decode(String) -> String
+
+// Errors
+
+// Types and methods
+pub struct LeaseHandler {
+  acquire_fn : (String, String, Int64) -> Bool
+  release_fn : (String, String) -> Bool
+}
+
+pub struct MemLeaseCoordinator {
+  leases : Map[String, (String, Int64)]
+  now_ms : () -> Int64
+}
+pub fn MemLeaseCoordinator::new(now_ms? : () -> Int64) -> Self
+pub impl LeaseCoordinator for MemLeaseCoordinator
+
+pub struct MockS3Transport {
+  bucket : String
+  objects : Map[String, Bytes]
+  etags : Map[String, String]
+  tokens : Map[String, Int32]
+  requests : Array[RecordedRequest]
+  preset : Array[(Int32, Array[(String, String)], Bytes)]
+  mut preset_pos : Int32
+  mut next_etag : Int32
+  mut next_token : Int32
+  mut conditional_writes_supported : Bool
+}
+pub fn MockS3Transport::enqueue(Self, Int32, Array[(String, String)], Bytes) -> Unit
+pub fn MockS3Transport::new(String) -> Self
+pub fn MockS3Transport::seed(Self, String, Bytes) -> Unit
+pub fn MockS3Transport::set_conditional_writes_supported(Self, Bool) -> Unit
+pub impl HttpTransport for MockS3Transport
+
+#derive(@debug.Debug)
+pub(all) struct RecordedRequest {
+  http_method : String
+  url : String
+  headers : Array[(String, String)]
+  body : Bytes
+}
+
+#derive(@debug.Debug)
+pub(all) struct S3Credentials {
+  access_key : String
+  secret_key : String
+}
+
+pub struct S3Store[T] {
+  scheme : String
+  host : String
+  bucket : String
+  region : String
+  creds : S3Credentials
+  transport : T
+  now_amz_date : () -> String
+  etag_cache : Map[String, String]
+  mut conditional_writes_supported : Bool
+  mut lease_coordinator : LeaseHandler?
+  mut owner_id : String
+}
+pub fn[T] S3Store::build_delete_object(Self[T], String) -> SignedRequest
+pub fn[T] S3Store::build_get_object(Self[T], String, String?) -> SignedRequest
+pub fn[T] S3Store::build_head_object(Self[T], String) -> SignedRequest
+pub fn[T] S3Store::build_list_objects_v2(Self[T], String, Int32, String?) -> SignedRequest
+pub fn[T] S3Store::build_put_object(Self[T], String, Bytes, String?, String?) -> SignedRequest
+pub fn[T] S3Store::conditional_writes_supported(Self[T]) -> Bool
+pub fn[T : HttpTransport] S3Store::create_bucket(Self[T]) -> Bool
+pub fn[T : HttpTransport] S3Store::get_versioned_manifest(Self[T], String, String) -> Bytes?
+pub fn[T : HttpTransport] S3Store::head_version(Self[T], String) -> String?
+pub fn[T : HttpTransport] S3Store::list_page(Self[T], String, Int32) -> Array[String]
+pub fn[T] S3Store::new(String, String, String, S3Credentials, T, () -> String) -> Self[T] raise @core.SpndError
+pub fn[T] S3Store::object_path(Self[T], String) -> String
+pub fn[T : HttpTransport] S3Store::read_head_pointer(Self[T], String) -> String?
+pub fn[T : HttpTransport] S3Store::resolve_head(Self[T], String, fallback? : String) -> String
+pub fn[T] S3Store::set_conditional_writes_supported(Self[T], Bool) -> Unit
+pub fn[T, L : LeaseCoordinator] S3Store::set_lease_coordinator(Self[T], L, owner_id? : String) -> Unit
+pub fn[T, L : LeaseCoordinator] S3Store::with_lease_coordinator(Self[T], L, owner_id? : String) -> Self[T]
+pub fn[T : HttpTransport] S3Store::write_head_pointer(Self[T], String, String) -> Unit
+pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T]
+
+#derive(@debug.Debug)
+pub(all) struct SignedRequest {
+  http_method : String
+  url : String
+  headers : Array[(String, String)]
+  body : Bytes
+}
+
+// Type aliases
+
+// Traits
+pub(open) trait HttpTransport {
+  fn execute(Self, String, String, Array[(String, String)], Bytes) -> (Int32, Array[(String, String)], Bytes)
+}
+
+pub(open) trait LeaseCoordinator {
+  fn acquire(Self, String, String, Int64) -> Bool
+  fn release(Self, String, String) -> Bool
+}

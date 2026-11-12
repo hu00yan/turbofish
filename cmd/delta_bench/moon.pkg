@@ -1,0 +1,14 @@
+import {
+  "turbofish/build",
+  "turbofish/core",
+  "turbofish/format",
+  "turbofish/simstore",
+  "turbofish/store",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env" @env,
+  "moonbitlang/core/json",
+}
+
+options(
+  "is-main": true,
+)

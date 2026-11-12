@@ -1,0 +1,130 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/mtree"
+
+import {
+  "moonbitlang/core/debug",
+  "turbofish/core",
+  "turbofish/format",
+  "turbofish/store",
+}
+
+// Values
+pub fn should_trigger_compaction(Manifest, Int64, CompactionTriggerConfig) -> Bool
+
+// Errors
+
+// Types and methods
+#derive(Eq, @debug.Debug)
+pub(all) struct CompactionResult {
+  merged_parts_count : Int32
+  output_part_id : String
+  output_row_count : Int32
+  tombstones_purged : Int32
+  new_seq : UInt64
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct CompactionTriggerConfig {
+  l0_threshold : Int32
+  tombstone_ratio_threshold : Double
+  idle_fallback_ms : Int64
+  max_merge_parts : Int32
+}
+pub fn CompactionTriggerConfig::default() -> Self
+
+pub struct Compactor[S] {
+  engine : MergeTreeEngine[S]
+  policy : TieredMergePolicy
+  config : CompactionTriggerConfig
+  mut last_active_ms : Int64
+  mut wake_signaled : Bool
+}
+pub fn[S : @store.ObjectStore] Compactor::compact_step(Self[S], Int64) -> CompactionResult? raise @core.SpndError
+pub fn[S : @store.ObjectStore] Compactor::new(MergeTreeEngine[S], TieredMergePolicy, CompactionTriggerConfig) -> Self[S]
+pub fn[S] Compactor::notify_mutation(Self[S], Int64) -> Unit
+pub fn[S : @store.ObjectStore] Compactor::tick(Self[S], Int64) -> CompactionResult? raise @core.SpndError
+
+#derive(Eq, @debug.Debug)
+pub(all) struct Manifest {
+  mut seq : UInt64
+  parts : Array[PartMeta]
+  tombstones : Array[UInt64]
+}
+pub fn Manifest::is_deleted(Self, UInt64) -> Bool
+pub fn Manifest::l0_count(Self) -> Int32
+pub fn Manifest::new() -> Self
+pub fn Manifest::tombstone_mask(Self) -> Bytes
+pub fn Manifest::tombstone_ratio(Self, PartMeta) -> Double
+pub fn Manifest::total_rows(Self) -> Int32
+
+pub struct MergeTreeEngine[S] {
+  store : S
+  ns : String
+  part_store : ObjPartStore[S]
+  manifest_store : ObjManifestStore[S]
+  dim : Int32
+  use_f16 : Bool
+  centroids : @format.Centroids?
+  mut manifest : Manifest
+}
+pub fn[S : @store.ObjectStore] MergeTreeEngine::append_base_part(Self[S], Array[@core.Doc]) -> String raise @core.SpndError
+pub fn[S : @store.ObjectStore] MergeTreeEngine::append_l0_delta_part(Self[S], Array[@core.Doc]) -> String raise @core.SpndError
+pub fn[S] MergeTreeEngine::get_manifest(Self[S]) -> Manifest
+pub fn[S : @store.ObjectStore] MergeTreeEngine::mutate_rows(Self[S], Array[@core.Doc], Array[UInt64]) -> String raise @core.SpndError
+pub fn[S : @store.ObjectStore] MergeTreeEngine::new(S, String, Int32, Bool, @format.Centroids?) -> Self[S] raise @core.SpndError
+pub fn[S : @store.ObjectStore] MergeTreeEngine::publish_manifest(Self[S]) -> Unit raise @core.SpndError
+pub fn[S : @store.ObjectStore] MergeTreeEngine::read_live_docs(Self[S]) -> Array[@core.Doc] raise @core.SpndError
+pub fn[S : @store.ObjectStore] MergeTreeEngine::read_part_footer(Self[S], PartMeta) -> @format.CompactFooter raise @core.SpndError
+pub fn[S : @store.ObjectStore] MergeTreeEngine::read_part_section(Self[S], PartMeta, @format.CompactSection) -> Bytes raise @core.SpndError
+pub fn[S] MergeTreeEngine::soft_delete(Self[S], Array[UInt64]) -> Unit
+
+pub struct ObjManifestStore[S] {
+  store : S
+  ns : String
+}
+pub fn[S] ObjManifestStore::head_ptr_key(Self[S]) -> String
+pub fn[S] ObjManifestStore::manifest_key(Self[S], UInt64) -> String
+pub fn[S : @store.ObjectStore] ObjManifestStore::new(S, String) -> Self[S]
+
+pub struct ObjPartStore[S] {
+  store : S
+  ns : String
+}
+pub fn[S : @store.ObjectStore] ObjPartStore::new(S, String) -> Self[S]
+pub fn[S] ObjPartStore::part_key(Self[S], String) -> String
+
+#derive(Eq, @debug.Debug)
+pub(all) struct PartMeta {
+  part_id : String
+  level : Int32
+  row_count : Int32
+  min_id : UInt64
+  max_id : UInt64
+  size_bytes : Int32
+  mut tombstone_count : Int32
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct TieredMergePolicy {
+  config : CompactionTriggerConfig
+}
+pub fn TieredMergePolicy::new(CompactionTriggerConfig) -> Self
+pub impl MergePolicy for TieredMergePolicy
+
+// Type aliases
+
+// Traits
+pub(open) trait ManifestStore {
+  fn load(Self) -> Manifest raise @core.SpndError
+  fn publish(Self, Manifest) -> Unit raise @core.SpndError
+}
+
+pub(open) trait MergePolicy {
+  fn pick(Self, Array[PartMeta]) -> Array[String]?
+}
+
+pub(open) trait PartStore {
+  fn put_part(Self, Bytes) -> String
+  fn get_part(Self, String) -> Bytes?
+  fn get_part_range(Self, String, Int32, Int32) -> Bytes?
+}

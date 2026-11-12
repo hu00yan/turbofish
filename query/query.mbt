@@ -133,7 +133,11 @@ pub fn[S : @store.ObjectStore] open_cached(
   let meta0 = @format.namespace_from_json(
     parse_json_bytes(meta_bs, "namespace.json"),
   )
-  let head = @store.read_head(store, ns, meta0.head_manifest)
+  let head = if meta0.head_manifest != "" {
+    meta0.head_manifest
+  } else {
+    @store.read_head(store, ns, "")
+  }
   let meta = { ..meta0, head_manifest: head }
   match cache.entries.get(ns) {
     Some(old) =>
@@ -204,7 +208,11 @@ pub fn[S : @store.ObjectStore] open(
   let meta0 = @format.namespace_from_json(
     parse_json_bytes(meta_bs, "namespace.json"),
   )
-  let head = @store.read_head(store, ns, meta0.head_manifest)
+  let head = if meta0.head_manifest != "" {
+    meta0.head_manifest
+  } else {
+    @store.read_head(store, ns, "")
+  }
   let meta = { ..meta0, head_manifest: head }
   let man_key = "\{ns}/_manifest/\{head}.json"
   let man_bs = get_object(store, man_key)

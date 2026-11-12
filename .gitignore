@@ -1,2 +1,10 @@
 _build/
 .mimosa/
+.mooncakes/
+.cloudflare/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+.DS_Store

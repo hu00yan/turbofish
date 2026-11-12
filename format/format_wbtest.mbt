@@ -70,9 +70,11 @@ test "fts encode/read_postings roundtrip" {
   let built = encode_fts(lists)
   let entries = decode_fts_dir(built.dir)
   assert_eq(entries.length(), 3)
-  // 目录按 String::compare 有序（内部自洽即可，不假设 UTF-8 字节序）
+  // 目录按 term_compare（UTF-8 字节序）有序：与查询二分同一比较器。
+  // （历史坑：String::compare 长度优先，"香蕉" 多字节多字 term 位移到尾部，
+  //  与字节序二分错位 → CJK 多字查询必失败。本用例的 ASCII+CJK 混排即回归锚点。）
   for i in 1..<entries.length() {
-    assert_eq(entries[i - 1].term.compare(entries[i].term) <= 0, true)
+    assert_eq(term_compare(entries[i - 1].term, entries[i].term) <= 0, true)
   }
   // 按 term 查找并验证 posting 内容
   let mut apple_entry : FtsDirEntry? = None

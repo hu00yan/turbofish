@@ -1,0 +1,20 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/cmd/s3probe"
+
+import {
+  "turbofish/s3store",
+}
+
+// Values
+
+// Errors
+
+// Types and methods
+type CountingTransport
+pub impl @s3store.HttpTransport for CountingTransport
+
+type OpCounts
+
+// Type aliases
+
+// Traits

@@ -119,7 +119,7 @@ fn[S : @store.ObjectStore] init_namespace(
     },
     k1: @core.K1,
     b: @core.BM25_B,
-    fts_tokenizer: None,
+    fts_tokenizer: Some(@core.tokenizer_to_string(cfg.fts_tokenizer)),
   }
   let key = ns_meta_key(cfg.ns)
   let bs = json_bytes(meta.to_json())

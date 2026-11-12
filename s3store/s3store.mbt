@@ -56,6 +56,7 @@ pub struct MockS3Transport {
   mut preset_pos : Int
   mut next_etag : Int
   mut next_token : Int
+  mut conditional_writes_supported : Bool
 }
 
 ///|
@@ -70,7 +71,16 @@ pub fn MockS3Transport::new(bucket : String) -> MockS3Transport {
     preset_pos: 0,
     next_etag: 0,
     next_token: 0,
+    conditional_writes_supported: true,
   }
+}
+
+///|
+pub fn MockS3Transport::set_conditional_writes_supported(
+  self : MockS3Transport,
+  supported : Bool,
+) -> Unit {
+  self.conditional_writes_supported = supported
 }
 
 ///|
@@ -320,6 +330,11 @@ fn MockS3Transport::mock_put(
   body : Bytes,
 ) -> (Int, Array[(String, String)], Bytes) {
   let empty = Bytes::make(0, b'\x00')
+  let has_cond = header_get(req_headers, "if-match") is Some(_) ||
+    header_get(req_headers, "if-none-match") is Some(_)
+  if has_cond && !self.conditional_writes_supported {
+    return (501, [], empty)
+  }
   // 条件写：If-Match 优先于 If-None-Match
   match header_get(req_headers, "if-match") {
     Some(v) =>
@@ -394,6 +409,80 @@ fn MockS3Transport::mock_list(
   (200, [], b.to_bytes())
 }
 
+// ---------- LeaseCoordinator（条件写降级仲裁） ----------
+
+///|
+/// Lease 协调器接口：在底层对象存储不支持原生 CAS（PutObject If-Match / If-None-Match）
+/// 或使用方显式配置时，提供基于租约锁的并发互斥保障。
+pub(open) trait LeaseCoordinator {
+  fn acquire(Self, key : String, owner : String, ttl_ms : Int64) -> Bool
+  fn release(Self, key : String, owner : String) -> Bool
+}
+
+///|
+/// 内存 Lease 协调器：单机/测试环境下提供租约互斥支持。
+pub struct MemLeaseCoordinator {
+  leases : Map[String, (String, Int64)]
+  now_ms : () -> Int64
+}
+
+///|
+pub fn MemLeaseCoordinator::new(
+  now_ms~ : () -> Int64 = fn() { 0L },
+) -> MemLeaseCoordinator {
+  { leases: Map([]), now_ms }
+}
+
+///|
+pub impl LeaseCoordinator for MemLeaseCoordinator with fn acquire(
+  self : MemLeaseCoordinator,
+  key : String,
+  owner : String,
+  ttl_ms : Int64,
+) -> Bool {
+  let now = (self.now_ms)()
+  match self.leases.get(key) {
+    Some((cur_owner, expire)) =>
+      if cur_owner == owner {
+        self.leases.set(key, (owner, now + ttl_ms))
+        true
+      } else if now >= expire {
+        self.leases.set(key, (owner, now + ttl_ms))
+        true
+      } else {
+        false
+      }
+    None => {
+      self.leases.set(key, (owner, now + ttl_ms))
+      true
+    }
+  }
+}
+
+///|
+pub impl LeaseCoordinator for MemLeaseCoordinator with fn release(
+  self : MemLeaseCoordinator,
+  key : String,
+  owner : String,
+) -> Bool {
+  match self.leases.get(key) {
+    Some((cur_owner, _)) =>
+      if cur_owner == owner {
+        self.leases.remove(key)
+        true
+      } else {
+        false
+      }
+    None => true
+  }
+}
+
+///|
+pub struct LeaseHandler {
+  acquire_fn : (String, String, Int64) -> Bool
+  release_fn : (String, String) -> Bool
+}
+
 // ---------- S3Store ----------
 
 ///|
@@ -408,6 +497,9 @@ pub struct S3Store[T] {
   transport : T
   now_amz_date : () -> String
   etag_cache : Map[String, String]
+  mut conditional_writes_supported : Bool
+  mut lease_coordinator : LeaseHandler?
+  mut owner_id : String
 }
 
 ///|
@@ -437,7 +529,91 @@ pub fn[T] S3Store::new(
     transport,
     now_amz_date,
     etag_cache: Map([]),
+    conditional_writes_supported: true,
+    lease_coordinator: None,
+    owner_id: "s3store-worker-0",
   }
+}
+
+///|
+/// 设置是否启用服务端原生条件写（If-Match / If-None-Match）。
+/// 设为 false 时 put_if_match 自动回退至 Lease 协调器。
+pub fn[T] S3Store::set_conditional_writes_supported(
+  self : S3Store[T],
+  supported : Bool,
+) -> Unit {
+  self.conditional_writes_supported = supported
+}
+
+///|
+/// 当前是否支持/启用原生条件写
+pub fn[T] S3Store::conditional_writes_supported(self : S3Store[T]) -> Bool {
+  self.conditional_writes_supported
+}
+
+///|
+/// 绑定 Lease 协调器与写者标识（当原生条件写不可用时作 fallback 仲裁）
+pub fn[T, L : LeaseCoordinator] S3Store::set_lease_coordinator(
+  self : S3Store[T],
+  coordinator : L,
+  owner_id~ : String = "s3store-worker-0",
+) -> Unit {
+  self.lease_coordinator = Some({
+    acquire_fn: fn(k, o, ttl) { coordinator.acquire(k, o, ttl) },
+    release_fn: fn(k, o) { coordinator.release(k, o) },
+  })
+  self.owner_id = owner_id
+}
+
+///|
+/// 链式绑定 Lease 协调器
+pub fn[T, L : LeaseCoordinator] S3Store::with_lease_coordinator(
+  self : S3Store[T],
+  coordinator : L,
+  owner_id~ : String = "s3store-worker-0",
+) -> S3Store[T] {
+  self.set_lease_coordinator(coordinator, owner_id~)
+  self
+}
+
+///|
+/// 读 head 指针：0 LIST，1 次 GET /{bucket}/{ns}/_head_ptr
+pub fn[T : HttpTransport] S3Store::read_head_pointer(
+  self : S3Store[T],
+  ns : String,
+) -> String? {
+  @store.read_head_pointer(self, ns)
+}
+
+///|
+/// 写 head 指针（PUT /{bucket}/{ns}/_head_ptr）
+pub fn[T : HttpTransport] S3Store::write_head_pointer(
+  self : S3Store[T],
+  ns : String,
+  manifest_id : String,
+) -> Unit {
+  @store.write_head_pointer(self, ns, manifest_id)
+}
+
+///|
+/// 解析当前 head：优先经 _head_ptr 1 次 GET 解析；不存在时回退 fallback。
+/// 保证读/打开路径 0 LIST 请求。
+pub fn[T : HttpTransport] S3Store::resolve_head(
+  self : S3Store[T],
+  ns : String,
+  fallback~ : String = "",
+) -> String {
+  @store.read_head(self, ns, fallback)
+}
+
+///|
+/// 直接读指定版本的 manifest 对象（0 LIST，1 次 GET /{bucket}/{ns}/_manifest/{manifest_id}.json）
+pub fn[T : HttpTransport] S3Store::get_versioned_manifest(
+  self : S3Store[T],
+  ns : String,
+  manifest_id : String,
+) -> Bytes? {
+  @store.ObjectStore::get(self, "\{ns}/_manifest/\{manifest_id}.json")
 }
 
 ///|
@@ -661,39 +837,80 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn put(
 }
 
 ///|
-/// CAS 语义与 MemStore 对齐：
-/// expected=None 要求对象不存在（If-None-Match: *）；
-/// expected=Some(v) 中 v 是版本串（= ETag），发 If-Match，412 → false。
+/// CAS 写入接口：
+/// - 原生模式（默认）：
+///   expected=None  ⇒ If-None-Match: *（S3 创建 CAS；412 → false）
+///   expected=Some  ⇒ If-Match: <ver>（S3 更新 CAS；412 → false）
+/// - 若服务端返回 501/400（或显式 set_conditional_writes_supported(false)）
+///   且配置了 lease_coordinator，则自动回退到 lease coordinator 仲裁：
+///   获取租约 → 校验当前版本 → 无条件 PUT 写入 → 释放租约。
 pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn put_if_match(
   self : S3Store[T],
   key : String,
   expected : String?,
   value : Bytes,
 ) -> Bool {
-  match expected {
-    None => {
-      let (st, hs, _) = self.do_req(
-        self.build_put_object(key, value, None, Some("*")),
-      )
-      if st == 200 {
-        self.cache_etag(key, st, hs)
-        true
-      } else {
-        false
-      }
+  if self.conditional_writes_supported {
+    let req = match expected {
+      None => self.build_put_object(key, value, None, Some("*"))
+      Some(v) => self.build_put_object(key, value, Some(v), None)
     }
-    Some(v) => {
-      // v 就是版本串（= ETag），直接发 If-Match：服务端判定，412 → false。
-      // 不用 head_version 替换期望值——过期期望必须原样上送才能被 412 拒绝。
-      let (st, hs, _) = self.do_req(
-        self.build_put_object(key, value, Some(v), None),
-      )
-      if st == 200 {
-        self.cache_etag(key, st, hs)
-        true
-      } else {
-        false
+    let (st, hs, _) = self.do_req(req)
+    if st == 200 || st == 204 {
+      self.cache_etag(key, st, hs)
+      true
+    } else if st == 412 {
+      false
+    } else if (st == 501 || st == 400) && self.lease_coordinator is Some(_) {
+      self.conditional_writes_supported = false
+      self.put_if_match_lease(key, expected, value)
+    } else {
+      false
+    }
+  } else {
+    self.put_if_match_lease(key, expected, value)
+  }
+}
+
+///|
+fn[T : HttpTransport] S3Store::put_if_match_lease(
+  self : S3Store[T],
+  key : String,
+  expected : String?,
+  value : Bytes,
+) -> Bool {
+  match self.lease_coordinator {
+    None => false
+    Some(coord) => {
+      // 1. 获取租约
+      if !(coord.acquire_fn)(key, self.owner_id, 30000L) {
+        return false
       }
+      // 2. 租约保护下校验期望版本
+      let cur_ver = self.head_version(key)
+      let matched = match expected {
+        None => cur_ver is None
+        Some(exp) =>
+          match cur_ver {
+            Some(v) => v == exp
+            None => false
+          }
+      }
+      if !matched {
+        let _ = (coord.release_fn)(key, self.owner_id)
+        return false
+      }
+      // 3. 执行写入
+      let (st, hs, _) = self.do_req(
+        self.build_put_object(key, value, None, None),
+      )
+      let ok = st == 200 || st == 204
+      if ok {
+        self.cache_etag(key, st, hs)
+      }
+      // 4. 释放租约
+      let _ = (coord.release_fn)(key, self.owner_id)
+      ok
     }
   }
 }

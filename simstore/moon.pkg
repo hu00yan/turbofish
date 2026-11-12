@@ -1,6 +1,6 @@
 import {
-  "turbofish/core" @core,
-  "turbofish/store" @store,
-  "moonbitlang/core/encoding/utf8" @utf8,
-  "moonbitlang/core/math" @math,
+  "moonbitlang/core/test",
+  "turbofish/core",
+  "turbofish/store",
+  "moonbitlang/core/math",
 }

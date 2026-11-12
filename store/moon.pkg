@@ -1,4 +1,4 @@
 import {
-  "turbofish/core" @core,
-  "moonbitlang/core/encoding/utf8" @utf8,
+  "moonbitlang/core/test",
+  "moonbitlang/core/encoding/utf8",
 }

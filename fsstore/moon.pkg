@@ -1,0 +1,16 @@
+import {
+  "moonbitlang/core/test",
+  "turbofish/core",
+  "turbofish/store",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+  "moonbitlang/core/abort",
+}
+
+options(
+  targets: {
+    "ffi_native.mbt": [ "native" ],
+    "fsstore.mbt": [ "native" ],
+    "fsstore_wbtest.mbt": [ "native" ],
+  },
+)

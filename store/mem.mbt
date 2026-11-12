@@ -36,11 +36,11 @@ pub struct MemStore {
 ///|
 pub fn MemStore::new() -> MemStore {
   {
-    data: Map::new(),
-    versions: Map::new(),
-    cache: Set::new(),
-    ranges: Map::new(),
-    class_stats: Map::new(),
+    data: Map([]),
+    versions: Map([]),
+    cache: Set([]),
+    ranges: Map([]),
+    class_stats: Map([]),
     next_ver: 1,
     gets: 0,
     get_bytes: 0,
@@ -88,8 +88,8 @@ fn contains(s : String, sub : String) -> Bool {
   if m == 0 || m > n {
     return false
   }
-  for i in 0..=(n - m) {
-    if s.substring(start=i, end=i + m) == sub {
+  for i in 0..<=(n - m) {
+    if s[i:i + m] == sub[:] {
       return true
     }
   }
@@ -97,7 +97,12 @@ fn contains(s : String, sub : String) -> Bool {
 }
 
 ///|
-fn MemStore::record_read(self : MemStore, key : String, size : Int, cached : Bool) -> Unit {
+fn MemStore::record_read(
+  self : MemStore,
+  key : String,
+  size : Int,
+  cached : Bool,
+) -> Unit {
   let cls = classify_key(key)
   let st = match self.class_stats.get(cls) {
     Some(existing) => existing
@@ -128,7 +133,7 @@ fn version_string(v : Int) -> String {
 }
 
 ///|
-pub impl ObjectStore for MemStore with get(self : MemStore, key : String) -> Bytes? {
+pub impl ObjectStore for MemStore with fn get(self : MemStore, key : String) -> Bytes? {
   self.gets += 1
   match self.data.get(key) {
     Some(value) => {
@@ -148,14 +153,18 @@ pub impl ObjectStore for MemStore with get(self : MemStore, key : String) -> Byt
 }
 
 ///|
-pub impl ObjectStore for MemStore with put(self : MemStore, key : String, value : Bytes) -> Unit {
+pub impl ObjectStore for MemStore with fn put(
+  self : MemStore,
+  key : String,
+  value : Bytes,
+) -> Unit {
   self.puts += 1
   self.put_bytes += value.length()
   self.put_raw(key, value)
 }
 
 ///|
-pub impl ObjectStore for MemStore with put_if_match(
+pub impl ObjectStore for MemStore with fn put_if_match(
   self : MemStore,
   key : String,
   expected : String?,
@@ -181,7 +190,7 @@ pub impl ObjectStore for MemStore with put_if_match(
 }
 
 ///|
-pub impl ObjectStore for MemStore with get_range(
+pub impl ObjectStore for MemStore with fn get_range(
   self : MemStore,
   key : String,
   offset : Int,
@@ -228,7 +237,9 @@ pub impl ObjectStore for MemStore with get_range(
 }
 
 ///|
-pub impl ObjectStore for MemStore with list(self : MemStore, prefix : String) -> Array[String] {
+pub impl ObjectStore for MemStore with fn list(self : MemStore, prefix : String) -> Array[
+  String,
+] {
   self.lists += 1
   let out : Array[String] = Array::new()
   for kv in self.data.iter() {
@@ -241,7 +252,7 @@ pub impl ObjectStore for MemStore with list(self : MemStore, prefix : String) ->
 }
 
 ///|
-pub impl ObjectStore for MemStore with delete(self : MemStore, key : String) -> Unit {
+pub impl ObjectStore for MemStore with fn delete(self : MemStore, key : String) -> Unit {
   self.deletes += 1
   self.data.remove(key)
   self.versions.remove(key)

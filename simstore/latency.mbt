@@ -39,9 +39,109 @@ fn SimStore::sample_lognormal(self : SimStore, p50 : Double) -> Double {
 }
 
 ///|
+/// 指定 sigma 的采样（用于 WAN jitter / spike / retry 等额外延迟）。
+fn SimStore::sample_lognormal_sigma(
+  self : SimStore,
+  p50 : Double,
+  sigma : Double,
+) -> Double {
+  let u1 = self.rng.next_f64()
+  let u2 = self.rng.next_f64()
+  lognormal_from_uniforms(p50, sigma, u1, u2)
+}
+
+///|
+/// 故障注入：按概率决定本次请求是否失败。概率为 0 时不消耗 rng。
+fn SimStore::should_fail(self : SimStore, p : Double) -> Bool {
+  if p <= 0.0 {
+    return false
+  }
+  self.rng.next_f64() < p
+}
+
+///|
+/// S3 请求的额外延迟：WAN jitter + 随机 spike + 重试/backoff。
+/// 默认全部为 0，不改变既有确定性；开启后按固定 rng 顺序采样。
+fn SimStore::extra_s3_latency(self : SimStore) -> Double {
+  let mut d = 0.0
+  if self.cfg.wan_jitter_p50_us > 0.0 {
+    d += self.sample_lognormal_sigma(
+      self.cfg.wan_jitter_p50_us,
+      self.cfg.s3_ttfb_lognormal_sigma,
+    )
+  }
+  if self.cfg.spike_probability > 0.0 &&
+    self.rng.next_f64() < self.cfg.spike_probability {
+    d += self.sample_lognormal_sigma(self.cfg.spike_p50_us, 0.7)
+  }
+  if self.cfg.retry_probability > 0.0 &&
+    self.rng.next_f64() < self.cfg.retry_probability {
+    self.retries += 1
+    d += self.sample_lognormal_sigma(self.cfg.retry_p50_us, 0.47)
+  }
+  d
+}
+
+///|
 /// 带宽传输时间（微秒）：bytes / (mbps * 1e6 B/s) 秒 × 1e6 µs/s = bytes / mbps。
 fn bandwidth_us(bytes : Int, mbps : Double) -> Double {
   bytes.to_double() / mbps
+}
+
+///|
+/// 性能前提：延迟参数全部为正、并发度 >= 1。零延迟配置只用于正确性测试。
+pub fn SimConfig::latency_ready(self : SimConfig) -> Bool {
+  self.s3_get_ttfb_p50_us > 0.0 &&
+  self.s3_put_ttfb_p50_us > 0.0 &&
+  self.s3_list_p50_us > 0.0 &&
+  self.s3_delete_p50_us > 0.0 &&
+  self.s3_bandwidth_mbps > 0.0 &&
+  self.nvme_read_p50_us > 0.0 &&
+  self.nvme_bandwidth_mbps > 0.0 &&
+  self.concurrency >= 1
+}
+
+///|
+/// 性能 benchmark 硬门：延迟前提不满足时 raise Corrupt。
+/// 正确性测试仍可零延迟运行（不调用本函数即可）。
+pub fn SimStore::require_latency(self : SimStore) -> Unit raise @core.SpndError {
+  let c = self.cfg
+  if c.latency_ready() {
+    return
+  }
+  let bad : Array[String] = Array::new()
+  if !(c.s3_get_ttfb_p50_us > 0.0) {
+    bad.push("s3_get_ttfb_p50_us")
+  }
+  if !(c.s3_put_ttfb_p50_us > 0.0) {
+    bad.push("s3_put_ttfb_p50_us")
+  }
+  if !(c.s3_list_p50_us > 0.0) {
+    bad.push("s3_list_p50_us")
+  }
+  if !(c.s3_delete_p50_us > 0.0) {
+    bad.push("s3_delete_p50_us")
+  }
+  if !(c.s3_bandwidth_mbps > 0.0) {
+    bad.push("s3_bandwidth_mbps")
+  }
+  if !(c.nvme_read_p50_us > 0.0) {
+    bad.push("nvme_read_p50_us")
+  }
+  if !(c.nvme_bandwidth_mbps > 0.0) {
+    bad.push("nvme_bandwidth_mbps")
+  }
+  if !(c.concurrency >= 1) {
+    bad.push("concurrency")
+  }
+  let mut msg = "SimStore latency disabled: "
+  for i in 0..<bad.length() {
+    if i > 0 {
+      msg = msg + ", "
+    }
+    msg = msg + bad[i]
+  }
+  raise @core.Corrupt(msg)
 }
 
 ///|
@@ -55,7 +155,9 @@ fn sample_lognormal_seq(
   let rng = @core.Rng::new(seed)
   let out : Array[Double] = Array::new()
   for _ in 0..<n {
-    out.push(lognormal_from_uniforms(p50, sigma, rng.next_f64(), rng.next_f64()))
+    out.push(
+      lognormal_from_uniforms(p50, sigma, rng.next_f64(), rng.next_f64()),
+    )
   }
   out
 }

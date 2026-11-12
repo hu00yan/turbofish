@@ -17,7 +17,12 @@ pub fn tokenize_into(text : String, sink : (String) -> Unit) -> Unit {
   let chars : Array[Char] = Array::new()
   let flush = () => {
     if chars.length() > 0 {
-      let term = String::from_array(chars.view()).to_lower()
+      let mut term = String::from_array(chars.view()).to_lower()
+      // SPNDDIR1 的 term_len 是 u8；超长 ASCII token 截到 255 字节，
+      // 构建与查询走同一分词器，避免 dir 长度回绕（review P2-2）。
+      if term.length() > 255 {
+        term = term[:255].to_owned()
+      }
       chars.clear()
       sink(term)
     }
@@ -51,4 +56,12 @@ test "tokenize ascii and cjk" {
   )
   inspect(tokenize("").length(), content="0")
   inspect(tokenize("单字").length(), content="2")
+}
+
+///|
+test "tokenize caps oversized ascii token at 255 bytes" {
+  let long = "a".repeat(300)
+  let toks = tokenize(long)
+  assert_eq(toks.length(), 1)
+  assert_eq(toks[0].length(), 255)
 }

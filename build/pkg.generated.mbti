@@ -1,0 +1,84 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/build"
+
+import {
+  "moonbitlang/core/debug",
+  "turbofish/core",
+  "turbofish/format",
+  "turbofish/store",
+}
+
+// Values
+pub const GLOBAL_GC_GRACE_MS : UInt64 = 60000
+
+pub fn[S : @store.ObjectStore] compact(S, BuildConfig, String) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] compact_global(S, BuildConfig, String) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] delete_docs(S, BuildConfig, Array[UInt64]) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] gc_global_versions(S, String, String) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] gc_global_versions_grace(S, String, String, UInt64) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] gc_global_versions_grace_keep(S, String, Array[String], UInt64) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] ingest(S, BuildConfig, Array[@core.Doc]) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] ingest_delta(S, BuildConfig, Array[@core.Doc]) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] ingest_delta_opts(S, BuildConfig, Array[@core.Doc], Int32, Bool) -> Unit raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] maybe_compact_global(S, BuildConfig, String, Int32) -> Unit raise @core.SpndError
+
+pub fn train_centroids(Array[@core.Doc], Int32, Int32) -> @format.Centroids
+
+pub fn train_pq(Int32, Array[Float]) -> (Array[Float], Array[UInt32])
+
+// Errors
+
+// Types and methods
+pub(all) struct BuildConfig {
+  ns : String
+  segment_rows : Int32
+  nlist : Int32
+  use_f16 : Bool
+  vector_dim : Int32
+  write_stats : Bool
+  id_dense : Bool
+  use_dict_cols : Bool
+  use_bool_bitmap : Bool
+  vec_storage : VecStorage
+  write_blockmax : Bool
+  normalize_vecs : Bool
+  write_block_stats : Bool
+  global_vec_parts : Bool
+  write_fts_bloom : Bool
+  global_pack_size : Int32
+  fts_tokenizer : @core.Tokenizer
+}
+pub fn BuildConfig::default(String) -> Self
+pub fn BuildConfig::single_copy(String) -> Self
+pub fn BuildConfig::with_block_stats(Self, Bool) -> Self
+pub fn BuildConfig::with_blockmax(Self, Bool) -> Self
+pub fn BuildConfig::with_bool_bitmap(Self, Bool) -> Self
+pub fn BuildConfig::with_dict_cols(Self, Bool) -> Self
+pub fn BuildConfig::with_fts_bloom(Self, Bool) -> Self
+pub fn BuildConfig::with_fts_tokenizer(Self, @core.Tokenizer) -> Self
+pub fn BuildConfig::with_global_pack_size(Self, Int32) -> Self
+pub fn BuildConfig::with_global_vec_parts(Self, Bool) -> Self
+pub fn BuildConfig::with_id_dense(Self, Bool) -> Self
+pub fn BuildConfig::with_normalize_vecs(Self, Bool) -> Self
+pub fn BuildConfig::with_stats(Self, Bool) -> Self
+pub fn BuildConfig::with_vec_storage(Self, VecStorage) -> Self
+
+#derive(Eq, @debug.Debug)
+pub(all) enum VecStorage {
+  VF16
+  VSq8
+  VPq16
+}
+
+// Type aliases
+
+// Traits

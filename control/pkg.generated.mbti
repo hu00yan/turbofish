@@ -1,0 +1,53 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/control"
+
+import {
+  "turbofish/core",
+  "turbofish/query",
+  "turbofish/store",
+}
+
+// Values
+
+// Errors
+
+// Types and methods
+pub struct ControlPlane[S] {
+  store : S
+  cfg : CtrlConfig
+  entries : Map[String, CtrlEntry[S]]
+  mut hits : Int32
+  mut misses : Int32
+  mut reloads : Int32
+  mut stales : Int32
+  mut evictions : Int32
+  mut probes : Int32
+  mut probe_hits : Int32
+}
+pub fn[S : @store.ObjectStore] ControlPlane::acquire(Self[S], String) -> @query.Namespace[S] raise @core.SpndError
+pub fn[S : @store.ObjectStore] ControlPlane::invalidate(Self[S], String) -> Unit
+pub fn[S : @store.ObjectStore] ControlPlane::new(S, CtrlConfig) -> Self[S]
+pub fn[S : @store.ObjectStore] ControlPlane::pinned_manifest(Self[S], String) -> String?
+pub fn[S] ControlPlane::pinned_manifests(Self[S], String) -> Array[String]
+pub fn[S : @store.ObjectStore] ControlPlane::probe_stats(Self[S]) -> (Int32, Int32)
+pub fn[S : @store.ObjectStore] ControlPlane::release(Self[S], String) -> Unit
+pub fn[S : @store.ObjectStore] ControlPlane::stats(Self[S]) -> (Int32, Int32, Int32, Int32, Int32)
+
+pub(all) struct CtrlConfig {
+  head_ttl_ms : UInt64
+  stale_ok : Bool
+  max_entries : Int32
+}
+pub fn CtrlConfig::new() -> Self
+
+pub struct CtrlEntry[S] {
+  mut snap : @query.Namespace[S]
+  mut checked_ms : UInt64
+  mut pins : Int32
+  mut last_used : UInt64
+  pinned_ids : Array[String]
+}
+
+// Type aliases
+
+// Traits

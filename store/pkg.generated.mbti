@@ -1,0 +1,96 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/store"
+
+import {
+  "moonbitlang/core/debug",
+  "moonbitlang/core/set",
+}
+
+// Values
+pub fn classify_key(String) -> String
+
+pub fn[S : ObjectStore] gc_heads(S, String, String) -> Unit
+
+pub fn head_key(String, String) -> String
+
+pub fn head_pointer_key(String) -> String
+
+pub fn head_prefix(String) -> String
+
+pub fn[S : ObjectStore] read_head(S, String, String) -> String
+
+pub fn[S : ObjectStore] read_head_pointer(S, String) -> String?
+
+pub fn[S : ObjectStore] read_head_state(S, String, String) -> (String, Array[String])
+
+pub fn[S : ObjectStore] write_head(S, String, String) -> Unit
+
+pub fn[S : ObjectStore] write_head_pointer(S, String, String) -> Unit
+
+// Errors
+
+// Types and methods
+#derive(@debug.Debug)
+pub struct CostSnapshot {
+  gets : Int32
+  get_bytes : Int32
+  ranged_gets : Int32
+  ranged_bytes : Int32
+  lists : Int32
+  puts : Int32
+  put_bytes : Int32
+  deletes : Int32
+  cas_ok : Int32
+  cas_fail : Int32
+  classes : Array[(String, Int32, Int32)]
+}
+pub fn CostSnapshot::show_table(Self) -> String
+pub fn CostSnapshot::total_read_bytes(Self) -> Int32
+pub fn CostSnapshot::total_requests(Self) -> Int32
+
+type MemClassStat
+
+pub struct MemStore {
+  data : Map[String, Bytes]
+  versions : Map[String, Int32]
+  cache : @set.Set[String]
+  ranges : Map[String, Array[(Int32, Int32)]]
+  class_stats : Map[String, MemClassStat]
+  mut next_ver : Int32
+  mut gets : Int32
+  mut get_bytes : Int32
+  mut ranged_gets : Int32
+  mut ranged_bytes : Int32
+  mut lists : Int32
+  mut puts : Int32
+  mut put_bytes : Int32
+  mut deletes : Int32
+  mut cas_ok : Int32
+  mut cas_fail : Int32
+}
+pub fn MemStore::cold(Self) -> Unit
+pub fn MemStore::cost(Self) -> CostSnapshot
+pub fn MemStore::head_version(Self, String) -> String?
+pub fn MemStore::new() -> Self
+pub fn MemStore::object_count(Self) -> Int32
+pub fn MemStore::reset_cost(Self) -> Unit
+pub fn MemStore::total_object_bytes(Self) -> Int32
+pub impl BatchStore for MemStore
+pub impl ObjectStore for MemStore
+
+// Type aliases
+
+// Traits
+pub(open) trait BatchStore : ObjectStore {
+  fn get_many(Self, Array[String]) -> Array[Bytes?]
+  fn get_range_many(Self, Array[(String, Int32, Int32)]) -> Array[Bytes?]
+}
+
+pub(open) trait ObjectStore {
+  fn get(Self, String) -> Bytes?
+  fn put(Self, String, Bytes) -> Unit
+  fn put_if_match(Self, String, String?, Bytes) -> Bool
+  fn get_range(Self, String, Int32, Int32) -> Bytes?
+  fn list(Self, String) -> Array[String]
+  fn delete(Self, String) -> Unit
+}

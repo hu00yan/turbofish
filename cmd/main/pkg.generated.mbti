@@ -1,0 +1,15 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/cmd/main"
+
+// Values
+
+// Errors
+
+// Types and methods
+type CostKind
+
+type SimMeasure
+
+// Type aliases
+
+// Traits

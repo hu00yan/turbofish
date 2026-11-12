@@ -1,21 +1,27 @@
-// BM25 读路径（spec 局部性语义）：
+// BM25 读路径（spec 局部性语义）。
 //
 // query tokenize → 对 manifest.segments 每个 segment：
-//   GET seg meta.json（row_count）→ GET fts/dir.bin（decode_fts_dir）→
+//   seg meta.json（缓存，含 stats 预判）→ fts/dir.bin（缓存）→
 //   命中 term 用 store.get_range(postings.bin, offset=16+entry.offset, len=entry.size)
-//   拉局部 posting（16 = postings.bin 的 SPNDPOS1 头，见 NOTES 第 2 节）→
-//   自写 delta-uvarint 解码（range 读回的字节没有 SPNDPOS1 头，read_postings 不适用）→
-//   GET fts/doc_len.bin → okapi 打分（df/term/segment，N = segment.row_count，
+//   拉局部 posting（16 = postings.bin 的 SPNDPOS1 头）→
+//   自写 delta-uvarint 解码（range 读回的字节没有 SPNDPOS1 头）→
+//   fts/doc_len.bin（缓存）→ okapi 打分（df/term/segment，N = segment.row_count，
 //   avgdl = manifest.avg_doc_len，k1/b 来自 namespace.json）。
+//
+// Q1：fts/blockmax.bin 存在时走 block-max WAND（块上界 + 全局词上界），
+// 正确性与逐 posting 路径一致（测试硬门）。filter 在打分阶段按段内行号过滤
+// （列缓存 + 字典 code / bool 位图直查），stats 不相交的段整段跳过。
 // per-segment top-k → 跨 segment 合并 → row→id → tombstone → top-k。
-// Filter 在打分阶段按段内行号过滤（列整读，MVP 全扫），先于 row→id。
 
 ///|
-/// 过滤列的行级匹配器：列一次性解码为数组，按行号判断。
-enum RowMatcher {
+/// 过滤列的行级匹配器（Q1：字典列按 code、bool 位图直接查位）。
+pub(all) enum RowMatcher {
   MStr(Array[String], String)
+  MDict(Array[UInt16], UInt16) // codes, target code（65535 = 值不在字典）
   MBool(Array[Bool], Bool)
+  MBitmap(Bytes, Bool) // 位图字节, target
   MI64(Array[Int64], Int64)
+  MMask(FixedArray[Bool]) // 块级 stats 跳过后只标记可能命中的行
 }
 
 ///|
@@ -28,19 +34,131 @@ fn filter_field(f : Filter) -> String {
 }
 
 ///|
-/// 加载某 segment 的过滤列并按 Filter 类型校验 dtype。
-fn load_matcher[S : @store.ObjectStore](
+/// 匹配器缓存 key（字段 + 目标值）。
+fn matcher_key(f : Filter) -> String {
+  match f {
+    FStr(field, v) => "\{field}=s:\{v}"
+    FBool(field, v) => "\{field}=b:\{v}"
+    FI64(field, v) => "\{field}=i:\{v}"
+  }
+}
+
+///|
+/// 加载（或从缓存取）某 segment 的过滤匹配器。
+fn[S : @store.ObjectStore] load_matcher(
   n : Namespace[S],
+  cs : CachedSeg,
   seg_id : String,
   f : Filter,
 ) -> RowMatcher raise @core.SpndError {
-  let key = "\{n.ns}/_segments/\{seg_id}/rows/\{filter_field(f)}.bin"
-  let cd = read_col(n, key)
-  match (f, cd) {
-    (FStr(_, v), @format.ColStr(arr)) => MStr(arr, v)
-    (FBool(_, v), @format.ColBool(arr)) => MBool(arr, v)
-    (FI64(_, v), @format.ColI64(arr)) => MI64(arr, v)
-    _ => raise @core.Corrupt("filter column dtype mismatch for \{filter_field(f)}")
+  let key = matcher_key(f)
+  match cs.matchers.get(key) {
+    Some(m) => m
+    None => {
+      let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{filter_field(f)}.bin"
+      let bs = get_object(n.store, col_key)
+      let m = match f {
+        FStr(_, v) =>
+          if @format.is_dict_col(bs) {
+            let (dict, codes) = @format.decode_col_dict(bs)
+            let mut target : UInt16 = (65535).to_uint16()
+            for i in 0..<dict.length() {
+              if dict[i] == v {
+                target = i.to_uint16()
+                break
+              }
+            }
+            MDict(codes, target)
+          } else {
+            match @format.decode_col(bs) {
+              @format.ColStr(arr) => MStr(arr, v)
+              _ =>
+                raise @core.Corrupt(
+                  "filter column dtype mismatch for \{filter_field(f)}",
+                )
+            }
+          }
+        FBool(_, v) =>
+          // dtype=bool 且 flags bit1=位图 → 直接查位，不展开
+          if @format.is_bitmap_bool(bs) {
+            MBitmap(bs, v)
+          } else {
+            match @format.decode_col(bs) {
+              @format.ColBool(arr) => MBool(arr, v)
+              _ =>
+                raise @core.Corrupt(
+                  "filter column dtype mismatch for \{filter_field(f)}",
+                )
+            }
+          }
+        FI64(_, v) =>
+          if filter_field(f) == "ts" {
+            match seg_block_stats(n, cs, seg_id) {
+              Some((block_size, row_count, blocks)) => {
+                let mask : FixedArray[Bool] = FixedArray::make(
+                  cs.row_count,
+                  false,
+                )
+                let ts_key = "\{n.ns}/_segments/\{seg_id}/rows/ts.bin"
+                let mut ok = true
+                for b in 0..<blocks.length() {
+                  let (lo, hi) = blocks[b]
+                  if v >= lo && v <= hi {
+                    let start = b * block_size
+                    let nrows = if start + block_size < row_count {
+                      block_size
+                    } else {
+                      row_count - start
+                    }
+                    match n.store.get_range(ts_key, 20 + start * 8, nrows * 8) {
+                      Some(pbs) =>
+                        if pbs.length() >= nrows * 8 {
+                          for i in 0..<nrows {
+                            if @core.read_i64_le(pbs, i * 8) == v {
+                              mask[start + i] = true
+                            }
+                          }
+                        } else {
+                          ok = false
+                          break
+                        }
+                      None => {
+                        ok = false
+                        break
+                      }
+                    }
+                  }
+                }
+                if ok {
+                  MMask(mask)
+                } else {
+                  match @format.decode_col(bs) {
+                    @format.ColI64(arr) => MI64(arr, v)
+                    _ =>
+                      raise @core.Corrupt("filter column dtype mismatch for ts")
+                  }
+                }
+              }
+              None =>
+                match @format.decode_col(bs) {
+                  @format.ColI64(arr) => MI64(arr, v)
+                  _ =>
+                    raise @core.Corrupt("filter column dtype mismatch for ts")
+                }
+            }
+          } else {
+            match @format.decode_col(bs) {
+              @format.ColI64(arr) => MI64(arr, v)
+              _ =>
+                raise @core.Corrupt(
+                  "filter column dtype mismatch for \{filter_field(f)}",
+                )
+            }
+          }
+      }
+      cs.matchers.set(key, m)
+      m
+    }
   }
 }
 
@@ -52,9 +170,19 @@ fn matcher_at(m : RowMatcher, row : Int) -> Bool {
         Some(x) => x == v
         None => false
       }
+    MDict(codes, target) =>
+      match codes.get(row) {
+        Some(x) => x == target
+        None => false
+      }
     MBool(arr, v) =>
       match arr.get(row) {
         Some(x) => x == v
+        None => false
+      }
+    MBitmap(bs, v) =>
+      match bs.get(20 + row / 8) {
+        Some(b) => (((b.to_int() >> (row % 8)) & 1) != 0) == v
         None => false
       }
     MI64(arr, v) =>
@@ -62,40 +190,48 @@ fn matcher_at(m : RowMatcher, row : Int) -> Bool {
         Some(x) => x == v
         None => false
       }
+    MMask(mask) =>
+      if row >= 0 && row < mask.length() {
+        mask[row]
+      } else {
+        false
+      }
   }
 }
 
 ///|
 /// 解码 get_range 拉回的 posting 区间（无 SPNDPOS1 头）：
 /// repeated (row_delta uvarint + tf uvarint)，首 delta = row+1（prev 初始 -1）。
-fn decode_posting_slice(bs : Bytes) -> Array[@format.Posting] raise @core.SpndError {
+fn decode_posting_slice(
+  bs : Bytes,
+) -> Array[@format.Posting] raise @core.SpndError {
   let out : Array[@format.Posting] = Array::new()
+  let fa = bs.to_fixedarray()
   let mut prev = -1
   let mut pos = 0
   let len = bs.length()
   while pos < len {
-    let (delta, p1) = @core.read_uvarint(bs, pos)
-    let (tf, p2) = @core.read_uvarint(bs, p1)
-    prev = prev + delta.to_int()
-    out.push({ row: prev, tf: tf.to_int() })
+    let (delta, p1) = @format.fa_uvarint(fa, pos, len)
+    let (tf, p2) = @format.fa_uvarint(fa, p1, len)
+    prev = prev + delta.reinterpret_as_int()
+    out.push({ row: prev, tf: tf.reinterpret_as_int() })
     pos = p2
   }
   out
 }
 
 ///|
-/// 在 fts 目录（按 String::compare 升序）中二分查找 term。
-fn find_entry(
-  entries : Array[@format.FtsDirEntry],
-  term : String,
-) -> @format.FtsDirEntry? {
+/// 在 fts 目录（按 @format.term_compare = UTF-8 字节序升序）中二分查找 term。
+/// 比较器必须与 encode_fts 的排序一致（历史坑：String::compare 长度优先，
+/// 与字节序二分错位，CJK 多字 term 查询失败——见 NOTES4）。
+fn find_entry_idx(entries : Array[@format.FtsDirEntry], term : String) -> Int? {
   let mut lo = 0
   let mut hi = entries.length()
   while lo < hi {
     let mid = (lo + hi) / 2
-    let c = entries[mid].term.compare(term)
+    let c = @format.term_compare(entries[mid].term, term)
     if c == 0 {
-      return Some(entries[mid])
+      return Some(mid)
     }
     if c < 0 {
       lo = mid + 1
@@ -126,27 +262,274 @@ fn bm25_score(
 }
 
 ///|
-/// 单 segment 的 BM25 候选：返回 (row, score) 降序 top-k。
-fn bm25_segment[S : @store.ObjectStore](
+/// WAND 迭代器（一个 term 的 posting 游标 + 块上界）。
+priv struct WandIter {
+  posts : Array[@format.Posting]
+  block_ubs : Array[Double]
+  ub_global : Double
+  df : Int
+  mut pos : Int
+  mut row : Int
+}
+
+///|
+const WAND_END : Int = 0x3FFFFFFF
+
+///|
+fn wand_advance(it : WandIter) -> Unit {
+  it.pos = it.pos + 1
+  if it.pos < it.posts.length() {
+    it.row = it.posts[it.pos].row
+  } else {
+    it.row = WAND_END
+  }
+}
+
+///|
+/// 把游标推进到第一个 row >= target；途中若「当前块上界 + 其他词上界 < θ」，
+/// 整块跳过（block-max 剪枝）。θ 为当前 top-k 的第 k 名分数（未满 k 时为 0）。
+fn wand_advance_to(
+  it : WandIter,
+  target : Int,
+  block_size : Int,
+  theta : Double,
+  rest_ub : Double,
+) -> Unit {
+  while it.pos < it.posts.length() && it.posts[it.pos].row < target {
+    let b = if block_size > 0 { it.pos / block_size } else { 0 }
+    let ub = if b < it.block_ubs.length() {
+      it.block_ubs[b]
+    } else {
+      it.ub_global
+    }
+    if ub + rest_ub < theta {
+      let next = (b + 1) * block_size
+      if next > it.pos {
+        it.pos = next
+      } else {
+        it.pos = it.pos + 1
+      }
+    } else {
+      it.pos = it.pos + 1
+    }
+  }
+  if it.pos < it.posts.length() {
+    it.row = it.posts[it.pos].row
+  } else {
+    it.row = WAND_END
+  }
+}
+
+///|
+/// 单 segment 的 block-max WAND。正确性：全局/块上界都是 BM25 的合法上界
+/// （tf 越大分越高、dl 越小分越高），因此跳过的块不可能进入 top-k。
+fn[S : @store.ObjectStore] bm25_segment_wand(
   n : Namespace[S],
-  seg : @format.SegmentMeta,
+  seg_id : String,
+  matched : Array[(Int, @format.FtsDirEntry)],
+  blk : Array[Array[(Int, Int)]],
+  block_size : Int,
+  doc_len : Array[Int],
+  row_count : Int,
+  avgdl : Double,
+  k1 : Double,
+  b : Double,
+  k : Int,
+  matcher : RowMatcher?,
+) -> Array[(Int, Double)] raise @core.SpndError {
+  let iters : Array[WandIter] = Array::new()
+  for m in matched {
+    let (di, e) = m
+    let slice = match
+      n.store.get_range(
+        "\{n.ns}/_segments/\{seg_id}/fts/postings.bin",
+        16 + e.offset,
+        e.size,
+      ) {
+      Some(x) => x
+      None =>
+        raise @core.NotFound(
+          "\{n.ns}/_segments/\{seg_id}/fts/postings.bin range",
+        )
+    }
+    let posts = decode_posting_slice(slice)
+    if posts.is_empty() {
+      continue
+    }
+    let blocks = if di < blk.length() { blk[di] } else { [] }
+    let block_ubs : Array[Double] = Array::new(capacity=blocks.length())
+    let mut ub_global = 0.0
+    for x in blocks {
+      let u = bm25_score(x.0, e.df, row_count, x.1, avgdl, k1, b)
+      block_ubs.push(u)
+      if u > ub_global {
+        ub_global = u
+      }
+    }
+    if block_ubs.is_empty() {
+      let mut max_tf = 0
+      let mut min_dl = 0
+      let mut first = true
+      for p in posts {
+        if p.tf > max_tf {
+          max_tf = p.tf
+        }
+        let dl = if p.row >= 0 && p.row < doc_len.length() {
+          doc_len[p.row]
+        } else {
+          0
+        }
+        if first || dl < min_dl {
+          min_dl = dl
+          first = false
+        }
+      }
+      ub_global = bm25_score(max_tf, e.df, row_count, min_dl, avgdl, k1, b)
+      block_ubs.push(ub_global)
+    }
+    iters.push({
+      posts,
+      block_ubs,
+      ub_global,
+      df: e.df,
+      pos: 0,
+      row: posts[0].row,
+    })
+  }
+  if iters.is_empty() {
+    return []
+  }
+  let top : Array[(Int, Double)] = Array::new()
+  let mut theta = 0.0
+  while iters.length() > 0 {
+    // 移除耗尽迭代器
+    let alive : Array[WandIter] = Array::new()
+    for it in iters {
+      if it.row != WAND_END {
+        alive.push(it)
+      }
+    }
+    iters.clear()
+    for it in alive {
+      iters.push(it)
+    }
+    if iters.is_empty() {
+      break
+    }
+    iters.sort_by(fn(a, b) { a.row.compare(b.row) })
+    // pivot：按 row 累加全局上界，首次 >= θ 的位置
+    let mut sum = 0.0
+    let mut pivot_i = -1
+    for i in 0..<iters.length() {
+      sum += iters[i].ub_global
+      if sum >= theta {
+        pivot_i = i
+        break
+      }
+    }
+    if pivot_i < 0 {
+      break
+    }
+    let pivot_row = iters[pivot_i].row
+    if iters[0].row == pivot_row {
+      // 完整打分 pivot 行（所有当前 row == pivot 的 term）
+      let mut s = 0.0
+      for i in 0..<iters.length() {
+        let it = iters[i]
+        if it.row == pivot_row {
+          let p = it.posts[it.pos]
+          let ok = match matcher {
+            Some(m) => matcher_at(m, pivot_row)
+            None => true
+          }
+          if ok {
+            let dl = match doc_len.get(pivot_row) {
+              Some(x) => x
+              None => 0
+            }
+            s += bm25_score(p.tf, it.df, row_count, dl, avgdl, k1, b)
+          }
+          wand_advance(it)
+        }
+      }
+      if s > 0.0 {
+        top.push((pivot_row, s))
+        if top.length() > k {
+          let mut mi = 0
+          for j in 1..<top.length() {
+            if top[j].1 < top[mi].1 {
+              mi = j
+            }
+          }
+          let _ = top.remove(mi)
+        }
+        if top.length() >= k {
+          let mut m = top[0].1
+          for j in 1..<top.length() {
+            if top[j].1 < m {
+              m = top[j].1
+            }
+          }
+          theta = m
+        }
+      }
+    } else {
+      // 推进最小 row 的迭代器到 pivot（可整块跳过）
+      let mut rest = 0.0
+      for i in 1..<iters.length() {
+        rest += iters[i].ub_global
+      }
+      wand_advance_to(iters[0], pivot_row, block_size, theta, rest)
+    }
+  }
+  top.sort_by(fn(a, b) { b.1.compare(a.1) })
+  if top.length() > k {
+    top.truncate(k)
+  }
+  top
+}
+
+///|
+/// 单 segment 的 BM25 候选：返回 (row, score) 降序 top-k。
+/// use_wand=true 且该段有 blockmax.bin 时走 WAND，否则逐 posting 累积。
+fn[S : @store.ObjectStore] bm25_segment(
+  n : Namespace[S],
+  seg_idx : Int,
   terms : Array[String],
   avgdl : Double,
   k1 : Double,
   b : Double,
   k : Int,
   filter : Filter?,
+  use_wand : Bool,
 ) -> Array[(Int, Double)] raise @core.SpndError {
-  let base = "\{n.ns}/_segments/\{seg.id}"
-  let meta_bs = get_object(n.store, "\{base}/meta.json")
-  let (row_count, _) = parse_seg_meta(meta_bs)
-  let dir_bs = get_object(n.store, "\{base}/fts/dir.bin")
-  let entries = @format.decode_fts_dir(dir_bs)
+  let seg = n.manifest.segments[seg_idx]
+  let cs = ensure_seg(n, seg_idx)
+  if !seg_may_match(cs, filter) {
+    return []
+  }
+  // LSM 式 Bloom：term 不可能存在时直接跳过 dir/postings/doc_len
+  match cs.bloom {
+    Some(bl) => {
+      let mut any = false
+      for t in terms {
+        if @format.bloom_may_contain(bl, t) {
+          any = true
+          break
+        }
+      }
+      if !any {
+        return []
+      }
+    }
+    None => ()
+  }
+  let entries = seg_dir(n, cs, seg.id)
   // 先解析全部命中 term；无命中则不再读 doc_len / postings
-  let matched : Array[@format.FtsDirEntry] = Array::new()
+  let matched : Array[(Int, @format.FtsDirEntry)] = Array::new()
   for t in terms {
-    match find_entry(entries, t) {
-      Some(e) => matched.push(e)
+    match find_entry_idx(entries, t) {
+      Some(i) => matched.push((i, entries[i]))
       None => ()
     }
   }
@@ -154,19 +537,46 @@ fn bm25_segment[S : @store.ObjectStore](
     return []
   }
   let matcher : RowMatcher? = match filter {
-    Some(f) => Some(load_matcher(n, seg.id, f))
+    Some(f) => Some(load_matcher(n, cs, seg.id, f))
     None => None
   }
-  let doc_len = match read_col(n, "\{base}/fts/doc_len.bin") {
-    @format.ColU32(arr) => arr
-    _ => raise @core.Corrupt("doc_len column dtype is not u32")
+  let doc_len = seg_doc_len(n, cs, seg.id)
+  let row_count = cs.row_count
+  if use_wand {
+    match seg_blockmax(n, cs, seg.id) {
+      Some(blk) =>
+        return bm25_segment_wand(
+          n,
+          seg.id,
+          matched,
+          blk,
+          cs.blockmax_size,
+          doc_len,
+          row_count,
+          avgdl,
+          k1,
+          b,
+          k,
+          matcher,
+        )
+      None => ()
+    }
   }
-  let scores : Map[Int, Double] = Map::new()
-  for e in matched {
+  let scores : Map[Int, Double] = Map([])
+  for m in matched {
+    let (_, e) = m
     // 只拉 term 的局部 posting 区间（外层 16 = SPNDPOS1 头）
-    let slice = match n.store.get_range("\{base}/fts/postings.bin", 16 + e.offset, e.size) {
+    let slice = match
+      n.store.get_range(
+        "\{n.ns}/_segments/\{seg.id}/fts/postings.bin",
+        16 + e.offset,
+        e.size,
+      ) {
       Some(x) => x
-      None => raise @core.NotFound("\{base}/fts/postings.bin range")
+      None =>
+        raise @core.NotFound(
+          "\{n.ns}/_segments/\{seg.id}/fts/postings.bin range",
+        )
     }
     let posts = decode_posting_slice(slice)
     for p in posts {
@@ -204,24 +614,56 @@ fn bm25_segment[S : @store.ObjectStore](
 }
 
 ///|
+/// BM25 检索实现（use_wand=false 用于正确性对照测试）。
+fn[S : @store.ObjectStore] bm25_search_impl(
+  n : Namespace[S],
+  query : String,
+  k : Int,
+  filter : Filter?,
+  use_wand : Bool,
+) -> Array[QueryResult] raise @core.SpndError {
+  // 查询侧用 namespace 配置的分词器（与索引侧同一选择，见 init_namespace）。
+  let qtok = match n.meta.fts_tokenizer {
+    Some(s) =>
+      match @core.parse_tokenizer(s) {
+        Some(t) => t
+        None => @core.Word
+      }
+    None => @core.Word
+  }
+  let terms = dedupe_terms(@core.tokenize_with(qtok, query))
+  if terms.is_empty() || k <= 0 {
+    return []
+  }
+  let tomb = tombstones_of(n)
+  let cands : Array[(Int, Int, Double)] = Array::new()
+  for si in 0..<n.manifest.segments.length() {
+    for
+      c in bm25_segment(
+        n,
+        si,
+        terms,
+        n.manifest.avg_doc_len,
+        n.meta.k1,
+        n.meta.b,
+        k,
+        filter,
+        use_wand,
+      ) {
+      cands.push((si, c.0, c.1))
+    }
+  }
+  results_from_candidates(n, cands, tomb, k)
+}
+
+///|
 /// BM25 检索：per-segment top-k → 合并 → tombstone → top-k（score 降序）。
-pub fn bm25_search[S : @store.ObjectStore](
+/// 有 blockmax.bin 的段自动走 WAND。
+pub fn[S : @store.ObjectStore] bm25_search(
   n : Namespace[S],
   query : String,
   k : Int,
   filter : Filter?,
 ) -> Array[QueryResult] raise @core.SpndError {
-  let terms = dedupe_terms(@core.tokenize(query))
-  if terms.is_empty() || k <= 0 {
-    return []
-  }
-  let tomb = tombstone_set(n.manifest)
-  let cands : Array[(Int, Int, Double)] = Array::new()
-  for si in 0..<n.manifest.segments.length() {
-    let seg = n.manifest.segments[si]
-    for c in bm25_segment(n, seg, terms, n.manifest.avg_doc_len, n.meta.k1, n.meta.b, k, filter) {
-      cands.push((si, c.0, c.1))
-    }
-  }
-  results_from_candidates(n, cands, tomb, k)
+  bm25_search_impl(n, query, k, filter, true)
 }

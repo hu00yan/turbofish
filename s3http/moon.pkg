@@ -1,0 +1,18 @@
+import {
+  "turbofish/s3store",
+  "moonbitlang/core/encoding/utf8",
+}
+
+options(
+  targets: {
+    "s3http_native.mbt": [ "native", "llvm" ],
+    "s3http_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+  "native-stub": [ "s3http.c" ],
+  link: {
+    "native": {
+      "cc-link-flags": "-L/opt/homebrew/opt/curl/lib -lcurl -Wl,-rpath,/opt/homebrew/opt/curl/lib",
+      "stub-cc-flags": "-I/opt/homebrew/opt/curl/include",
+    },
+  },
+)

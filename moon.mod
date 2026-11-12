@@ -8,6 +8,10 @@ repository = ""
 
 license = "Apache-2.0"
 
-keywords = []
+keywords = [ ]
 
 description = "seekpond/v1: object-storage-native search index format (BM25 + IVF) in MoonBit"
+
+import {
+  "moonbitlang/async@0.22.9",
+}

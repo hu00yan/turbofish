@@ -1,0 +1,22 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/s3http"
+
+import {
+  "turbofish/s3store",
+}
+
+// Values
+pub fn now_amz_date() -> String
+
+// Errors
+
+// Types and methods
+pub struct CurlTransport {
+  version : Int32
+}
+pub fn CurlTransport::new() -> Self
+pub impl @s3store.HttpTransport for CurlTransport
+
+// Type aliases
+
+// Traits

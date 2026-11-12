@@ -94,7 +94,7 @@ fn bm25_bruteforce(
   k : Int,
 ) -> Array[UInt64] raise @core.SpndError {
   let terms : Array[String] = Array::new()
-  let seen : Set[String] = Set::new()
+  let seen : Set[String] = Set([])
   for t in @core.tokenize(query) {
     if !seen.contains(t) {
       seen.add(t)
@@ -104,7 +104,7 @@ fn bm25_bruteforce(
   if terms.is_empty() || k <= 0 {
     return []
   }
-  let tomb : Set[UInt64] = Set::new()
+  let tomb : Set[UInt64] = Set([])
   for d in man.deleted {
     tomb.add(d)
   }
@@ -112,21 +112,23 @@ fn bm25_bruteforce(
   for si in 0..<man.segments.length() {
     let seg = man.segments[si]
     let base = "\{ns}/_segments/\{seg.id}"
-    let texts = match @format.decode_col(
-      match store.get("\{base}/rows/text.bin") {
-        Some(x) => x
-        None => raise @core.NotFound("\{base}/rows/text.bin")
-      },
-    ) {
+    let texts = match
+      @format.decode_col(
+        match store.get("\{base}/rows/text.bin") {
+          Some(x) => x
+          None => raise @core.NotFound("\{base}/rows/text.bin")
+        },
+      ) {
       @format.ColStr(a) => a
       _ => raise @core.Corrupt("text column dtype")
     }
-    let dls = match @format.decode_col(
-      match store.get("\{base}/fts/doc_len.bin") {
-        Some(x) => x
-        None => raise @core.NotFound("\{base}/fts/doc_len.bin")
-      },
-    ) {
+    let dls = match
+      @format.decode_col(
+        match store.get("\{base}/fts/doc_len.bin") {
+          Some(x) => x
+          None => raise @core.NotFound("\{base}/fts/doc_len.bin")
+        },
+      ) {
       @format.ColU32(a) => a
       _ => raise @core.Corrupt("doc_len column dtype")
     }
@@ -166,7 +168,16 @@ fn bm25_bruteforce(
       for ti in 0..<n_terms {
         let tf = tfs[row][ti]
         if tf > 0 {
-          s = s + bench_bm25_score(tf, dfs[ti], n_docs, dl, man.avg_doc_len, meta.k1, meta.b)
+          s = s +
+            bench_bm25_score(
+              tf,
+              dfs[ti],
+              n_docs,
+              dl,
+              man.avg_doc_len,
+              meta.k1,
+              meta.b,
+            )
         }
       }
       if s > 0.0 {
@@ -181,7 +192,7 @@ fn bm25_bruteforce(
       merged.push((si, c.0, c.1))
     }
   }
-  let id_cols : Map[Int, Array[UInt64]] = Map::new()
+  let id_cols : Map[Int, Array[UInt64]] = Map([])
   let scored : Array[(UInt64, Double)] = Array::new()
   for c in merged {
     let (si, row, score) = c
@@ -189,12 +200,13 @@ fn bm25_bruteforce(
       Some(a) => a
       None => {
         let seg = man.segments[si]
-        let arr = match @format.decode_col(
-          match store.get("\{ns}/_segments/\{seg.id}/rows/id.bin") {
-            Some(x) => x
-            None => raise @core.NotFound("id.bin")
-          },
-        ) {
+        let arr = match
+          @format.decode_col(
+            match store.get("\{ns}/_segments/\{seg.id}/rows/id.bin") {
+              Some(x) => x
+              None => raise @core.NotFound("id.bin")
+            },
+          ) {
           @format.ColU64(a) => a
           _ => raise @core.Corrupt("id column dtype")
         }
@@ -232,7 +244,7 @@ fn vec_bruteforce(
   qv : Array[Float],
   k : Int,
 ) -> Array[UInt64] raise @core.SpndError {
-  let tomb : Set[UInt64] = Set::new()
+  let tomb : Set[UInt64] = Set([])
   for d in man.deleted {
     tomb.add(d)
   }
@@ -249,12 +261,13 @@ fn vec_bruteforce(
     if qv.length() != dim {
       raise @core.Corrupt("query vec dim mismatch")
     }
-    let ids = match @format.decode_col(
-      match store.get("\{base}/rows/id.bin") {
-        Some(x) => x
-        None => raise @core.NotFound("\{base}/rows/id.bin")
-      },
-    ) {
+    let ids = match
+      @format.decode_col(
+        match store.get("\{base}/rows/id.bin") {
+          Some(x) => x
+          None => raise @core.NotFound("\{base}/rows/id.bin")
+        },
+      ) {
       @format.ColU64(a) => a
       _ => raise @core.Corrupt("id column dtype")
     }
@@ -293,7 +306,9 @@ fn run_gates(
   let ns = "bench"
   let n = @query.open(store, ns)
   // ---- gate 1: BM25 暴力对照
-  println("== gate 1: BM25 暴力对照（\{bm25_qs.length()} 个查询，top-10 id 集合必须一致）")
+  println(
+    "== gate 1: BM25 暴力对照（\{bm25_qs.length()} 个查询，top-10 id 集合必须一致）",
+  )
   let mut ok1 = 0
   for i in 0..<bm25_qs.length() {
     let got = @query.bm25_search(n, bm25_qs[i], 10, None)
@@ -302,18 +317,25 @@ fn run_gates(
     if got_ids == want {
       ok1 += 1
     } else {
-      println("  mismatch q\{i} [\{bm25_qs[i]}]: got=[\{show_ids(got_ids)}] want=[\{show_ids(want)}]")
+      println(
+        "  mismatch q\{i} [\{bm25_qs[i]}]: got=[\{show_ids(got_ids)}] want=[\{show_ids(want)}]",
+      )
     }
   }
   println("  bm25 set match: \{ok1}/\{bm25_qs.length()}")
-  gate(ok1 == bm25_qs.length(), "bm25 brute-force top-10 set match \{ok1}/\{bm25_qs.length()}")
+  gate(
+    ok1 == bm25_qs.length(),
+    "bm25 brute-force top-10 set match \{ok1}/\{bm25_qs.length()}",
+  )
   // ---- gate 2: 向量
-  println("== gate 2: 向量（nprobe=64 与暴力全量完全一致；nprobe=8 recall@10 ≥ 0.8）")
+  println(
+    "== gate 2: 向量（nprobe=64 与暴力全量完全一致；nprobe=8 recall@10 ≥ 0.8）",
+  )
   let mut exact = 0
   let mut recall_sum = 0.0
   for i in 0..<vec_qvs.length() {
     let want = vec_bruteforce(store, ns, n.manifest, vec_qvs[i], 10)
-    let want_set : Set[UInt64] = Set::new()
+    let want_set : Set[UInt64] = Set([])
     for id in want {
       want_set.add(id)
     }
@@ -330,15 +352,24 @@ fn run_gates(
     }
     let recall = inter.to_double() / 10.0
     recall_sum = recall_sum + recall
-    println("  q\{i}: exact64=\{sorted_ids_of(r64) == want} recall@10(nprobe=8)=\{recall}")
+    println(
+      "  q\{i}: exact64=\{sorted_ids_of(r64) == want} recall@10(nprobe=8)=\{recall}",
+    )
   }
   let nq = vec_qvs.length()
-  println("  nprobe=64 exact: \{exact}/\{nq}, avg recall@10(nprobe=8)=\{recall_sum / nq.to_double()}")
+  println(
+    "  nprobe=64 exact: \{exact}/\{nq}, avg recall@10(nprobe=8)=\{recall_sum / nq.to_double()}",
+  )
   gate(exact == nq, "vec nprobe=64 exact \{exact}/\{nq}")
   gate(recall_sum / nq.to_double() >= 0.8, "vec nprobe=8 avg recall@10 < 0.8")
   // ---- gate 3: 过滤
   println("== gate 3: 过滤 bm25_search(category=cat3)")
-  let rf = @query.bm25_search(n, bm25_qs[0], 10, Some(@query.FStr("category", "cat3")))
+  let rf = @query.bm25_search(
+    n,
+    bm25_qs[0],
+    10,
+    Some(@query.FStr("category", "cat3")),
+  )
   println("  filter 结果数: \{rf.length()}")
   gate(rf.length() > 0, "filter results empty")
   let mut all_cat3 = true
@@ -350,7 +381,7 @@ fn run_gates(
   gate(all_cat3, "filter results contain non-cat3")
   // ---- gate 4: 删除
   println("== gate 4: delete 20 ids 后所有查询不再返回它们")
-  let del_set : Set[UInt64] = Set::new()
+  let del_set : Set[UInt64] = Set([])
   for r in @query.bm25_search(n, bm25_qs[0], 10, None) {
     if del_set.length() < 10 {
       del_set.add(r.id)
@@ -383,7 +414,9 @@ fn run_gates(
     }
   }
   gate(!leaked, "deleted ids still returned by queries")
-  println("  delete 后 bm25/vec/hybrid 均不含已删 ids（结果数 \{rb.length()}/\{rv.length()}/\{rh.length()}）")
+  println(
+    "  delete 后 bm25/vec/hybrid 均不含已删 ids（结果数 \{rb.length()}/\{rv.length()}/\{rh.length()}）",
+  )
   println("== 全部 gate 通过")
 }
 
@@ -407,7 +440,7 @@ fn pctl(arr : Array[Int], p : Int) -> Int {
   }
   let c = arr.copy()
   c.sort()
-  let mut idx = (c.length() * p) / 100
+  let mut idx = c.length() * p / 100
   if idx >= c.length() {
     idx = c.length() - 1
   }
@@ -415,7 +448,11 @@ fn pctl(arr : Array[Int], p : Int) -> Int {
 }
 
 ///|
-fn print_cost_line(label : String, reqs : Array[Int], bytes : Array[Int]) -> Unit {
+fn print_cost_line(
+  label : String,
+  reqs : Array[Int],
+  bytes : Array[Int],
+) -> Unit {
   println(
     "[\{label}] reqs avg=\{avg_i(reqs)} p50=\{pctl(reqs, 50)} p99=\{pctl(reqs, 99)} | KB avg=\{avg_i(bytes) / 1024.0} p50=\{pctl(bytes, 50).to_double() / 1024.0} p99=\{pctl(bytes, 99).to_double() / 1024.0}",
   )
@@ -489,7 +526,9 @@ fn measure_type(
     prev_b = c.total_read_bytes()
   }
   let hot_snap = store.cost()
-  println("== [\{label}] 成本（20 查询；冷=open+search，热=仅 search，缓存已热）")
+  println(
+    "== [\{label}] 成本（20 查询；冷=open+search，热=仅 search，缓存已热）",
+  )
   print_cost_line("\{label} cold", cr, cb)
   print_cost_line("\{label} hot ", hr, hb)
   println("-- \{label} cold 类别明细 --")
@@ -552,7 +591,9 @@ fn run_perf(
     "== [perf] native 温服务延迟（namespace 已 open、缓存已热、50 轮 x 20 查询）==",
   )
   let kinds : Array[(String, CostKind)] = [
-    ("bm25", KindBm25), ("vec", KindVec), ("hybrid", KindHybrid),
+    ("bm25", KindBm25),
+    ("vec", KindVec),
+    ("hybrid", KindHybrid),
   ]
   for kv in kinds {
     let (label, kind) = kv
@@ -577,16 +618,22 @@ fn main {
   println("== turbofish bench: seekpond/v1（BM25 + IVF + 过滤 + RRF）==")
   let rng = @core.Rng::new(42U)
   let cum = build_zipf_cum()
-  println("生成数据（10k docs, zipf 词表 \{vocab_en.length() + vocab_zh.length()} 词, 768 维 8 簇）...")
+  println(
+    "生成数据（10k docs, zipf 词表 \{vocab_en.length() + vocab_zh.length()} 词, 768 维 8 簇）...",
+  )
   let docs = gen_docs(rng, cum)
   let bm25_gate_qs = gen_bm25_queries(rng, cum, 10)
   let vec_gate_qvs = gen_vec_queries(rng, docs, 3)
   let bm25_cost_qs = gen_bm25_queries(rng, cum, 20)
   let vec_cost_qvs = gen_vec_queries(rng, docs, 20)
-  println("查询集：bm25 gate=\{bm25_gate_qs.length()} vec gate=\{vec_gate_qvs.length()} cost=20x3")
+  println(
+    "查询集：bm25 gate=\{bm25_gate_qs.length()} vec gate=\{vec_gate_qvs.length()} cost=20x3",
+  )
   let store = @store.MemStore::new()
   let cfg = @build.BuildConfig::default("bench")
-  println("ingest（build 包, segment_rows=\{cfg.segment_rows} nlist=\{cfg.nlist}）...")
+  println(
+    "ingest（build 包, segment_rows=\{cfg.segment_rows} nlist=\{cfg.nlist}）...",
+  )
   let built = try {
     @build.ingest(store, cfg, docs)
     true
@@ -605,6 +652,17 @@ fn main {
       run_gates(store, cfg, docs, bm25_gate_qs, vec_gate_qvs)
       run_cost(store, bm25_cost_qs, vec_cost_qvs)
       run_perf(store, bm25_cost_qs, vec_cost_qvs)
+      // ---- R2：阶段 3 集成 bench（追加场景，默认参数不变）
+      let small = take_docs(docs, 2000)
+      let r2_rng = @core.Rng::new(123U)
+      let r2_bm25 = gen_bm25_queries(r2_rng, cum, 10)
+      run_r2_quant(docs)
+      run_r2_stats(small, r2_bm25)
+      run_r2_cache(store, bm25_cost_qs, vec_cost_qvs)
+      run_r2_ivf(small)
+      run_r2_metadata(small, r2_bm25)
+      run_r2_global(docs)
+      run_r2_bloom(small)
     } catch {
       e => println("bench 失败: \{err_msg(e)}")
     }
@@ -620,12 +678,10 @@ fn main {
     let base = @simstore.SimConfig::aws_default(42U)
     let sim_cfg = { ..base, nvme_capacity_bytes: 536870912 } // 512MB
     let store_sim = @simstore.SimStore::new(sim_cfg)
-    try {
-      run_sim(
-        store, store_sim, "bench", docs, bm25_gate_qs, vec_gate_qvs,
-        bm25_cost_qs, vec_cost_qvs,
-      )
-    } catch {
+    run_sim(
+      store, store_sim, "bench", docs, bm25_gate_qs, vec_gate_qvs, bm25_cost_qs,
+      vec_cost_qvs,
+    ) catch {
       e => println("SimStore 场景失败: \{err_msg(e)}")
     }
   }

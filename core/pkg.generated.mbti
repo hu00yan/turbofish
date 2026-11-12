@@ -1,0 +1,115 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/core"
+
+import {
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub const BM25_B : Double = 0.75
+
+pub const FORMAT_NAME : String = "seekpond/v1"
+
+pub const K1 : Double = 1.2
+
+pub fn check_magic(Bytes, String) -> Unit raise SpndError
+
+pub fn cosine_dist_f32(Array[Float], Int32, Array[Float], Int32, Int32) -> Double
+
+pub fn dot_f32(Array[Float], Int32, Array[Float], Int32, Int32) -> Double
+
+pub fn f16_bits_to_f32(UInt16) -> Float
+
+pub fn f32_to_f16_bits(Float) -> UInt16
+
+pub fn l2sq_f32(Array[Float], Int32, Array[Float], Int32, Int32) -> Double
+
+pub fn magic_bytes(String) -> Bytes
+
+pub fn next_centroid_version() -> String
+
+pub fn next_id() -> String
+
+pub fn next_manifest_id() -> String
+
+pub fn next_segment_id() -> String
+
+pub fn norm_f32(Array[Float], Int32, Int32) -> Double
+
+pub fn parse_tokenizer(String) -> Tokenizer?
+
+pub fn process_id() -> Int32
+
+pub fn random_u64() -> UInt64
+
+pub fn read_f32_le(Bytes, Int32) -> Float raise SpndError
+
+pub fn read_i32_le(Bytes, Int32) -> Int32 raise SpndError
+
+pub fn read_i64_le(Bytes, Int32) -> Int64 raise SpndError
+
+pub fn read_u16_le(Bytes, Int32) -> UInt16 raise SpndError
+
+pub fn read_u32_le(Bytes, Int32) -> UInt32 raise SpndError
+
+pub fn read_u64_le(Bytes, Int32) -> UInt64 raise SpndError
+
+pub fn read_uvarint(Bytes, Int32) -> (UInt32, Int32) raise SpndError
+
+pub fn tokenize(String) -> Array[String]
+
+pub fn tokenize_into(String, (String) -> Unit) -> Unit
+
+pub fn tokenize_into_with(Tokenizer, String, (String) -> Unit) -> Unit
+
+pub fn tokenize_with(Tokenizer, String) -> Array[String]
+
+pub fn tokenizer_to_string(Tokenizer) -> String
+
+pub fn write_uvarint(@buffer.Buffer, UInt32) -> Unit
+
+// Errors
+#derive(Eq, @debug.Debug)
+pub(all) suberror SpndError {
+  BadMagic(String)
+  Truncated(String)
+  Corrupt(String)
+  NotFound(String)
+  CommitConflict(String)
+}
+
+// Types and methods
+pub(all) struct Doc {
+  id : UInt64
+  text : String
+  vector : Array[Float]
+  category : String
+  ts : Int64
+  public : Bool
+}
+
+#derive(Eq)
+type JaType
+
+type KoDict
+
+pub struct Rng {
+  mut state : UInt32
+}
+pub fn Rng::new(UInt32) -> Self
+pub fn Rng::next_f64(Self) -> Double
+pub fn Rng::next_range(Self, Double, Double) -> Double
+pub fn Rng::next_u32(Self) -> UInt32
+
+#derive(Eq, Show)
+pub(all) enum Tokenizer {
+  Word
+  Smartcn
+  Kuromoji
+  Nori
+}
+
+// Type aliases
+
+// Traits

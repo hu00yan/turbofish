@@ -124,14 +124,31 @@ pub fn make_store() -> AnyStore raise @core.SpndError {
   }
   if spec == "s3" {
     let transport = @s3http.CurlTransport::new()
+    let endpoint = env_or(
+      "AWS_ENDPOINT_URL_S3",
+      env_or("AWS_ENDPOINT_URL", env_or("S3_ENDPOINT", "http://127.0.0.1:9000")),
+    )
+    let bucket = env_or("AWS_S3_BUCKET", env_or("S3_BUCKET", "seekpond"))
+    let region = env_or(
+      "AWS_REGION",
+      env_or("AWS_DEFAULT_REGION", env_or("S3_REGION", "us-east-1")),
+    )
+    let access_key = env_or(
+      "AWS_ACCESS_KEY_ID",
+      env_or("S3_ACCESS_KEY", "minioadmin"),
+    )
+    let secret_key = env_or(
+      "AWS_SECRET_ACCESS_KEY",
+      env_or("S3_SECRET_KEY", "minioadmin"),
+    )
     return S3(
       @s3store.S3Store::new(
-        env_or("S3_ENDPOINT", "http://127.0.0.1:9000"),
-        env_or("S3_BUCKET", "seekpond"),
-        env_or("S3_REGION", "us-east-1"),
+        endpoint,
+        bucket,
+        region,
         {
-          access_key: env_or("S3_ACCESS_KEY", "minioadmin"),
-          secret_key: env_or("S3_SECRET_KEY", "minioadmin"),
+          access_key,
+          secret_key,
         },
         transport,
         fn() { @s3http.now_amz_date() },

@@ -1,0 +1,32 @@
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/io",
+  "turbofish/build",
+  "turbofish/format",
+  "turbofish/query",
+  "turbofish/store",
+  "turbofish/s3store",
+  "turbofish/s3http",
+  "turbofish/fsstore",
+  "turbofish/simstore",
+  "turbofish/mtree",
+  "turbofish/core",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
+}
+
+options(
+  "is-main": true,
+  targets: {
+    "main.mbt": [ "native" ],
+    "stub.mbt": [ "wasm", "wasm-gc", "js" ],
+  },
+  link: {
+    "native": {
+      "cc-link-flags": "-lcurl",
+    },
+  },
+)

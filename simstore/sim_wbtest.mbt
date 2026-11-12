@@ -628,3 +628,53 @@ test "resident disabled: put does not re-admit resident key into NVMe" {
   assert_eq(c1.s3_gets > c0.s3_gets, true)
   s.set_resident_enabled(true)
 }
+
+///|
+test "multicloud profiles and Class A/B request accounting" {
+  let s_r2 = SimStore::new(SimConfig::cloudflare_r2(60U))
+  s_r2.put("ns/_parts/part1.cpt", Bytes::make(1024, b'\x01'))
+  s_r2.put("ns/_manifest/manifest-1.json", Bytes::make(256, b'\x02'))
+  let _ = s_r2.list("ns/_manifest/")
+  s_r2.cold()
+  let _ = s_r2.get("ns/_parts/part1.cpt")
+  let c_r2 = s_r2.cost()
+
+  // Class A: 2 puts + 1 list = 3
+  assert_eq(c_r2.class_a_ops, 3)
+  assert_eq(c_r2.puts, 2)
+  assert_eq(c_r2.lists, 1)
+  // Class B: 1 get = 1
+  assert_eq(c_r2.class_b_ops, 1)
+  assert_eq(c_r2.s3_gets, 1)
+  // R2 费率：A 类 $4.50/M ($0.0045/1k), B 类 $0.36/M ($0.00036/1k), 出口流量费 $0
+  let expected_a = 3.0 * (0.0045 / 1000.0)
+  let expected_b = 1.0 * (0.00036 / 1000.0)
+  assert_eq(abs_f64(c_r2.bill_class_a - expected_a) < 1.0e-9, true)
+  assert_eq(abs_f64(c_r2.bill_class_b - expected_b) < 1.0e-9, true)
+  assert_eq(c_r2.bill_egress, 0.0)
+  assert_eq(c_r2.max_latency_us > 0.0, true)
+}
+
+///|
+test "cache remote delay factor injects S3-representative latency on cache hits" {
+  // 零远端延迟注入配置
+  let s_local = SimStore::new(SimConfig::aws_default(61U))
+  s_local.put("ns/_meta/namespace.json", b"local_meta")
+  s_local.reset_cost()
+  let _ = s_local.get("ns/_meta/namespace.json")
+  let c_local = s_local.cost()
+  // 纯本地内存常驻命中延迟恰好为 mem_us (2.0 µs)
+  assert_eq(c_local.total_latency_us, 2.0)
+
+  // 开启 S3 等效远端延迟注入（factor = 1.0）
+  let base = SimConfig::aws_default(62U)
+  let cfg_remote : SimConfig = { ..base, cache_remote_delay_factor: 1.0 }
+  let s_remote = SimStore::new(cfg_remote)
+  s_remote.put("ns/_meta/namespace.json", b"remote_meta")
+  s_remote.reset_cost()
+  let _ = s_remote.get("ns/_meta/namespace.json")
+  let c_remote = s_remote.cost()
+  // 注入了等效 S3 延迟后，延迟应在毫秒级别（> 10,000 µs），真实反映网络环境
+  assert_eq(c_remote.total_latency_us > 10000.0, true)
+  assert_eq(c_remote.max_latency_us > 10000.0, true)
+}

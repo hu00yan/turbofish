@@ -40,6 +40,58 @@ pub fn BillRates::aws_default() -> BillRates {
 }
 
 ///|
+/// Cloudflare R2 费率：零出口流量费（Egress Free），Class A $4.50/M ($0.0045/1k)，Class B $0.36/M ($0.00036/1k)
+pub fn BillRates::cloudflare_r2() -> BillRates {
+  {
+    get_per_1k: 0.00036,
+    put_per_1k: 0.0045,
+    list_per_1k: 0.0045,
+    delete_per_1k: 0.0,
+    storage_per_gb_month: 0.015,
+    egress_per_gb: 0.0,
+  }
+}
+
+///|
+/// Google Cloud Storage Standard 费率
+pub fn BillRates::gcp_standard() -> BillRates {
+  {
+    get_per_1k: 0.0004,
+    put_per_1k: 0.005,
+    list_per_1k: 0.005,
+    delete_per_1k: 0.0,
+    storage_per_gb_month: 0.020,
+    egress_per_gb: 0.12,
+  }
+}
+
+///|
+/// Azure Blob Storage (Hot 档) 费率
+pub fn BillRates::azure_hot() -> BillRates {
+  {
+    get_per_1k: 0.00052,
+    put_per_1k: 0.0065,
+    list_per_1k: 0.0065,
+    delete_per_1k: 0.0,
+    storage_per_gb_month: 0.018,
+    egress_per_gb: 0.087,
+  }
+}
+
+///|
+/// 阿里云 OSS (标准存储) 费率
+pub fn BillRates::aliyun_oss() -> BillRates {
+  {
+    get_per_1k: 0.00035,
+    put_per_1k: 0.0045,
+    list_per_1k: 0.0045,
+    delete_per_1k: 0.0,
+    storage_per_gb_month: 0.017,
+    egress_per_gb: 0.07,
+  }
+}
+
+///|
 /// SimStore 配置：三档延迟参数 + 缓存容量 + 费率。全部可配置。
 pub(all) struct SimConfig {
   seed : UInt
@@ -74,6 +126,8 @@ pub(all) struct SimConfig {
   put_error_probability : Double
   list_error_probability : Double
   delete_error_probability : Double
+  // 缓存远端延迟注入因子（默认 0.0）：当 > 0 时，NVMe/内存缓存命中也会注入按比例模拟的 S3 延迟
+  cache_remote_delay_factor : Double
 }
 
 ///|
@@ -103,7 +157,32 @@ pub fn SimConfig::aws_default(seed : UInt) -> SimConfig {
     put_error_probability: 0.0,
     list_error_probability: 0.0,
     delete_error_probability: 0.0,
+    cache_remote_delay_factor: 0.0,
   }
+}
+
+///|
+pub fn SimConfig::cloudflare_r2(seed : UInt) -> SimConfig {
+  let base = SimConfig::aws_default(seed)
+  { ..base, rates: BillRates::cloudflare_r2() }
+}
+
+///|
+pub fn SimConfig::gcp_standard(seed : UInt) -> SimConfig {
+  let base = SimConfig::aws_default(seed)
+  { ..base, rates: BillRates::gcp_standard() }
+}
+
+///|
+pub fn SimConfig::azure_hot(seed : UInt) -> SimConfig {
+  let base = SimConfig::aws_default(seed)
+  { ..base, rates: BillRates::azure_hot() }
+}
+
+///|
+pub fn SimConfig::aliyun_oss(seed : UInt) -> SimConfig {
+  let base = SimConfig::aws_default(seed)
+  { ..base, rates: BillRates::aliyun_oss() }
 }
 
 ///|
@@ -111,6 +190,7 @@ pub fn SimConfig::aws_default(seed : UInt) -> SimConfig {
 pub(all) struct SimSnapshot {
   total_latency_us : Double
   concurrent_latency_us : Double
+  max_latency_us : Double
   retries : Int
   errors : Int
   op_count : Int
@@ -121,6 +201,10 @@ pub(all) struct SimSnapshot {
   bill_egress : Double
   bill_requests_total : Double
   bill_total : Double
+  bill_class_a : Double
+  bill_class_b : Double
+  class_a_ops : Int
+  class_b_ops : Int
   s3_gets : Int
   bytes_s3_read : Int64
   bytes_nvme_read : Int64
@@ -167,6 +251,7 @@ pub struct SimStore {
   mut bill_list : Double
   mut bill_delete : Double
   mut bill_egress : Double
+  mut max_latency_us : Double
 }
 
 ///|
@@ -205,6 +290,7 @@ pub fn SimStore::new(cfg : SimConfig) -> SimStore {
     bill_list: 0.0,
     bill_delete: 0.0,
     bill_egress: 0.0,
+    max_latency_us: 0.0,
   }
 }
 
@@ -261,7 +347,12 @@ pub impl @store.ObjectStore for SimStore with fn get(
   self.gets += 1
   if self.is_resident(@store.classify_key(key)) {
     // 第 1 档：内存常驻。固定 mem_us，不打 S3（无 GET 费），不消耗 rng。
-    self.record_latency(self.cfg.mem_us)
+    let extra = if self.cfg.cache_remote_delay_factor > 0.0 {
+      self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us * self.cfg.cache_remote_delay_factor)
+    } else {
+      0.0
+    }
+    self.record_latency(self.cfg.mem_us + extra)
     return match self.data.get(key) {
       Some(v) => {
         self.bytes_logical_read += v.length().to_int64()
@@ -278,8 +369,14 @@ pub impl @store.ObjectStore for SimStore with fn get(
         self.nvme_hits += 1
         self.bytes_nvme_read += size.to_int64()
         self.bytes_logical_read += size.to_int64()
+        let extra = if self.cfg.cache_remote_delay_factor > 0.0 {
+          self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us * self.cfg.cache_remote_delay_factor)
+        } else {
+          0.0
+        }
         let lat = self.sample_lognormal(self.cfg.nvme_read_p50_us) +
-          bandwidth_us(size, self.cfg.nvme_bandwidth_mbps)
+          bandwidth_us(size, self.cfg.nvme_bandwidth_mbps) +
+          extra
         self.record_latency(lat)
         self.nvme_admit(key, size) // 刷新 LRU recency（已是成员，不改变容量）
         return Some(value)
@@ -410,7 +507,12 @@ pub impl @store.ObjectStore for SimStore with fn get_range(
   self.op_count += 1
   if self.is_resident(@store.classify_key(key)) {
     // 内存档范围读：对象整体在内存，区间拷贝，固定 mem_us，不打 S3。
-    self.record_latency(self.cfg.mem_us)
+    let extra = if self.cfg.cache_remote_delay_factor > 0.0 {
+      self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us * self.cfg.cache_remote_delay_factor)
+    } else {
+      0.0
+    }
+    self.record_latency(self.cfg.mem_us + extra)
     match self.data.get(key) {
       Some(value) => {
         let lo = if offset < 0 { 0 } else { offset }
@@ -447,8 +549,14 @@ pub impl @store.ObjectStore for SimStore with fn get_range(
         self.nvme_hits += 1
         self.bytes_nvme_read += nbytes.to_int64()
         self.bytes_logical_read += nbytes.to_int64()
+        let extra = if self.cfg.cache_remote_delay_factor > 0.0 {
+          self.sample_lognormal(self.cfg.s3_get_ttfb_p50_us * self.cfg.cache_remote_delay_factor)
+        } else {
+          0.0
+        }
         let lat = self.sample_lognormal(self.cfg.nvme_read_p50_us) +
-          bandwidth_us(nbytes, self.cfg.nvme_bandwidth_mbps)
+          bandwidth_us(nbytes, self.cfg.nvme_bandwidth_mbps) +
+          extra
         self.record_latency(lat)
         // 只刷新 recency，不把范围读提升为整对象缓存。
         if self.nvme.contains(key) {
@@ -636,6 +744,9 @@ fn slice_bytes(value : Bytes, offset : Int, len : Int) -> Bytes {
 /// 记录一次请求的延迟：顺序总延迟 + 并发 makespan（concurrency 个 worker）。
 pub fn SimStore::record_latency(self : SimStore, d : Double) -> Unit {
   self.total_latency_us += d
+  if d > self.max_latency_us {
+    self.max_latency_us = d
+  }
   let c = if self.cfg.concurrency > 0 { self.cfg.concurrency } else { 1 }
   if c <= 1 {
     self.concurrent_latency_us += d
@@ -662,6 +773,7 @@ pub fn SimStore::cost(self : SimStore) -> SimSnapshot {
   {
     total_latency_us: self.total_latency_us,
     concurrent_latency_us: self.concurrent_latency_us,
+    max_latency_us: self.max_latency_us,
     retries: self.retries,
     errors: self.errors,
     op_count: self.op_count,
@@ -679,6 +791,10 @@ pub fn SimStore::cost(self : SimStore) -> SimSnapshot {
     self.bill_list +
     self.bill_delete +
     self.bill_egress,
+    bill_class_a: self.bill_put + self.bill_list,
+    bill_class_b: self.bill_get,
+    class_a_ops: self.puts + self.lists,
+    class_b_ops: self.s3_gets,
     s3_gets: self.s3_gets,
     bytes_s3_read: self.bytes_s3_read,
     bytes_nvme_read: self.bytes_nvme_read,
@@ -695,6 +811,7 @@ pub fn SimStore::cost(self : SimStore) -> SimSnapshot {
 pub fn SimStore::reset_cost(self : SimStore) -> Unit {
   self.total_latency_us = 0.0
   self.concurrent_latency_us = 0.0
+  self.max_latency_us = 0.0
   self.retries = 0
   self.errors = 0
   for i in 0..<self.workers.length() {

@@ -17,16 +17,25 @@
 // GET/PUT/LIST/DELETE/NVMe 全部共用；p50 各用各的）。
 
 ///|
-/// Irwin-Hall 两点近似正态：z = (u1 + u2 - 1.0) * 2.449
-/// （均值 0、方差 1，支撑 [-2.449, 2.449]，无长尾）。
-/// sample = p50 * exp(sigma * z)。拆成纯函数便于白盒测试直接驱动分布检查。
+/// Box-Muller 变换正态采样：
+/// z = sqrt(-2.0 * ln(u1)) * cos(2 * pi * u2)
+/// 生成严格标准正态分布 N(0, 1)，包含真实的指数衰减长尾（无 Irwin-Hall [-2.449, 2.449] 截断）。
+/// sample = p50 * exp(sigma * z)。消耗恰好 2 个 uniform（先 u1 后 u2），保持 RNG 序列严格确定性。
 fn lognormal_from_uniforms(
   p50 : Double,
   sigma : Double,
   u1 : Double,
   u2 : Double,
 ) -> Double {
-  let z = (u1 + u2 - 1.0) * 2.449
+  let pi2 = 6.283185307179586
+  let u1_clamped = if u1 <= 1.0e-12 {
+    1.0e-12
+  } else if u1 >= 1.0 {
+    1.0 - 1.0e-12
+  } else {
+    u1
+  }
+  let z = (-2.0 * @math.ln(u1_clamped)).sqrt() * @math.cos(pi2 * u2)
   p50 * @math.exp(sigma * z)
 }
 

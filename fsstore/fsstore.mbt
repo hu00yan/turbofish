@@ -480,6 +480,14 @@ pub impl @store.ObjectStore for FsStore with fn delete(
   self.index_remove(k)
 }
 
+///|
+pub impl @store.ObjectStore for FsStore with fn head_version(
+  self : FsStore,
+  key : String
+) -> String? {
+  self.head_version(key)
+}
+
 // ---------- BatchStore（顺序等价批取，见 store/batch.mbt 契约） ----------
 
 ///|

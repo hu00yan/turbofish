@@ -108,6 +108,15 @@ pub impl @store.ObjectStore for AnyStore with delete(self, key) {
 }
 
 ///|
+pub impl @store.ObjectStore for AnyStore with head_version(self, key) {
+  match self {
+    FS(s) => s.head_version(key)
+    S3(s) => s.head_version(key)
+    Sim(s) => s.head_version(key)
+  }
+}
+
+///|
 pub fn make_store() -> AnyStore raise @core.SpndError {
   let spec = env_or("SPND_STORE", "fs:/tmp/spnd-data")
   if spec.has_prefix("fs:") {

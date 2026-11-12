@@ -1013,6 +1013,14 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn delete(
   self.etag_cache.remove(key)
 }
 
+///|
+pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn head_version(
+  self : S3Store[T],
+  key : String
+) -> String? {
+  self.head_version(key)
+}
+
 // ---------- 极简 XML 文本提取 ----------
 
 ///|

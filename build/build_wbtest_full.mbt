@@ -139,6 +139,17 @@ impl @store.ObjectStore for WbStore with fn delete(self : WbStore, key : String)
 }
 
 ///|
+impl @store.ObjectStore for WbStore with fn head_version(
+  self : WbStore,
+  key : String
+) -> String? {
+  match self.versions.get(key) {
+    Some(v) => Some("v\{v}")
+    None => None
+  }
+}
+
+///|
 /// 确定性生成 n 条 docs（Rng 种子固定；id = id_base + i，文本含 ASCII 与中文词）。
 fn mkdocs(
   n : Int,
@@ -1666,6 +1677,14 @@ impl @store.ObjectStore for ForkStore with fn delete(
   key : String,
 ) -> Unit {
   self.inner.delete(key)
+}
+
+///|
+impl @store.ObjectStore for ForkStore with fn head_version(
+  self : ForkStore,
+  key : String
+) -> String? {
+  self.inner.head_version(key)
 }
 
 ///|

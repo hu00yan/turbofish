@@ -84,7 +84,7 @@ test "10-row edit produces exactly 1 S3 PUT and zero base rewrite" {
   assert_eq(m.parts[0].level, 1) // Base part
   assert_eq(m.parts[1].level, 0) // L0 Delta part
   assert_eq(m.parts[1].row_count, 10)
-  assert_eq(m.parts[0].tombstone_count, 10)
+  assert_eq(m.parts[0].tombstone_count, 0) // 就地更新非删除，不污染墓碑掩码
 
   // 6. 核心断言 4：Roaring Bitmap 墓碑生效，活文档查询 100% 正确保真
   let live = engine.read_live_docs()
@@ -150,7 +150,7 @@ test "repeated delta appends and tombstone mask accumulation" {
   let m = engine.get_manifest()
   assert_eq(m.parts.length(), 4) // 1 base + 3 deltas
   assert_eq(m.l0_count(), 3)
-  assert_eq(m.tombstones.length(), 15)
+  assert_eq(m.tombstones.length(), 0) // 就地更新非删除
 
   let live = engine.read_live_docs()
   assert_eq(live.length(), 100)
@@ -160,8 +160,5 @@ test "repeated delta appends and tombstone mask accumulation" {
   let loaded_m = engine.manifest_store.load()
   assert_eq(loaded_m.seq, m.seq)
   assert_eq(loaded_m.parts.length(), 4)
-  assert_eq(loaded_m.tombstones.length(), 15)
-  for t in m.tombstones {
-    assert_eq(loaded_m.is_deleted(t), true)
-  }
+  assert_eq(loaded_m.tombstones.length(), 0)
 }

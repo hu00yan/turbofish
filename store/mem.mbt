@@ -261,6 +261,17 @@ pub impl ObjectStore for MemStore with fn delete(self : MemStore, key : String) 
 }
 
 ///|
+pub impl ObjectStore for MemStore with fn head_version(
+  self : MemStore,
+  key : String
+) -> String? {
+  match self.versions.get(key) {
+    Some(v) => Some(version_string(v))
+    None => None
+  }
+}
+
+///|
 pub fn MemStore::cost(self : MemStore) -> CostSnapshot {
   let classes : Array[(String, Int, Int)] = Array::new()
   for kv in self.class_stats.iter() {

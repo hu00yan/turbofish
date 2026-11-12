@@ -684,6 +684,14 @@ pub impl @store.ObjectStore for SimStore with fn delete(
 }
 
 ///|
+pub impl @store.ObjectStore for SimStore with fn head_version(
+  self : SimStore,
+  key : String
+) -> String? {
+  self.head_version(key)
+}
+
+///|
 /// NVMe 准入（LRU）：刷新 recency；新对象受容量约束，
 /// 超容量逐出最久未用；单对象超过全容量则不缓存（优先保留小对象）。
 fn SimStore::nvme_admit(self : SimStore, key : String, size : Int) -> Unit {

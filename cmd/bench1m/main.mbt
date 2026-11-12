@@ -296,6 +296,14 @@ impl @store.ObjectStore for CountingStore with fn delete(
 }
 
 ///|
+impl @store.ObjectStore for CountingStore with fn head_version(
+  self : CountingStore,
+  key : String
+) -> String? {
+  self.inner.head_version(key)
+}
+
+///|
 /// 逐批确定性文档生成器：同一个 rng 实例跨批推进，因此
 /// (seed, docs, dim, batch) 固定 ⇒ 文档序列固定；任一时刻只持有当前批。
 ///

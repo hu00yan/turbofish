@@ -45,10 +45,11 @@ impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with re
       let val = @utf8.decode(bs.view()) catch {
         _ => raise @core.Corrupt("invalid head pointer utf8 in coordinator")
       }
-      let etag = match self.last_etag {
+      let etag = match self.store.head_version(key) {
         Some(e) => e
-        None => "v\{self.ver_counter}"
+        None => "v0"
       }
+      self.last_etag = Some(etag)
       Some((val, etag))
     }
     None => None
@@ -67,7 +68,7 @@ impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with co
   let ok = self.store.put_if_match(key, expected_ver, val_bytes)
   if ok {
     self.ver_counter += 1
-    self.last_etag = Some("v\{self.ver_counter}")
+    self.last_etag = self.store.head_version(key)
   }
   ok
 }

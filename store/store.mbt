@@ -14,6 +14,8 @@ pub(open) trait ObjectStore {
   /// 返回 prefix 下所有 key，升序。
   fn list(Self, String) -> Array[String]
   fn delete(Self, String) -> Unit
+  /// 获取对象的当前版本/ETag（用于 CAS 条件写 put_if_match 的 expected 校验）
+  fn head_version(Self, String) -> String?
 }
 
 ///|

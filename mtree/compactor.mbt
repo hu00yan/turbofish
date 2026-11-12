@@ -117,14 +117,8 @@ pub fn[S : @store.ObjectStore] Compactor::compact_step(
       }
       let docs = @format.decode_compact_part_docs(full_part, footer)
       for d in docs {
-        if pmeta.level == 0 {
-          // L0 delta 中的更新版本生效
+        if !@format.roaring_contains(roar_mask, d.id) {
           doc_map.set(d.id, d)
-        } else {
-          // 基线段中的行受墓碑掩码过滤
-          if !@format.roaring_contains(roar_mask, d.id) {
-            doc_map.set(d.id, d)
-          }
         }
       }
     }

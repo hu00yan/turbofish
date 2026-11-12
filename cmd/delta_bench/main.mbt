@@ -180,6 +180,14 @@ impl @store.ObjectStore for CountingStore with fn delete(
 }
 
 ///|
+impl @store.ObjectStore for CountingStore with fn head_version(
+  self : CountingStore,
+  key : String
+) -> String? {
+  self.inner.head_version(key)
+}
+
+///|
 /// 确定性生成 n 条 docs（同 seed ⇒ 两个策略吃完全相同的输入）。
 fn make_docs(n : Int, dim : Int) -> Array[@core.Doc] {
   let rng = @core.Rng::new(4242U)

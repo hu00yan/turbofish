@@ -115,8 +115,19 @@ pub fn[S : @store.ObjectStore] MergeTreeEngine::mutate_rows(
   updated_docs : Array[@core.Doc],
   old_ids : Array[UInt64]
 ) -> String raise @core.SpndError {
-  // 1. 标记墓碑
-  self.soft_delete(old_ids)
+  let updated_ids : Set[UInt64] = Set([])
+  for d in updated_docs {
+    updated_ids.add(d.id)
+  }
+  let to_delete : Array[UInt64] = Array::new()
+  for id in old_ids {
+    if !updated_ids.contains(id) {
+      to_delete.push(id)
+    }
+  }
+  if !to_delete.is_empty() {
+    self.soft_delete(to_delete)
+  }
 
   // 2. 将新行写入新的 L0 Delta Part（仅 1 个 S3 PUT）
   self.append_l0_delta_part(updated_docs)
@@ -232,19 +243,10 @@ pub fn[S : @store.ObjectStore] MergeTreeEngine::read_live_docs(
     }
     let docs = @format.decode_compact_part_docs(full_part, footer)
     for d in docs {
-      if meta.level == 0 {
-        // L0 Delta Part 中的新版本行生效
+      if !@format.roaring_contains(roar_mask, d.id) {
         if !seen_ids.contains(d.id) {
           seen_ids.add(d.id)
           live.push(d)
-        }
-      } else {
-        // Base Part 中的行受 Roaring Bitmap 墓碑掩码过滤
-        if !@format.roaring_contains(roar_mask, d.id) {
-          if !seen_ids.contains(d.id) {
-            seen_ids.add(d.id)
-            live.push(d)
-          }
         }
       }
     }

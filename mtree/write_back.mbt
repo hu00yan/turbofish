@@ -16,6 +16,7 @@ pub struct WriteBackBuffer[S] {
   flush_rows_threshold : Int
   flush_bytes_threshold : Int
   linger_ms : Int64
+  mut first_mutation_ms : Int64
   mut last_flush_ms : Int64
   mut pending_bytes : Int
   mut flushes_completed : Int
@@ -36,6 +37,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::new(
     flush_rows_threshold,
     flush_bytes_threshold,
     linger_ms,
+    first_mutation_ms: 0L,
     last_flush_ms: 0L,
     pending_bytes: 0,
     flushes_completed: 0,
@@ -59,6 +61,11 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::mutate(
   old_ids : Array[UInt64],
   now_ms : Int64
 ) -> String? raise @core.SpndError {
+  let has_incoming = !updated_docs.is_empty() || !old_ids.is_empty()
+  if self.first_mutation_ms == 0L && has_incoming {
+    self.first_mutation_ms = now_ms
+  }
+
   // 1. 登记墓碑
   for id in old_ids {
     self.pending_tombstones.add(id)
@@ -67,18 +74,19 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::mutate(
   // 2. 暂存新文档
   for d in updated_docs {
     self.pending_docs.set(d.id, d)
-    // 如果该 id 在待删除集合中，由于是就地替换更新，从待删集合中保留（已由 pending_docs 覆盖）
+    // 如果该 id 在待删除集合中，由于是就地替换更新，从待删集合中移除
+    self.pending_tombstones.remove(d.id)
     self.pending_bytes += estimate_doc_bytes(d)
     self.total_mutations_buffered += 1
   }
 
   // 3. 判定是否达到攒批刷盘条件
-  let count = self.pending_docs.size()
+  let count = self.pending_docs.size() + self.pending_tombstones.size()
   let trigger_rows = count >= self.flush_rows_threshold
   let trigger_bytes = self.pending_bytes >= self.flush_bytes_threshold
   let trigger_linger = count > 0 &&
-    self.last_flush_ms > 0L &&
-    now_ms - self.last_flush_ms >= self.linger_ms
+    self.first_mutation_ms > 0L &&
+    now_ms - self.first_mutation_ms >= self.linger_ms
 
   if trigger_rows || trigger_bytes || trigger_linger {
     self.flush(now_ms)
@@ -129,6 +137,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::flush(
   self.pending_docs.clear()
   self.pending_tombstones.clear()
   self.pending_bytes = 0
+  self.first_mutation_ms = 0L
   self.last_flush_ms = now_ms
   self.flushes_completed += 1
 
@@ -197,7 +206,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::read_all_live_docs(
 
 ///|
 pub fn[S] WriteBackBuffer::pending_count(self : WriteBackBuffer[S]) -> Int {
-  self.pending_docs.size()
+  self.pending_docs.size() + self.pending_tombstones.size()
 }
 
 ///|

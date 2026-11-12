@@ -186,6 +186,20 @@ pub fn SimConfig::aliyun_oss(seed : UInt) -> SimConfig {
 }
 
 ///|
+/// 极端长尾与故障注入配置：专门注入 5% 的 1 秒级长尾毛刺与公网网络抖动，检验系统在恶劣云环境下的稳健性
+pub fn SimConfig::extreme_tail(seed : UInt) -> SimConfig {
+  let base = SimConfig::aws_default(seed)
+  {
+    ..base,
+    wan_jitter_p50_us: 15000.0, // 15ms WAN 网络抖动
+    spike_probability: 0.05, // 5% 概率遭遇极端慢请求
+    spike_p50_us: 1000000.0, // 1.0 秒长尾延迟毛刺 (1,000,000 µs)
+    retry_probability: 0.01, // 1% 传输超时与重试
+    retry_p50_us: 500000.0, // 500ms 重试退避
+  }
+}
+
+///|
 /// 计量快照：延迟（虚拟时钟，微秒）+ 计费（美元）+ 命中统计。
 pub(all) struct SimSnapshot {
   total_latency_us : Double

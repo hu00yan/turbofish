@@ -678,3 +678,22 @@ test "cache remote delay factor injects S3-representative latency on cache hits"
   assert_eq(c_remote.total_latency_us > 10000.0, true)
   assert_eq(c_remote.max_latency_us > 10000.0, true)
 }
+
+///|
+test "extreme tail latency injection: 1s long tail spikes properly simulated" {
+  let s_tail = SimStore::new(SimConfig::extreme_tail(999U))
+  // 写入 100 个对象并清空缓存，执行 100 次冷读
+  for i in 0..<100 {
+    s_tail.put("ns/_parts/part_\{i}.cpt", Bytes::make(200, b'\x09'))
+  }
+  s_tail.cold()
+  s_tail.reset_cost()
+
+  for i in 0..<100 {
+    let _ = s_tail.get("ns/_parts/part_\{i}.cpt")
+  }
+  let c = s_tail.cost()
+  assert_eq(c.s3_gets, 100)
+  // 在 5% 的 1 秒长尾注入下，max_latency_us 必然突破 500ms（> 500,000 µs）
+  assert_eq(c.max_latency_us > 500000.0, true)
+}

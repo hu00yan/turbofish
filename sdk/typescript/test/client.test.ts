@@ -98,6 +98,22 @@ function contractHandler(): Handler {
         jsonReply(res, 200, { ns, num_docs: 3, head: "feedface", fts_tokenizer: "kuromoji" });
         return;
       }
+      if (rec.method === "POST" && action === "delete_by_filter") {
+        jsonReply(res, 200, { deleted: 3 });
+        return;
+      }
+      if (rec.method === "POST" && action === "copy") {
+        jsonReply(res, 200, { ok: true });
+        return;
+      }
+      if (rec.method === "POST" && action === "branch") {
+        jsonReply(res, 200, { ok: true });
+        return;
+      }
+      if (rec.method === "POST" && action === "patch") {
+        jsonReply(res, 200, { patched: (body.patches ?? []).length, head: "patchhead" });
+        return;
+      }
     }
     jsonReply(res, 404, { error: `no route for ${rec.method} ${rec.url}` });
   };
@@ -290,6 +306,78 @@ test("query defaults top_k to 10 and omits unset parameters", async () => {
   }
 });
 
+test("query sends filter, offset, ranking and consistency params", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    await client.query(
+      "ns",
+      "sushi",
+      [1, 0, 0, 0],
+      10,
+      undefined,
+      undefined,
+      undefined,
+      ["And", [["category", "Eq", "books"], ["Not", ["public", "Eq", false]]]],
+      5,
+      undefined,
+      60,
+      "rrf",
+      { bm25: 1.0, vector: 1.0 },
+      ["text", "ts"],
+      ["public"],
+      "strong",
+    );
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.url, "/v1/namespaces/ns/query");
+    const body = JSON.parse(rec.body);
+    assert.deepEqual(body.filter, ["And", [["category", "Eq", "books"], ["Not", ["public", "Eq", false]]]]);
+    assert.equal(body.offset, 5);
+    assert.equal(body.rank_constant, 60);
+    assert.equal(body.fusion, "rrf");
+    assert.deepEqual(body.weights, { bm25: 1.0, vector: 1.0 });
+    assert.deepEqual(body.include_attributes, ["text", "ts"]);
+    assert.deepEqual(body.exclude_attributes, ["public"]);
+    assert.equal(body.consistency, "strong");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("count helper posts Count aggregation and returns the count", async () => {
+  const mock = await startMock((_rec, res) => jsonReply(res, 200, { count: 7, rows: [] }));
+  try {
+    const client = new TurboFishClient(mock.url);
+    const n = await client.count("ns", ["category", "In", ["books", "food"]], "eventual");
+    assert.equal(n, 7);
+    const body = JSON.parse(mock.requests[mock.requests.length - 1].body);
+    assert.deepEqual(body.aggregations, ["Count"]);
+    assert.deepEqual(body.filter, ["category", "In", ["books", "food"]]);
+    assert.equal(body.consistency, "eventual");
+    assert.ok(!("text" in body));
+    assert.ok(!("vector" in body));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("create_namespace and write send distance_metric", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    await client.create_namespace("ns", undefined, "cosine");
+    assert.deepEqual(JSON.parse(mock.requests[mock.requests.length - 1].body), { distance_metric: "cosine" });
+    await client.write("ns", ROWS, undefined, "euclidean");
+    const body = JSON.parse(mock.requests[mock.requests.length - 1].body);
+    assert.equal(body.distance_metric, "euclidean");
+    assert.deepEqual(body.rows, ROWS);
+    await client.upsert("ns", [ROWS[0]], 1, "cosine");
+    assert.equal(JSON.parse(mock.requests[mock.requests.length - 1].body).distance_metric, "cosine");
+  } finally {
+    await mock.close();
+  }
+});
+
 test("health sends GET and parses the reply", async () => {
   const mock = await startMock(contractHandler());
   try {
@@ -302,6 +390,151 @@ test("health sends GET and parses the reply", async () => {
     assert.equal(rec.method, "GET");
     assert.equal(rec.url, "/v1/namespaces/ns/health");
     assert.equal(rec.body, "");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("apiKey option sends Authorization header", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url, { apiKey: "secret_123" });
+    await client.health("ns");
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.headers["authorization"], "Bearer secret_123");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("omitting apiKey leaves Authorization header unset", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    await client.health("ns");
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.headers["authorization"], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("deleteByFilter sends POST to /v1/namespaces/{ns}/delete_by_filter", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    const out = await client.deleteByFilter("my-ns", ["tag", "Eq", "archive"]);
+    assert.equal(out.deleted, 3);
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.method, "POST");
+    assert.equal(rec.url, "/v1/namespaces/my-ns/delete_by_filter");
+    assert.deepEqual(JSON.parse(rec.body), { filter: ["tag", "Eq", "archive"] });
+  } finally {
+    await mock.close();
+  }
+});
+
+test("copyNamespace sends POST to /v1/namespaces/{sourceNs}/copy", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    const out = await client.copyNamespace("source-ns", "dest-ns");
+    assert.equal(out.ok, true);
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.method, "POST");
+    assert.equal(rec.url, "/v1/namespaces/source-ns/copy");
+    assert.deepEqual(JSON.parse(rec.body), { destination: "dest-ns" });
+  } finally {
+    await mock.close();
+  }
+});
+
+test("branchNamespace sends POST to /v1/namespaces/{sourceNs}/branch", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    const out = await client.branchNamespace("source-ns", "branch-dest");
+    assert.equal(out.ok, true);
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.method, "POST");
+    assert.equal(rec.url, "/v1/namespaces/source-ns/branch");
+    assert.deepEqual(JSON.parse(rec.body), { destination: "branch-dest" });
+  } finally {
+    await mock.close();
+  }
+});
+
+test("patchRows sends POST to /v1/namespaces/{ns}/patch", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    const patches = [
+      { id: 1, category: "updated_cat", ts: 1700000500 },
+      { id: 2, public: false },
+    ];
+    const out = await client.patchRows("my-ns", patches);
+    assert.equal(out.patched, 2);
+    assert.equal(out.head, "patchhead");
+    const rec = mock.requests[mock.requests.length - 1];
+    assert.equal(rec.method, "POST");
+    assert.equal(rec.url, "/v1/namespaces/my-ns/patch");
+    assert.deepEqual(JSON.parse(rec.body), { patches });
+  } finally {
+    await mock.close();
+  }
+});
+
+test("query forwards limit and aggregations (Sum)", async () => {
+  const mock = await startMock((rec, res) => {
+    jsonReply(res, 200, {
+      rows: [],
+      count: 10,
+      aggregations: { ts: { sum: 99999 } },
+    });
+  });
+  try {
+    const client = new TurboFishClient(mock.url);
+    const out = await client.query(
+      "ns",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [{ Sum: "ts" }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      25,
+    );
+    assert.equal(out.count, 10);
+    assert.deepEqual(out.aggregations, { ts: { sum: 99999 } });
+    const rec = mock.requests[mock.requests.length - 1];
+    const body = JSON.parse(rec.body);
+    assert.equal(body.limit, 25);
+    assert.deepEqual(body.aggregations, [{ Sum: "ts" }]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("distance_metric supports cosine_distance and euclidean_squared", async () => {
+  const mock = await startMock(contractHandler());
+  try {
+    const client = new TurboFishClient(mock.url);
+    await client.create_namespace("ns", undefined, "cosine_distance");
+    assert.deepEqual(JSON.parse(mock.requests[mock.requests.length - 1].body), {
+      distance_metric: "cosine_distance",
+    });
+    await client.write("ns", ROWS, undefined, "euclidean_squared");
+    const body = JSON.parse(mock.requests[mock.requests.length - 1].body);
+    assert.equal(body.distance_metric, "euclidean_squared");
   } finally {
     await mock.close();
   }

@@ -103,6 +103,14 @@ class MockServer:
                 }
             if rec["method"] == "GET" and action == "health":
                 return 200, {"ns": ns, "num_docs": 3, "head": "feedface", "fts_tokenizer": "kuromoji"}
+            if rec["method"] == "POST" and action == "delete_by_filter":
+                return 200, {"deleted": 5}
+            if rec["method"] == "POST" and action == "copy":
+                return 200, {"ok": True}
+            if rec["method"] == "POST" and action == "branch":
+                return 200, {"ok": True}
+            if rec["method"] == "POST" and action == "patch":
+                return 200, {"patched": len(body.get("patches", [])), "head": "patchhead"}
         return 404, {"error": f"no route for {rec['method']} {rec['path']}"}
 
     def close(self):
@@ -201,6 +209,69 @@ class TurboFishClientTestCase(unittest.TestCase):
         self.assertEqual(res["deleted"], 2)
         self.assertEqual(res["batches"], 1)
 
+    # --- delete_by_filter -------------------------------------------------
+
+    def test_delete_by_filter_posts_correct_endpoint_and_body(self):
+        filt = ["category", "Eq", "clothing"]
+        out = self.client.delete_by_filter("ns", filt)
+        self.assertEqual(out["deleted"], 5)
+        rec = self.last_request()
+        self.assertEqual(rec["method"], "POST")
+        self.assertEqual(rec["path"], "/v1/namespaces/ns/delete_by_filter")
+        body = json.loads(rec["body"])
+        self.assertEqual(body["filter"], filt)
+
+    def test_delete_by_filter_glob_expression(self):
+        filt = ["category", "Glob", "cloth*"]
+        out = self.client.delete_by_filter("my-ns", filt)
+        self.assertEqual(out["deleted"], 5)
+        rec = self.last_request()
+        self.assertEqual(rec["path"], "/v1/namespaces/my-ns/delete_by_filter")
+        body = json.loads(rec["body"])
+        self.assertEqual(body["filter"], filt)
+
+    # --- copy_namespace ---------------------------------------------------
+
+    def test_copy_namespace_posts_to_copy_endpoint(self):
+        out = self.client.copy_namespace("src-ns", "dst-ns")
+        self.assertTrue(out["ok"])
+        rec = self.last_request()
+        self.assertEqual(rec["method"], "POST")
+        self.assertEqual(rec["path"], "/v1/namespaces/src-ns/copy")
+        body = json.loads(rec["body"])
+        self.assertEqual(body["destination"], "dst-ns")
+
+    # --- branch_namespace -------------------------------------------------
+
+    def test_branch_namespace_posts_to_branch_endpoint(self):
+        out = self.client.branch_namespace("src-ns", "branch-ns")
+        self.assertTrue(out["ok"])
+        rec = self.last_request()
+        self.assertEqual(rec["method"], "POST")
+        self.assertEqual(rec["path"], "/v1/namespaces/src-ns/branch")
+        body = json.loads(rec["body"])
+        self.assertEqual(body["destination"], "branch-ns")
+
+    # --- patch_rows -------------------------------------------------------
+
+    def test_patch_rows_posts_patches_and_returns_result(self):
+        patches = [
+            {"id": 1, "category": "updated_cat", "ts": 1700000500},
+            {"id": 2, "public": False},
+        ]
+        out = self.client.patch_rows("ns", patches)
+        self.assertEqual(out["patched"], 2)
+        self.assertEqual(out["head"], "patchhead")
+        rec = self.last_request()
+        self.assertEqual(rec["method"], "POST")
+        self.assertEqual(rec["path"], "/v1/namespaces/ns/patch")
+        body = json.loads(rec["body"])
+        self.assertEqual(body["patches"], patches)
+
+    def test_patch_rows_requires_patches(self):
+        with self.assertRaises(ValueError):
+            self.client.patch_rows("ns", None)
+
     # --- query ------------------------------------------------------------
 
     def test_query_returns_enriched_attributes(self):
@@ -271,6 +342,99 @@ class TurboFishClientTestCase(unittest.TestCase):
         body = json.loads(self.last_request()["body"])
         self.assertEqual(body, {"vector": [0.5, 0.5, 0.0, 0.0], "top_k": 3})
 
+    def test_query_limit_parameter_sent(self):
+        """limit is forwarded verbatim alongside top_k."""
+        self.client.query("ns", text="hello", limit=5)
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["limit"], 5)
+        self.assertIn("top_k", body)
+
+    def test_query_aggregations_count(self):
+        self.server.respond = lambda rec: (200, {"count": 7, "rows": []})
+        self.client.query("ns", aggregations=["Count"])
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["aggregations"], ["Count"])
+
+    def test_query_aggregations_sum(self):
+        self.server.respond = lambda rec: (
+            200,
+            {"count": 2, "aggregations": {"ts": {"sum": 3400000100.0}}, "rows": []},
+        )
+        res = self.client.query("ns", aggregations=[{"Sum": "ts"}])
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["aggregations"], [{"Sum": "ts"}])
+        self.assertIn("aggregations", res)
+
+    def test_query_metric_cosine_distance(self):
+        self.client.create_namespace("ns", distance_metric="cosine_distance")
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["distance_metric"], "cosine_distance")
+
+    def test_query_metric_euclidean_squared(self):
+        self.client.create_namespace("ns", distance_metric="euclidean_squared")
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["distance_metric"], "euclidean_squared")
+
+    # --- query: new v1 parameters ------------------------------------------
+
+    def test_query_sends_filter_offset_and_fusion_params(self):
+        self.client.query(
+            "ns",
+            text="sushi",
+            vector=[1.0, 0.0, 0.0, 0.0],
+            filter=["And", [["category", "Eq", "books"], ["Not", ["public", "Eq", False]]]],
+            offset=5,
+            rank_constant=60,
+            fusion="rrf",
+            weights={"bm25": 1.0, "vector": 1.0},
+            include_attributes=["text", "ts"],
+            exclude_attributes=["public"],
+            consistency="strong",
+        )
+        rec = self.last_request()
+        self.assertEqual(rec["path"], "/v1/namespaces/ns/query")
+        body = json.loads(rec["body"])
+        self.assertEqual(
+            body["filter"],
+            ["And", [["category", "Eq", "books"], ["Not", ["public", "Eq", False]]]],
+        )
+        self.assertEqual(body["offset"], 5)
+        self.assertEqual(body["rank_constant"], 60)
+        self.assertEqual(body["fusion"], "rrf")
+        self.assertEqual(body["weights"], {"bm25": 1.0, "vector": 1.0})
+        self.assertEqual(body["include_attributes"], ["text", "ts"])
+        self.assertEqual(body["exclude_attributes"], ["public"])
+        self.assertEqual(body["consistency"], "strong")
+
+    def test_count_helper_posts_count_aggregation(self):
+        self.server.respond = lambda rec: (200, {"count": 7, "rows": []})
+        n = self.client.count(
+            "ns",
+            filter=["category", "In", ["books", "food"]],
+            consistency="eventual",
+        )
+        self.assertEqual(n, 7)
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["aggregations"], ["Count"])
+        self.assertEqual(body["filter"], ["category", "In", ["books", "food"]])
+        self.assertEqual(body["consistency"], "eventual")
+        self.assertNotIn("text", body)
+        self.assertNotIn("vector", body)
+
+    # --- distance_metric on create/write ------------------------------------
+
+    def test_create_and_write_send_distance_metric(self):
+        self.client.create_namespace("ns", distance_metric="cosine")
+        self.assertEqual(json.loads(self.last_request()["body"]), {"distance_metric": "cosine"})
+
+        self.client.write("ns", ROWS, distance_metric="euclidean")
+        body = json.loads(self.last_request()["body"])
+        self.assertEqual(body["distance_metric"], "euclidean")
+        self.assertEqual(body["rows"], ROWS)
+
+        self.client.upsert("ns", ROWS[:1], batch_size=1, distance_metric="cosine")
+        self.assertEqual(json.loads(self.last_request()["body"])["distance_metric"], "cosine")
+
     # --- health -----------------------------------------------------------
 
     def test_health_gets_and_parses(self):
@@ -282,6 +446,28 @@ class TurboFishClientTestCase(unittest.TestCase):
         self.assertEqual(rec["method"], "GET")
         self.assertEqual(rec["path"], "/v1/namespaces/ns/health")
         self.assertEqual(rec["body"], "")
+
+    # --- api_key auth -------------------------------------------------------
+
+    def test_api_key_sends_authorization_header(self):
+        client = TurboFishClient(self.server.endpoint, timeout=5, api_key="secret-token")
+        client.health("ns")
+        rec = self.last_request()
+        self.assertEqual(rec["headers"].get("Authorization"), "Bearer secret-token")
+
+    def test_no_api_key_omits_authorization_header(self):
+        self.client.health("ns")
+        rec = self.last_request()
+        self.assertNotIn("Authorization", rec["headers"])
+
+    def test_api_key_sent_on_all_methods(self):
+        client = TurboFishClient(self.server.endpoint, timeout=5, api_key="my-key")
+        client.create_namespace("ns")
+        self.assertEqual(self.last_request()["headers"].get("Authorization"), "Bearer my-key")
+        client.write("ns", ROWS)
+        self.assertEqual(self.last_request()["headers"].get("Authorization"), "Bearer my-key")
+        client.query("ns", text="hello")
+        self.assertEqual(self.last_request()["headers"].get("Authorization"), "Bearer my-key")
 
     # --- errors -----------------------------------------------------------
 

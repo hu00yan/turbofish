@@ -22,6 +22,7 @@
 /// 本地目录对象存储。root 末尾的 '/' 会被剥掉。
 pub struct FsStore {
   root : String
+  mut index_cache : Map[String, Int]?
 }
 
 ///|
@@ -31,7 +32,7 @@ pub fn FsStore::new(root : String) -> FsStore {
   while r.length() > 1 && r.has_suffix("/") {
     r = r[:r.length() - 1].to_owned()
   }
-  let s = FsStore::{ root: r }
+  let s = FsStore::{ root: r, index_cache: None }
   fs_mkdir_p(r, "")
   s
 }
@@ -314,13 +315,13 @@ fn FsStore::load_index(self : FsStore) -> Array[(String, Int)] {
 }
 
 ///|
-fn FsStore::save_index(self : FsStore, entries : Array[(String, Int)]) -> Unit {
-  let items : Array[Json] = Array::new()
-  for e in entries {
-    let m : Map[String, Json] = Map([])
-    m.set("key", Json::string(e.0))
-    m.set("size", Json::number(e.1.to_double()))
-    items.push(Json::object(m))
+fn FsStore::save_index_map(self : FsStore, m : Map[String, Int]) -> Unit {
+  let items : Array[Json] = Array::new(capacity=m.size())
+  for k, sz in m {
+    let entry : Map[String, Json] = Map([])
+    entry.set("key", Json::string(k))
+    entry.set("size", Json::number(sz.to_double()))
+    items.push(Json::object(entry))
   }
   let text = Json::array(items).stringify()
   let ok = fs_write_atomic(self.index_path(), @utf8.encode(text))
@@ -330,32 +331,34 @@ fn FsStore::save_index(self : FsStore, entries : Array[(String, Int)]) -> Unit {
 }
 
 ///|
-fn FsStore::index_update(self : FsStore, key : String, size : Int) -> Unit {
-  let entries = self.load_index()
-  let mut found = false
-  for i in 0..<entries.length() {
-    if entries[i].0 == key {
-      entries[i] = (key, size)
-      found = true
+fn FsStore::get_index_map(self : FsStore) -> Map[String, Int] {
+  match self.index_cache {
+    Some(m) => m
+    None => {
+      let entries = self.load_index()
+      let m : Map[String, Int] = Map([])
+      for e in entries {
+        m.set(e.0, e.1)
+      }
+      self.index_cache = Some(m)
+      m
     }
   }
-  if !found {
-    entries.push((key, size))
-  }
-  self.save_index(entries)
+}
+
+///|
+fn FsStore::index_update(self : FsStore, key : String, size : Int) -> Unit {
+  let m = self.get_index_map()
+  m.set(key, size)
+  self.save_index_map(m)
 }
 
 ///|
 fn FsStore::index_remove(self : FsStore, key : String) -> Unit {
-  let entries = self.load_index()
-  let kept : Array[(String, Int)] = Array::new()
-  for e in entries {
-    if e.0 != key {
-      kept.push(e)
-    }
-  }
-  if kept.length() != entries.length() {
-    self.save_index(kept)
+  let m = self.get_index_map()
+  if m.contains(key) {
+    m.remove(key)
+    self.save_index_map(m)
   }
 }
 
@@ -457,11 +460,11 @@ pub impl @store.ObjectStore for FsStore with fn list(
   self : FsStore,
   prefix : String,
 ) -> Array[String] {
-  let entries = self.load_index()
+  let m = self.get_index_map()
   let out : Array[String] = Array::new()
-  for e in entries {
-    if e.0.has_prefix(prefix) {
-      out.push(e.0)
+  for k, _ in m {
+    if k.has_prefix(prefix) {
+      out.push(k)
     }
   }
   out.sort()

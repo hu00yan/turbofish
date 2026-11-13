@@ -432,17 +432,17 @@ test "filter fstr fbool fi64" {
   let s = make_test_store([])
   let n = open(s, "test")
   // "the" 命中 id1(a) id2(b) id5(a)；category=a → [5,1]（id5 dl=2 分更高）
-  let r1 = bm25_search(n, "the", 10, Some(FStr("category", "a")))
+  let r1 = bm25_search(n, "the", 10, Some(f_str("category", "a")))
   assert_eq(ids_of(r1), [5UL, 1UL])
   // public=false 且命中 "the" → 只有 id2
-  assert_eq(ids_of(bm25_search(n, "the", 10, Some(FBool("public", false)))), [
+  assert_eq(ids_of(bm25_search(n, "the", 10, Some(f_bool("public", false)))), [
     2UL,
   ])
   // ts=500 且命中 "fox" → 只有 id5（id3 的 ts=300 被滤掉）
-  assert_eq(ids_of(bm25_search(n, "fox", 10, Some(FI64("ts", 500L)))), [5UL])
+  assert_eq(ids_of(bm25_search(n, "fox", 10, Some(f_i64("ts", 500L)))), [5UL])
   // dtype 不匹配的过滤列 → 报错
   try {
-    let _ = bm25_search(n, "the", 10, Some(FI64("category", 3L)))
+    let _ = bm25_search(n, "the", 10, Some(f_i64("category", 3L)))
     panic()
   } catch {
     _ => ()
@@ -630,7 +630,7 @@ test "Q1 WAND matches non-WAND and uses 4 blocks for hot" {
   }
   // 带过滤时同样一致
   for q in queries {
-    let f = Some(FStr("category", "a"))
+    let f = Some(f_str("category", "a"))
     let wand = bm25_search_impl(n, q, 10, f, true)
     let base = bm25_search_impl(n, q, 10, f, false)
     assert_eq(wand.length(), base.length())
@@ -688,13 +688,14 @@ test "Q1 parse stats and seg_may_match" {
     block_stats: None,
     block_stats_tried: false,
     matchers: Map([]),
+    vec_parts: Map([]),
   }
-  assert_eq(seg_may_match(cs, Some(FI64("ts", 150L))), true)
-  assert_eq(seg_may_match(cs, Some(FI64("ts", 50L))), false)
-  assert_eq(seg_may_match(cs, Some(FI64("ts", 250L))), false)
-  assert_eq(seg_may_match(cs, Some(FStr("category", "a"))), true)
-  assert_eq(seg_may_match(cs, Some(FStr("category", "z"))), false)
-  assert_eq(seg_may_match(cs, Some(FBool("public", true))), true)
+  assert_eq(seg_may_match(cs, Some(f_i64("ts", 150L))), true)
+  assert_eq(seg_may_match(cs, Some(f_i64("ts", 50L))), false)
+  assert_eq(seg_may_match(cs, Some(f_i64("ts", 250L))), false)
+  assert_eq(seg_may_match(cs, Some(f_str("category", "a"))), true)
+  assert_eq(seg_may_match(cs, Some(f_str("category", "z"))), false)
+  assert_eq(seg_may_match(cs, Some(f_bool("public", true))), true)
   assert_eq(seg_may_match(cs, None), true)
   // dense id：row→id = min_id + row，不读 id.bin
   let s = @store.MemStore::new()
@@ -733,6 +734,7 @@ test "Q1 parse stats and seg_may_match" {
     vec_global_cids: None,
     global_gen_cids: Map([]),
     global_gen_packs: Map([]),
+    global_parts: Map([]),
     head_checked_ms: 0UL,
   }
   assert_eq(row_id(nn, cs, "s", 3), 4UL)
@@ -788,6 +790,7 @@ test "Q1 dict/bitmap filter matchers avoid expansion" {
     vec_global_cids: None,
     global_gen_cids: Map([]),
     global_gen_packs: Map([]),
+    global_parts: Map([]),
     head_checked_ms: 0UL,
   }
   let cs : CachedSeg = {
@@ -812,8 +815,9 @@ test "Q1 dict/bitmap filter matchers avoid expansion" {
     block_stats: None,
     block_stats_tried: false,
     matchers: Map([]),
+    vec_parts: Map([]),
   }
-  let md = load_matcher(n, cs, "seg", FStr("category", "b"))
+  let md = load_matcher(n, cs, "seg", f_str("category", "b"))
   match md {
     MDict(_, target) => assert_eq(target.to_int() < 65535, true)
     _ => fail("dict matcher expected")
@@ -821,7 +825,7 @@ test "Q1 dict/bitmap filter matchers avoid expansion" {
   assert_eq(matcher_at(md, 0), false)
   assert_eq(matcher_at(md, 1), true)
   assert_eq(matcher_at(md, 4), true)
-  let mb = load_matcher(n, cs, "seg", FBool("public", true))
+  let mb = load_matcher(n, cs, "seg", f_bool("public", true))
   match mb {
     MBitmap(_, _) => ()
     _ => fail("bitmap matcher expected")
@@ -830,7 +834,7 @@ test "Q1 dict/bitmap filter matchers avoid expansion" {
   assert_eq(matcher_at(mb, 1), false)
   assert_eq(matcher_at(mb, 4), true)
   // 不在字典里的值 → 永不匹配
-  let miss = load_matcher(n, cs, "seg", FStr("category", "zzz"))
+  let miss = load_matcher(n, cs, "seg", f_str("category", "zzz"))
   assert_eq(matcher_at(miss, 0), false)
   assert_eq(matcher_at(miss, 1), false)
 }
@@ -850,12 +854,14 @@ test "Q1 PQ ADC ranks nearest code first" {
     codes: [1U, 200U, 0U],
   }
   let q = normalize_query([1.0])
+  // v1 契约：pq_adc_candidates 返回原始累计 l2sq 距离（升序 = 最近优先）；
+  // cosine 口径分数换算 1 - dist/2 由 adc_score 在调用方执行。
   let cands = pq_adc_candidates(q, pq, pq.codebooks)
-  cands.sort_by(fn(a, b) { b.1.compare(a.1) })
+  cands.sort_by(fn(a, b) { a.1.compare(b.1) })
   assert_eq(cands.length(), 3)
   assert_eq(cands[0].0, 0) // code 1 = 最近
-  assert_eq(approx(cands[0].1, 1.0, 1.0e-9), true)
-  assert_eq(cands[1].0, 2) // code 0 次之
+  assert_eq(approx(cands[0].1, 0.0, 1.0e-9), true)
+  assert_eq(cands[1].0, 2) // code 0 次之（dist=1）
   assert_eq(cands[2].0, 1)
 }
 
@@ -919,13 +925,13 @@ test "Q1 blockstats ts filter only reads matching blocks" {
   )
   let n = open(s, "test")
   let cs = ensure_seg(n, 0)
-  let m = load_matcher(n, cs, "seg-01A", FI64("ts", 200L))
+  let m = load_matcher(n, cs, "seg-01A", f_i64("ts", 200L))
   assert_eq(matcher_at(m, 0), false)
   assert_eq(matcher_at(m, 1), true)
   assert_eq(matcher_at(m, 2), false)
   assert_eq(matcher_at(m, 3), false)
   // 范围外的值：块统计直接判定不命中
-  let m2 = load_matcher(n, cs, "seg-01A", FI64("ts", 999L))
+  let m2 = load_matcher(n, cs, "seg-01A", f_i64("ts", 999L))
   assert_eq(matcher_at(m2, 0), false)
   assert_eq(matcher_at(m2, 1), false)
 }
@@ -1057,8 +1063,8 @@ test "Q1 global IVF partition path matches per-segment" {
     let g = sorted_ids(vec_search(ng, q, 10, 2, None))
     let p = sorted_ids(vec_search(n0, q, 10, 2, None))
     assert_eq(g, p)
-    let gf = sorted_ids(vec_search(ng, q, 10, 2, Some(FI64("ts", 300L))))
-    let pf = sorted_ids(vec_search(n0, q, 10, 2, Some(FI64("ts", 300L))))
+    let gf = sorted_ids(vec_search(ng, q, 10, 2, Some(f_i64("ts", 300L))))
+    let pf = sorted_ids(vec_search(n0, q, 10, 2, Some(f_i64("ts", 300L))))
     assert_eq(gf, pf)
   }
 }
@@ -1277,7 +1283,7 @@ test "S2a global delta chain merges base and delta rows" {
   let top = vec_search(n, [1.0, 0.0], 1, 2, None)
   assert_eq(ids_of(top), [7UL])
   // filter 仍按 (seg_idx, row) 应用：ts=700 只命中 seg-01C 的 row 0
-  let f = vec_search(n, [1.0, 0.0], 10, 2, Some(FI64("ts", 700L)))
+  let f = vec_search(n, [1.0, 0.0], 10, 2, Some(f_i64("ts", 700L)))
   assert_eq(ids_of(f), [7UL])
 }
 
@@ -1356,4 +1362,44 @@ test "S2a global delta chain applies tombstones across generations" {
   assert_eq(ids.contains(7UL), false)
   assert_eq(ids.contains(8UL), true)
   assert_eq(ids.contains(1UL), true)
+}
+
+///|
+test "warm query path has ZERO S3 calls and serves directly from memory" {
+  let s = make_delta_chain_store([7UL])
+  let cache : MetadataCache[@store.MemStore] = MetadataCache::new()
+  let n = open_cached(cache, s, "test")
+  // First query (cold): loads centroids, global parts, segment metadata, tombstones
+  let r1 = vec_search(n, [10.0, 0.0], 10, 2, None)
+  assert_eq(r1.length() > 0, true)
+  // Reset store metrics
+  s.reset_cost()
+  // Warm query 1: same probe
+  let r2 = vec_search(n, [10.0, 0.0], 10, 2, None)
+  assert_eq(ids_of(r2), ids_of(r1))
+  assert_eq(s.cost().gets, 0)
+  assert_eq(s.cost().ranged_gets, 0)
+  // Warm query 2: different probe / vector (e.g. probes cid 1)
+  let r3 = vec_search(n, [0.0, 10.0], 10, 2, None)
+  assert_eq(r3.length() > 0, true)
+  assert_eq(s.cost().gets, 0)
+  assert_eq(s.cost().ranged_gets, 0)
+  // Warm query 3: via open_cached (verifying MetadataCache hit)
+  let n_warm = open_cached(cache, s, "test")
+  let r4 = vec_search(n_warm, [1.0, 0.0], 10, 2, None)
+  assert_eq(r4.length() > 0, true)
+  assert_eq(s.cost().gets, 0)
+  assert_eq(s.cost().ranged_gets, 0)
+}
+
+///|
+test "warm_namespace preloads all components resulting in zero S3 calls on first query" {
+  let s = make_delta_chain_store([7UL])
+  let n = open(s, "test")
+  warm_namespace(n)
+  s.reset_cost()
+  let r = vec_search(n, [10.0, 0.0], 10, 2, None)
+  assert_eq(r.length() > 0, true)
+  assert_eq(s.cost().gets, 0)
+  assert_eq(s.cost().ranged_gets, 0)
 }

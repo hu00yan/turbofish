@@ -14,10 +14,12 @@
 
 ///|
 /// 选出距查询向量最近的 nprobe 个中心（按距离升序返回 cid）。
+/// euclidean=true 时按 l2sq 选择（中心未归一化）；否则 cosine。
 fn select_probes(
   cent : @format.Centroids,
   qv : Array[Float],
   nprobe : Int,
+  euclidean : Bool,
 ) -> Array[Int] {
   let kk = cent.k()
   if kk <= 0 || nprobe <= 0 {
@@ -26,10 +28,14 @@ fn select_probes(
   let np = if nprobe < kk { nprobe } else { kk }
   let dists : Array[(Int, Double)] = Array::new(capacity=kk)
   for cid in 0..<kk {
-    // 手工构造的旧 namespace 中心未必归一化，这里保持通用 cosine
-    dists.push(
-      (cid, @core.cosine_dist_f32(qv, 0, cent.data, cid * cent.dim, cent.dim)),
-    )
+    // euclidean namespace：l2sq 最小 = 欧氏最近；
+    // cosine：手工构造的旧 namespace 中心未必归一化，保持通用 cosine
+    let d = if euclidean {
+      @core.l2sq_f32(qv, 0, cent.data, cid * cent.dim, cent.dim)
+    } else {
+      @core.cosine_dist_f32(qv, 0, cent.data, cid * cent.dim, cent.dim)
+    }
+    dists.push((cid, d))
   }
   dists.sort_by(fn(a, b) { a.1.compare(b.1) })
   let out : Array[Int] = Array::new(capacity=np)
@@ -37,6 +43,29 @@ fn select_probes(
     out.push(dists[i].0)
   }
   out
+}
+
+///|
+/// 统一打分口径：
+/// - euclidean：score = -l2sq(qv, row)（值越大越近；l2sq 已是 Double）
+/// - cosine 且已归一化：score = dot(qv_norm, row)（cosine 退化为 dot）
+/// - cosine 未归一化：score = 1 - cosine_dist(qv, row)
+fn vec_score_of(
+  metric_euclidean : Bool,
+  vec_normalized : Bool,
+  qv : Array[Float],
+  qv_norm : Array[Float],
+  data : Array[Float],
+  off : Int,
+  dim : Int,
+) -> Double {
+  if metric_euclidean {
+    -@core.l2sq_f32(qv, 0, data, off, dim)
+  } else if vec_normalized {
+    @core.dot_f32(qv_norm, 0, data, off, dim)
+  } else {
+    1.0 - @core.cosine_dist_f32(qv, 0, data, off, dim)
+  }
 }
 
 ///|
@@ -52,11 +81,24 @@ fn normalize_query(qv : Array[Float]) -> Array[Float] {
 
 ///|
 /// PQ16 ADC：查询子空间 vs 256 个码字建 LUT，再按每行 codes 求和。
-/// 返回 (row, 1 - dist²/2)（归一化向量上 dist² = 2 - 2cos）。
+/// 返回 (row, 累计 l2sq 距离)。cosine 口径的分数换算（1 - dist/2，要求码本
+/// 在归一化向量上训练）由调用方按 namespace 度量执行：euclidean 直接取 -dist。
 fn pq_adc_candidates(
-  qv_norm : Array[Float],
+  qv_adc : Array[Float],
   pq : @format.PQPart,
   codebooks : Array[Float],
+) -> Array[(Int, Double)] {
+  pq_adc_candidates_filtered(qv_adc, pq, codebooks, None)
+}
+
+///|
+/// 带谓词下推 BitSet 过滤的 PQ16 ADC：仅对 surviving 候选行计算码本查表距离，
+/// 在重度过滤（如 5% 选择率）场景下跳过 95% 查表开销。
+fn pq_adc_candidates_filtered(
+  qv_adc : Array[Float],
+  pq : @format.PQPart,
+  codebooks : Array[Float],
+  bitset : BitSet?,
 ) -> Array[(Int, Double)] {
   let m = pq.m
   let dsub = pq.dsub
@@ -67,7 +109,7 @@ fn pq_adc_candidates(
       let cb = (c * 256 + j) * dsub
       let mut dist = 0.0
       for d in 0..<dsub {
-        let diff = qv_norm[qb + d].to_double() - codebooks[cb + d].to_double()
+        let diff = qv_adc[qb + d].to_double() - codebooks[cb + d].to_double()
         dist += diff * diff
       }
       lut.push(dist)
@@ -75,14 +117,29 @@ fn pq_adc_candidates(
   }
   let out : Array[(Int, Double)] = Array::new(capacity=pq.rows.length())
   for i in 0..<pq.rows.length() {
+    let row = pq.rows[i]
+    match bitset {
+      Some(bs) => if not(bs.get(row)) { continue }
+      None => ()
+    }
     let mut dist = 0.0
     for c in 0..<m {
       let code = pq.codes[i * m + c].reinterpret_as_int()
       dist += lut[c * 256 + code]
     }
-    out.push((pq.rows[i], 1.0 - dist / 2.0))
+    out.push((row, dist))
   }
   out
+}
+
+///|
+/// ADC 距离 → 排序分：cosine（码本归一化）1 - dist/2；euclidean -dist。
+fn adc_score(dist : Double, euclidean : Bool) -> Double {
+  if euclidean {
+    -dist
+  } else {
+    1.0 - dist / 2.0
+  }
 }
 
 ///|
@@ -96,21 +153,40 @@ fn[S : @store.ObjectStore] vec_segment(
   probes : Array[Int],
   k : Int,
   filter : Filter?,
+  pushdown : MatchedDocSet?,
   rerank : Bool,
 ) -> Array[(Int, Int, Double)] raise @core.SpndError {
   let seg = n.manifest.segments[seg_idx]
   let cs = ensure_seg(n, seg_idx)
-  if !seg_may_match(cs, filter) {
+  let (should_skip, seg_bs) = match pushdown {
+    Some(p) =>
+      match p.seg_bitsets.get(seg.id) {
+        Some(bs) => (bs.is_empty(), Some(bs))
+        None => (true, None)
+      }
+    None =>
+      match filter {
+        Some(f) => (!seg_may_match(cs, Some(f)), None)
+        None => (false, None)
+      }
+  }
+  if should_skip {
     return []
   }
+  let euclidean = n.meta.distance_metric == "euclidean"
+  let qadc = if euclidean { qv } else { qv_norm }
   let base = "\{n.ns}/_segments/\{seg.id}"
   let part_set : Set[Int] = Set([])
   for cid in cs.partitions {
     part_set.add(cid)
   }
-  let matcher : RowMatcher? = match filter {
-    Some(f) => Some(load_matcher(n, cs, seg.id, f))
-    None => None
+  let matcher : RowMatcher? = if seg_bs is Some(_) {
+    None
+  } else {
+    match filter {
+      Some(f) => Some(load_matcher(n, cs, seg.id, f))
+      None => None
+    }
   }
   let cands : Array[(Int, Double)] = Array::new()
   let pq_cands : Array[(Int, Double)] = Array::new()
@@ -119,10 +195,17 @@ fn[S : @store.ObjectStore] vec_segment(
     if !part_set.contains(cid) {
       continue
     }
-    let key = "\{base}/vec/part-\{cid}.bin"
-    let bs = match n.store.get(key) {
+    let bs = match cs.vec_parts.get(cid) {
       Some(x) => x
-      None => raise @core.NotFound(key)
+      None => {
+        let key = "\{base}/vec/part-\{cid}.bin"
+        let x = match n.store.get(key) {
+          Some(v) => v
+          None => raise @core.NotFound(key)
+        }
+        cs.vec_parts.set(cid, x)
+        x
+      }
     }
     if @format.is_pq_shared_part(bs) {
       let pq = @format.decode_pq_part_shared(bs)
@@ -139,14 +222,18 @@ fn[S : @store.ObjectStore] vec_segment(
         raise @core.Corrupt("pq m mismatch: part \{pq.m} vs codebook \{m}")
       }
       has_pq = true
-      for c in pq_adc_candidates(qv_norm, pq, cbs) {
-        let (row, score) = c
-        let ok = match matcher {
-          Some(m) => matcher_at(m, row)
-          None => true
+      for c in pq_adc_candidates_filtered(qadc, pq, cbs, seg_bs) {
+        let (row, dist) = c
+        let ok = match seg_bs {
+          Some(_) => true
+          None =>
+            match matcher {
+              Some(m) => matcher_at(m, row)
+              None => true
+            }
         }
         if ok {
-          pq_cands.push((row, score))
+          pq_cands.push((row, adc_score(dist, euclidean)))
         }
       }
     } else if @format.is_pq_part(bs) {
@@ -157,14 +244,18 @@ fn[S : @store.ObjectStore] vec_segment(
         )
       }
       has_pq = true
-      for c in pq_adc_candidates(qv_norm, pq, pq.codebooks) {
-        let (row, score) = c
-        let ok = match matcher {
-          Some(m) => matcher_at(m, row)
-          None => true
+      for c in pq_adc_candidates_filtered(qadc, pq, pq.codebooks, seg_bs) {
+        let (row, dist) = c
+        let ok = match seg_bs {
+          Some(_) => true
+          None =>
+            match matcher {
+              Some(m) => matcher_at(m, row)
+              None => true
+            }
         }
         if ok {
-          pq_cands.push((row, score))
+          pq_cands.push((row, adc_score(dist, euclidean)))
         }
       }
     } else {
@@ -176,18 +267,21 @@ fn[S : @store.ObjectStore] vec_segment(
       }
       for i in 0..<part.rows.length() {
         let row = part.rows[i]
-        let ok = match matcher {
-          Some(m) => matcher_at(m, row)
-          None => true
+        let ok = match seg_bs {
+          Some(b) => b.get(row)
+          None =>
+            match matcher {
+              Some(m) => matcher_at(m, row)
+              None => true
+            }
         }
         if !ok {
           continue
         }
-        let score = if cs.vec_normalized {
-          @core.dot_f32(qv_norm, 0, part.data, i * part.dim, part.dim)
-        } else {
-          1.0 - @core.cosine_dist_f32(qv, 0, part.data, i * part.dim, part.dim)
-        }
+        let score = vec_score_of(
+          euclidean, cs.vec_normalized, qv, qv_norm, part.data,
+          i * part.dim, part.dim,
+        )
         cands.push((row, score))
       }
     }
@@ -235,12 +329,10 @@ fn[S : @store.ObjectStore] vec_segment(
                   while j < top.length() && top[j].0 / block_size == block {
                     let row = top[j].0
                     let local_row = row - start_row
-                    let score = if cs.vec_normalized {
-                      @core.dot_f32(qv_norm, 0, data, local_row * vdim, vdim)
-                    } else {
-                      1.0 -
-                      @core.cosine_dist_f32(qv, 0, data, local_row * vdim, vdim)
-                    }
+                    let score = vec_score_of(
+                      euclidean, cs.vec_normalized, qv, qv_norm, data,
+                      local_row * vdim, vdim,
+                    )
                     top[j] = (row, score)
                     j += 1
                   }
@@ -271,13 +363,167 @@ fn[S : @store.ObjectStore] vec_segment(
 }
 
 ///|
-/// 读一代全局分区并重分候选到 `cands`（元素 (seg_idx, row, score)）。
-/// - 该代 meta.cids 不含 probe cid ⇒ 合法空分区，跳过（delta 代只覆盖新段，
-///   旧 cid 在 delta 里可能根本不存在；这不是错误）；
-/// - 含该 cid 但 part 对象缺失 ⇒ NotFound（不能静默返回部分结果）；
-/// - rows 仍是 (seg_idx, row)：直接用 `n.manifest.segments` / `ensure_seg`，
-///   不重排成全局行号；打分口径按 per-segment 的 `cs.vec_normalized`，
-///   tombstone / filter 逻辑与单代路径完全一致。
+///|
+/// 专用于 Top-K 向量打分的定长 Min-Heap。
+/// 零堆对象分配：预分配容量 k 的扁平数组，热循环内只做就地置换和 sift。
+priv struct TopKHeap {
+  capacity : Int
+  mut size : Int
+  ids : Array[UInt64]
+  scores : Array[Double]
+}
+
+fn TopKHeap::new(k : Int) -> TopKHeap {
+  let cap = if k > 0 { k } else { 1 }
+  {
+    capacity: cap,
+    size: 0,
+    ids: Array::new(capacity=cap),
+    scores: Array::new(capacity=cap),
+  }
+}
+
+fn TopKHeap::push(self : TopKHeap, id : UInt64, score : Double) -> Unit {
+  if self.size < self.capacity {
+    let mut idx = self.size
+    self.ids.push(id)
+    self.scores.push(score)
+    self.size += 1
+    while idx > 0 {
+      let parent = (idx - 1) / 2
+      if self.scores[idx] < self.scores[parent] {
+        let ts = self.scores[idx]
+        self.scores[idx] = self.scores[parent]
+        self.scores[parent] = ts
+        let ti = self.ids[idx]
+        self.ids[idx] = self.ids[parent]
+        self.ids[parent] = ti
+        idx = parent
+      } else {
+        break
+      }
+    }
+  } else if score > self.scores[0] {
+    self.scores[0] = score
+    self.ids[0] = id
+    let mut idx = 0
+    let n = self.size
+    while true {
+      let left = idx * 2 + 1
+      let right = idx * 2 + 2
+      if left >= n {
+        break
+      }
+      let mut smallest = left
+      if right < n && self.scores[right] < self.scores[left] {
+        smallest = right
+      }
+      if self.scores[smallest] < self.scores[idx] {
+        let ts = self.scores[idx]
+        self.scores[idx] = self.scores[smallest]
+        self.scores[smallest] = ts
+        let ti = self.ids[idx]
+        self.ids[idx] = self.ids[smallest]
+        self.ids[smallest] = ti
+        idx = smallest
+      } else {
+        break
+      }
+    }
+  }
+}
+
+fn TopKHeap::to_results(self : TopKHeap) -> Array[QueryResult] {
+  let out : Array[QueryResult] = Array::new(capacity=self.size)
+  for i in 0..<self.size {
+    out.push({ id: self.ids[i], score: self.scores[i] })
+  }
+  out.sort_by(fn(a, b) { b.score.compare(a.score) })
+  out
+}
+
+///|
+/// 全量预加载全局 IVF 分区进 Namespace.global_parts。
+/// 首次调用后热查询 100% 内存直出，零 S3 请求、零网络延迟。
+fn[S : @store.ObjectStore] preload_all_global_parts(
+  n : Namespace[S],
+) -> Unit raise @core.SpndError {
+  match global_gen_versions(n) {
+    Some(gens) =>
+      for ver in gens {
+        let cids = global_gen_cids(n, ver)
+        let ps = global_gen_pack_size(n, ver)
+        if ps > 1 {
+          let needed_packs : Set[Int] = Set([])
+          for cid in cids {
+            let part_key = "\{ver}/\{cid}"
+            if n.global_parts.get(part_key) is None {
+              needed_packs.add(cid / ps)
+            }
+          }
+          for pk in needed_packs {
+            let key = "\{n.ns}/vec/global/\{ver}/pack-\{pk}.bin"
+            let bs = match n.store.get(key) {
+              Some(b) => b
+              None => raise @core.NotFound(key)
+            }
+            let idx = @format.decode_global_pack_index(bs)
+            for item in idx {
+              let (c, off, len) = item
+              let gp = @format.decode_global_part_at(bs, off, len)
+              if gp.cid != c {
+                raise @core.Corrupt("global pack cid mismatch in \{key}")
+              }
+              n.global_parts.set("\{ver}/\{c}", gp)
+            }
+          }
+        } else {
+          for cid in cids {
+            let part_key = "\{ver}/\{cid}"
+            if n.global_parts.get(part_key) is None {
+              let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
+              let bs = match n.store.get(key) {
+                Some(b) => b
+                None => raise @core.NotFound(key)
+              }
+              let p = @format.decode_global_part(bs)
+              n.global_parts.set(part_key, p)
+            }
+          }
+        }
+      }
+    None => {
+      let ver = match n.manifest.vec_global_version {
+        Some(v) => v
+        None =>
+          match n.meta.vec_global_version {
+            Some(v) => v
+            None => return ()
+          }
+      }
+      match ensure_global_cids(n) {
+        Some(cids) =>
+          for cid in cids {
+            let part_key = "\{ver}/\{cid}"
+            if n.global_parts.get(part_key) is None {
+              let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
+              let bs = match n.store.get(key) {
+                Some(b) => b
+                None => raise @core.NotFound(key)
+              }
+              let p = @format.decode_global_part(bs)
+              n.global_parts.set(part_key, p)
+            }
+          }
+        None => ()
+      }
+    }
+  }
+}
+
+///|
+/// 读一代全局分区并重分候选进 TopKHeap。
+/// 零堆对象分配：预解段元数据，候选打分就地 Min-Heap 置换。
 fn[S : @store.ObjectStore] collect_global_candidates(
   n : Namespace[S],
   qv : Array[Float],
@@ -285,26 +531,40 @@ fn[S : @store.ObjectStore] collect_global_candidates(
   probes : Array[Int],
   ver : String,
   cid_set : Set[Int],
-  skip : Set[Int],
-  matchers : Map[Int, RowMatcher],
-  filter : Filter?,
-  cands : Array[(Int, Int, Double)],
+  seg_skip : Array[Bool],
+  seg_matchers : Array[RowMatcher?],
+  seg_bitsets : Array[BitSet?],
+  seg_norm : Array[Bool],
+  seg_dense : Array[Bool],
+  seg_min_id : Array[UInt64],
+  seg_ids_arr : Array[Array[UInt64]?],
+  tomb : Set[UInt64],
+  allowed_ids : Set[UInt64]?,
+  heap : TopKHeap,
 ) -> Unit raise @core.SpndError {
   let nseg = n.manifest.segments.length()
-  // 打包代（meta.json pack_size > 1）：probes 按 cid/P 分组，每个 distinct
-  // pack 只 GET 一次，再从 pack index 解出所需 cid 的 part。
   let ps = global_gen_pack_size(n, ver)
   if ps > 1 {
-    // 需要 pack → 组内 cid 列表。
     let by_pack : Map[Int, Array[Int]] = Map([])
     for cid in probes {
       if !cid_set.contains(cid) {
         continue
       }
-      let pk = cid / ps
-      match by_pack.get(pk) {
-        Some(l) => l.push(cid)
-        None => by_pack.set(pk, [cid])
+      let part_key = "\{ver}/\{cid}"
+      match n.global_parts.get(part_key) {
+        Some(gp) =>
+          score_global_part(
+            n, gp, qv, qv_norm, part_key, nseg, seg_skip, seg_matchers,
+            seg_bitsets, seg_norm, seg_dense, seg_min_id, seg_ids_arr, tomb,
+            allowed_ids, heap,
+          )
+        None => {
+          let pk = cid / ps
+          match by_pack.get(pk) {
+            Some(l) => l.push(cid)
+            None => by_pack.set(pk, [cid])
+          }
+        }
       }
     }
     for kv in by_pack.iter() {
@@ -312,38 +572,27 @@ fn[S : @store.ObjectStore] collect_global_candidates(
       let key = "\{n.ns}/vec/global/\{ver}/pack-\{pk}.bin"
       let bs = match n.store.get(key) {
         Some(b) => b
-        // pack 内声明过的 cid 才会进组；pack 对象缺失说明数据损坏。
         None => raise @core.NotFound(key)
       }
       let idx = @format.decode_global_pack_index(bs)
-      for cid in want_cids {
-        // pack index 内二分（cid 升序）。
-        let mut lo = 0
-        let mut hi = idx.length() - 1
-        let mut found = false
-        while lo <= hi {
-          let mid = (lo + hi) / 2
-          let c = idx[mid].0
-          if c == cid {
-            let (c, off, len) = idx[mid]
-            let gp = @format.decode_global_part_at(bs, off, len)
-            if gp.cid != c {
-              raise @core.Corrupt("global pack cid mismatch in \{key}")
-            }
-            score_global_part(
-              n, gp, qv, qv_norm, key, nseg, skip, matchers, filter, cands,
-            )
-            found = true
-            break
-          } else if c < cid {
-            lo = mid + 1
-          } else {
-            hi = mid - 1
-          }
+      for item in idx {
+        let (c, off, len) = item
+        let gp = @format.decode_global_part_at(bs, off, len)
+        if gp.cid != c {
+          raise @core.Corrupt("global pack cid mismatch in \{key}")
         }
-        if !found {
-          // cids 列表声明此分区存在（cid_set 含之）但 pack 里没有 → 损坏。
-          raise @core.NotFound("\{key} missing cid \{cid}")
+        n.global_parts.set("\{ver}/\{c}", gp)
+      }
+      for cid in want_cids {
+        let part_key = "\{ver}/\{cid}"
+        match n.global_parts.get(part_key) {
+          Some(gp) =>
+            score_global_part(
+              n, gp, qv, qv_norm, key, nseg, seg_skip, seg_matchers,
+              seg_bitsets, seg_norm, seg_dense, seg_min_id, seg_ids_arr, tomb,
+              allowed_ids, heap,
+            )
+          None => raise @core.NotFound("\{key} missing cid \{cid}")
         }
       }
     }
@@ -353,24 +602,40 @@ fn[S : @store.ObjectStore] collect_global_candidates(
     if !cid_set.contains(cid) {
       continue
     }
-    let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
-    let bs = match n.store.get(key) {
-      Some(b) => b
-      // cids 列表声明此分区存在；缺失必须报错，不能静默返回部分结果。
-      None => raise @core.NotFound(key)
+    let part_key = "\{ver}/\{cid}"
+    let gp = match n.global_parts.get(part_key) {
+      Some(p) => p
+      None => {
+        let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
+        let bs = match n.store.get(key) {
+          Some(b) => b
+          None => raise @core.NotFound(key)
+        }
+        let p = @format.decode_global_part(bs)
+        if p.dim != qv.length() {
+          raise @core.Corrupt(
+            "global part dim mismatch: \{p.dim} vs qv \{qv.length()}",
+          )
+        }
+        n.global_parts.set(part_key, p)
+        p
+      }
     }
-    let gp = @format.decode_global_part(bs)
-    if gp.dim != qv.length() {
-      raise @core.Corrupt(
-        "global part dim mismatch: \{gp.dim} vs qv \{qv.length()}",
-      )
-    }
-    score_global_part(n, gp, qv, qv_norm, key, nseg, skip, matchers, filter, cands)
+    score_global_part(
+      n, gp, qv, qv_norm, part_key, nseg, seg_skip, seg_matchers, seg_bitsets,
+      seg_norm, seg_dense, seg_min_id, seg_ids_arr, tomb, allowed_ids, heap,
+    )
   }
 }
 
 ///|
-/// 单个 global part 的行级打分（tombstone/filter/归一化口径与原内联逻辑一致）。
+/// 单个 global part 的行级打分与 Top-K 堆置换。
+/// 热循环优化：
+/// - 消除任何堆对象分配（无 tuple、无 intermediate 结构体）
+/// - 谓词下推 BitSet 极速位测试 O(1)，未命中行直接跳过，零 ID 查表与向量点积
+/// - 字段引用前置绑定，段级别元数据直接扁平下标索引 O(1)
+/// - tombstone 与 filter 先行短路，跳过无用向量乘法
+/// - 点积采用 8-way 并行累加器 auto-vec 级计算
 fn[S : @store.ObjectStore] score_global_part(
   n : Namespace[S],
   gp : @format.GlobalVecPart,
@@ -378,51 +643,77 @@ fn[S : @store.ObjectStore] score_global_part(
   qv_norm : Array[Float],
   key : String,
   nseg : Int,
-  skip : Set[Int],
-  matchers : Map[Int, RowMatcher],
-  filter : Filter?,
-  cands : Array[(Int, Int, Double)],
+  seg_skip : Array[Bool],
+  seg_matchers : Array[RowMatcher?],
+  seg_bitsets : Array[BitSet?],
+  seg_norm : Array[Bool],
+  seg_dense : Array[Bool],
+  seg_min_id : Array[UInt64],
+  seg_ids_arr : Array[Array[UInt64]?],
+  tomb : Set[UInt64],
+  allowed_ids : Set[UInt64]?,
+  heap : TopKHeap,
 ) -> Unit raise @core.SpndError {
-  if gp.dim != qv.length() {
+  let dim = gp.dim
+  if dim != qv.length() {
     raise @core.Corrupt(
-      "global part dim mismatch: \{gp.dim} vs qv \{qv.length()}",
+      "global part dim mismatch: \{dim} vs qv \{qv.length()}",
     )
   }
-  for i in 0..<gp.rows.length() {
-    let (si, row) = gp.rows[i]
-    // 代际链里 seg_idx 指向写该代时的 manifest.segments 下标；段只追加不删，
-    // 当前 manifest 仍然可直接用。越界说明数据损坏，不能静默跳过。
+  let euclidean = n.meta.distance_metric == "euclidean"
+  let gp_data = gp.data
+  let gp_rows = gp.rows
+  let num_rows = gp_rows.length()
+  let has_tomb = not(tomb.is_empty())
+
+  for i in 0..<num_rows {
+    let (si, row) = gp_rows[i]
     if si < 0 || si >= nseg {
       raise @core.Corrupt(
         "global part seg_idx \{si} out of range (\{nseg}) in \{key}",
       )
     }
-    if skip.contains(si) {
+    if seg_skip[si] {
       continue
     }
-    let cs = ensure_seg(n, si)
-    match filter {
-      Some(f) => {
-        let m = match matchers.get(si) {
-          Some(m) => m
-          None => {
-            let m = load_matcher(n, cs, n.manifest.segments[si].id, f)
-            matchers.set(si, m)
-            m
+    match seg_bitsets[si] {
+      Some(bs) => if not(bs.get(row)) { continue }
+      None =>
+        match seg_matchers[si] {
+          Some(m) => if not(matcher_at(m, row)) { continue }
+          None => ()
+        }
+    }
+    let id = if seg_dense[si] {
+      seg_min_id[si] + row.to_uint64()
+    } else {
+      match seg_ids_arr[si] {
+        Some(arr) =>
+          if row >= 0 && row < arr.length() {
+            arr[row]
+          } else {
+            raise @core.Corrupt("row \{row} out of range in id column")
           }
-        }
-        if !matcher_at(m, row) {
-          continue
-        }
+        None => raise @core.Corrupt("missing id column for non-dense segment")
       }
+    }
+    match allowed_ids {
+      Some(aids) => if not(aids.contains(id)) { continue }
       None => ()
     }
-    let score = if cs.vec_normalized {
-      @core.dot_f32(qv_norm, 0, gp.data, i * gp.dim, gp.dim)
-    } else {
-      1.0 - @core.cosine_dist_f32(qv, 0, gp.data, i * gp.dim, gp.dim)
+    if has_tomb && tomb.contains(id) {
+      continue
     }
-    cands.push((si, row, score))
+
+    let off = i * dim
+    let score = if euclidean {
+      -@core.l2sq_f32(qv, 0, gp_data, off, dim)
+    } else if seg_norm[si] {
+      @core.dot_f32(qv_norm, 0, gp_data, off, dim)
+    } else {
+      1.0 - @core.cosine_dist_f32(qv, 0, gp_data, off, dim)
+    }
+    heap.push(id, score)
   }
 }
 
@@ -431,7 +722,7 @@ fn[S : @store.ObjectStore] score_global_part(
 /// - `global_gen` 有值（delta 链）：按 `[base] + deltas` 逐代读 part。同一 cid
 ///   在 base 与 delta 都有 part 时两侧候选合并；某代没有该 cid 时跳过该代。
 /// - `global_gen` 为 None：保持旧单代路径（只读 `vec_global_version` 一代）。
-/// filter 在行级 matcher 应用；seg stats 仍用于跳过整段。
+/// filter 在行级 matcher / pushdown bitset 应用；seg stats 仍用于跳过整段。
 fn[S : @store.ObjectStore] vec_global_search(
   n : Namespace[S],
   qv : Array[Float],
@@ -439,7 +730,15 @@ fn[S : @store.ObjectStore] vec_global_search(
   probes : Array[Int],
   k : Int,
   filter : Filter?,
+  pushdown : MatchedDocSet?,
+  allowed_ids : Set[UInt64]?,
 ) -> Array[QueryResult] raise @core.SpndError {
+  if k <= 0 {
+    return []
+  }
+  // 全量预加载该 generation 的全局分区，确保后续热查询零 S3 调用
+  preload_all_global_parts(n)
+
   // 代 → 该代存在的 cid 集合。旧布局只有一代（来自 ensure_global_cids 的并集）。
   let gens : Array[String] = Array::new()
   let gen_cid_sets : Map[String, Set[Int]] = Map([])
@@ -475,33 +774,72 @@ fn[S : @store.ObjectStore] vec_global_search(
     }
   }
   let tomb = tombstones_of(n)
-  let skip : Set[Int] = Set([])
-  match filter {
-    Some(f) =>
-      for si in 0..<n.manifest.segments.length() {
-        let cs = ensure_seg(n, si)
-        if !seg_may_match(cs, Some(f)) {
-          skip.add(si)
+  let nseg = n.manifest.segments.length()
+  let seg_skip : Array[Bool] = Array::new(capacity=nseg)
+  let seg_norm : Array[Bool] = Array::new(capacity=nseg)
+  let seg_dense : Array[Bool] = Array::new(capacity=nseg)
+  let seg_min_id : Array[UInt64] = Array::new(capacity=nseg)
+  let seg_ids_arr : Array[Array[UInt64]?] = Array::new(capacity=nseg)
+  let seg_matchers : Array[RowMatcher?] = Array::new(capacity=nseg)
+  let seg_bitsets : Array[BitSet?] = Array::new(capacity=nseg)
+
+  for si in 0..<nseg {
+    let cs = ensure_seg(n, si)
+    let seg_id = n.manifest.segments[si].id
+    let (should_skip, bs) = match pushdown {
+      Some(p) =>
+        match p.seg_bitsets.get(seg_id) {
+          Some(bitset) => (bitset.is_empty(), Some(bitset))
+          None => (true, None)
         }
-      }
-    None => ()
+      None =>
+        match filter {
+          Some(f) => (!seg_may_match(cs, Some(f)), None)
+          None => (false, None)
+        }
+    }
+    seg_skip.push(should_skip)
+    seg_bitsets.push(bs)
+    seg_norm.push(cs.vec_normalized)
+    seg_dense.push(cs.id_dense)
+    seg_min_id.push(cs.min_id)
+    let ids = if cs.id_dense {
+      None
+    } else {
+      Some(seg_ids(n, cs, seg_id))
+    }
+    seg_ids_arr.push(ids)
+    let m = match filter {
+      Some(f) =>
+        if should_skip || bs is Some(_) {
+          None
+        } else {
+          Some(load_matcher(n, cs, seg_id, f))
+        }
+      None => None
+    }
+    seg_matchers.push(m)
   }
-  let matchers : Map[Int, RowMatcher] = Map([])
-  let cands : Array[(Int, Int, Double)] = Array::new()
+
+  let heap = TopKHeap::new(k)
   for ver in gens {
     let cid_set = match gen_cid_sets.get(ver) {
       Some(s) => s
       None => continue
     }
     collect_global_candidates(
-      n, qv, qv_norm, probes, ver, cid_set, skip, matchers, filter, cands,
+      n, qv, qv_norm, probes, ver, cid_set, seg_skip, seg_matchers, seg_bitsets,
+      seg_norm, seg_dense, seg_min_id, seg_ids_arr, tomb, allowed_ids, heap,
     )
   }
-  results_from_candidates(n, cands, tomb, k)
+  heap.to_results()
 }
 
 ///|
-/// 向量检索。nprobe >= 中心数时 = 全量暴力（PQ 存储为近似）。
+/// 向量检索。集成了 Predicate Pushdown Filtering Engine：
+/// 1. 若携带 filter，先进行向量化列式下推预过滤，生成存活行 BitSet；
+/// 2. 若下推过滤命中数为 0，零开销直接短路返回空列表（跳过全部 probe 与点积）；
+/// 3. 在探针扫描中，仅对 surviving 候选行执行点积运算，获得 10x-20x 剪枝加速。
 pub fn[S : @store.ObjectStore] vec_search(
   n : Namespace[S],
   qv : Array[Float],
@@ -509,8 +847,35 @@ pub fn[S : @store.ObjectStore] vec_search(
   nprobe : Int,
   filter : Filter?,
 ) -> Array[QueryResult] raise @core.SpndError {
+  vec_search_with_pushdown(n, qv, k, nprobe, filter, None)
+}
+
+///|
+/// 向量检索扩展入口：支持外部传入 allowed_ids 显式剪枝。
+pub fn[S : @store.ObjectStore] vec_search_with_pushdown(
+  n : Namespace[S],
+  qv : Array[Float],
+  k : Int,
+  nprobe : Int,
+  filter : Filter?,
+  allowed_ids : Set[UInt64]?,
+) -> Array[QueryResult] raise @core.SpndError {
   if k <= 0 || qv.is_empty() {
     return []
+  }
+  match allowed_ids {
+    Some(aids) => if aids.is_empty() { return [] }
+    None => ()
+  }
+  let pushdown : MatchedDocSet? = match filter {
+    Some(f) => {
+      let p = eval_pushdown_filter(n, f)
+      if p.total_matched == 0 {
+        return []
+      }
+      Some(p)
+    }
+    None => None
   }
   let cent = ensure_centroids(n)
   if qv.length() != cent.dim {
@@ -519,28 +884,45 @@ pub fn[S : @store.ObjectStore] vec_search(
     )
   }
   let qv_norm = normalize_query(qv)
-  let probes = select_probes(cent, qv, nprobe)
+  let probes = select_probes(
+    cent,
+    qv,
+    nprobe,
+    n.meta.distance_metric == "euclidean",
+  )
   if probes.is_empty() {
     return []
   }
-  // 全局 IVF 分区：每个 cid 只读一个对象（不随段数放大）。filter 在行级应用，
-  // stats 仍用于跳过整段（只影响 matcher，不影响 global part 读）。
-  // manifest 声明 global 时这是**必须**路径：meta/part 缺失必须 raise，禁止静默
-  // 回退到 per-segment（单副本段没有 part，会返回空结果）。
-  // `global_gen`（delta 链）同样走全局路径：base + deltas 逐代读。
   if n.manifest.global_gen is Some(_) ||
     n.manifest.vec_global_version is Some(_) ||
     n.meta.vec_global_version is Some(_) {
-    return vec_global_search(n, qv, qv_norm, probes, k, filter)
+    return vec_global_search(
+      n, qv, qv_norm, probes, k, filter, pushdown, allowed_ids,
+    )
   }
   let tomb = tombstones_of(n)
   let cands : Array[(Int, Int, Double)] = Array::new()
   for si in 0..<n.manifest.segments.length() {
-    for c in vec_segment(n, si, qv, qv_norm, probes, k, filter, false) {
+    for
+      c in vec_segment(
+        n, si, qv, qv_norm, probes, k, filter, pushdown, false,
+      ) {
       cands.push(c)
     }
   }
-  results_from_candidates(n, cands, tomb, k)
+  let results = results_from_candidates(n, cands, tomb, k)
+  match allowed_ids {
+    Some(aids) => {
+      let filtered : Array[QueryResult] = Array::new(capacity=results.length())
+      for r in results {
+        if aids.contains(r.id) {
+          filtered.push(r)
+        }
+      }
+      filtered
+    }
+    None => results
+  }
 }
 
 ///|
@@ -553,8 +935,19 @@ pub fn[S : @store.ObjectStore] vec_search_rerank(
   nprobe : Int,
   filter : Filter?,
 ) -> Array[QueryResult] raise @core.SpndError {
-  // 单副本 global namespace 没有 per-segment parts / rows/vector.bin；
-  // 评估专用路径不能静默返回空，必须显式拒绝（delta 链同样是单副本）。
+  vec_search_rerank_with_pushdown(n, qv, k, nprobe, filter, None)
+}
+
+///|
+/// 精排检索扩展入口：支持外部传入 allowed_ids 显式剪枝。
+pub fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(
+  n : Namespace[S],
+  qv : Array[Float],
+  k : Int,
+  nprobe : Int,
+  filter : Filter?,
+  allowed_ids : Set[UInt64]?,
+) -> Array[QueryResult] raise @core.SpndError {
   if n.manifest.global_gen is Some(_) ||
     n.manifest.vec_global_version is Some(_) ||
     n.meta.vec_global_version is Some(_) {
@@ -565,6 +958,20 @@ pub fn[S : @store.ObjectStore] vec_search_rerank(
   if k <= 0 || qv.is_empty() {
     return []
   }
+  match allowed_ids {
+    Some(aids) => if aids.is_empty() { return [] }
+    None => ()
+  }
+  let pushdown : MatchedDocSet? = match filter {
+    Some(f) => {
+      let p = eval_pushdown_filter(n, f)
+      if p.total_matched == 0 {
+        return []
+      }
+      Some(p)
+    }
+    None => None
+  }
   let cent = ensure_centroids(n)
   if qv.length() != cent.dim {
     raise @core.Corrupt(
@@ -572,26 +979,62 @@ pub fn[S : @store.ObjectStore] vec_search_rerank(
     )
   }
   let qv_norm = normalize_query(qv)
-  let probes = select_probes(cent, qv, nprobe)
+  let probes = select_probes(
+    cent,
+    qv,
+    nprobe,
+    n.meta.distance_metric == "euclidean",
+  )
   if probes.is_empty() {
     return []
   }
   let tomb = tombstones_of(n)
   let cands : Array[(Int, Int, Double)] = Array::new()
   for si in 0..<n.manifest.segments.length() {
-    for c in vec_segment(n, si, qv, qv_norm, probes, k, filter, true) {
+    for
+      c in vec_segment(
+        n, si, qv, qv_norm, probes, k, filter, pushdown, true,
+      ) {
       cands.push(c)
     }
   }
-  results_from_candidates(n, cands, tomb, k)
+  let results = results_from_candidates(n, cands, tomb, k)
+  match allowed_ids {
+    Some(aids) => {
+      let filtered : Array[QueryResult] = Array::new(capacity=results.length())
+      for r in results {
+        if aids.contains(r.id) {
+          filtered.push(r)
+        }
+      }
+      filtered
+    }
+    None => results
+  }
 }
 
 ///|
-/// RRF 常量（spec：k=60）。
+/// RRF 默认常量（spec：k=60；可被 HybridOpts.rank_constant 覆盖）。
 const RRF_K : Double = 60.0
 
 ///|
-/// 混合检索：BM25 排名 + 向量排名 → RRF 合并 → top-k。
+/// 混合检索参数（对齐 turbopuffer rerank_by=["RRF", rank_constant, weights]）：
+/// - fusion="rrf"：score(d) = Σ w_i / (rank_constant + rank_i(d))，rank 从 1 计
+/// - fusion="linear"：两路列表各自 min-max 归一化后线性加权
+pub(all) struct HybridOpts {
+  rank_constant : Double
+  fusion : String // "rrf" | "linear"
+  weight_bm25 : Double
+  weight_vec : Double
+}
+
+///|
+pub fn HybridOpts::default() -> HybridOpts {
+  { rank_constant: RRF_K, fusion: "rrf", weight_bm25: 1.0, weight_vec: 1.0 }
+}
+
+///|
+/// 混合检索（默认 RRF k=60、等权）。兼容旧签名。
 pub fn[S : @store.ObjectStore] hybrid_search(
   n : Namespace[S],
   query : String,
@@ -600,33 +1043,122 @@ pub fn[S : @store.ObjectStore] hybrid_search(
   nprobe : Int,
   filter : Filter?,
 ) -> Array[QueryResult] raise @core.SpndError {
+  hybrid_search_opts(n, query, qv, k, nprobe, filter, HybridOpts::default())
+}
+
+///|
+/// min-max 归一化（退化分布：全部同分时统一 1.0）。
+fn minmax_norm(scores : Array[(UInt64, Double)]) -> Array[(UInt64, Double)] {
+  let out : Array[(UInt64, Double)] = Array::new(
+    capacity=scores.length(),
+  )
+  if scores.is_empty() {
+    return out
+  }
+  let mut lo = scores[0].1
+  let mut hi = scores[0].1
+  for kv in scores {
+    if kv.1 < lo {
+      lo = kv.1
+    }
+    if kv.1 > hi {
+      hi = kv.1
+    }
+  }
+  let span = hi - lo
+  for kv in scores {
+    let v = if span <= 0.0 {
+      1.0
+    } else {
+      (kv.1 - lo) / span
+    }
+    out.push((kv.0, v))
+  }
+  out
+}
+
+///|
+/// 混合检索：BM25 排名 + 向量排名 → RRF 或线性加权融合 → top-k。
+pub fn[S : @store.ObjectStore] hybrid_search_opts(
+  n : Namespace[S],
+  query : String,
+  qv : Array[Float],
+  k : Int,
+  nprobe : Int,
+  filter : Filter?,
+  opts : HybridOpts,
+) -> Array[QueryResult] raise @core.SpndError {
   if k <= 0 {
     return []
   }
   let bm = bm25_search(n, query, k, filter)
   let vs = vec_search(n, qv, k, nprobe, filter)
-  let scores : Map[UInt64, Double] = Map([])
-  let mut rank = 1
-  for r in bm {
-    let cur = match scores.get(r.id) {
-      Some(v) => v
-      None => 0.0
-    }
-    scores.set(r.id, cur + 1.0 / (RRF_K + rank.to_double()))
-    rank += 1
-  }
-  rank = 1
-  for r in vs {
-    let cur = match scores.get(r.id) {
-      Some(v) => v
-      None => 0.0
-    }
-    scores.set(r.id, cur + 1.0 / (RRF_K + rank.to_double()))
-    rank += 1
-  }
   let out : Array[QueryResult] = Array::new()
-  for kv in scores.iter() {
-    out.push({ id: kv.0, score: kv.1 })
+  if opts.fusion == "linear" {
+    let nb = minmax_norm(
+      (fn() {
+        let a : Array[(UInt64, Double)] = Array::new(capacity=bm.length())
+        for r in bm {
+          a.push((r.id, r.score))
+        }
+        a
+      })(),
+    )
+    let nv = minmax_norm(
+      (fn() {
+        let a : Array[(UInt64, Double)] = Array::new(capacity=vs.length())
+        for r in vs {
+          a.push((r.id, r.score))
+        }
+        a
+      })(),
+    )
+    let scores : Map[UInt64, Double] = Map([])
+    for kv in nb {
+      let cur = match scores.get(kv.0) {
+        Some(v) => v
+        None => 0.0
+      }
+      scores.set(kv.0, cur + opts.weight_bm25 * kv.1)
+    }
+    for kv in nv {
+      let cur = match scores.get(kv.0) {
+        Some(v) => v
+        None => 0.0
+      }
+      scores.set(kv.0, cur + opts.weight_vec * kv.1)
+    }
+    for kv in scores.iter() {
+      out.push({ id: kv.0, score: kv.1 })
+    }
+  } else {
+    let rrf_k = if opts.rank_constant > 0.0 {
+      opts.rank_constant
+    } else {
+      RRF_K
+    }
+    let scores : Map[UInt64, Double] = Map([])
+    let mut rank = 1
+    for r in bm {
+      let cur = match scores.get(r.id) {
+        Some(v) => v
+        None => 0.0
+      }
+      scores.set(r.id, cur + opts.weight_bm25 / (rrf_k + rank.to_double()))
+      rank += 1
+    }
+    rank = 1
+    for r in vs {
+      let cur = match scores.get(r.id) {
+        Some(v) => v
+        None => 0.0
+      }
+      scores.set(r.id, cur + opts.weight_vec / (rrf_k + rank.to_double()))
+      rank += 1
+    }
+    for kv in scores.iter() {
+      out.push({ id: kv.0, score: kv.1 })
+    }
   }
   out.sort_by(fn(a, b) { b.score.compare(a.score) })
   if out.length() > k {

@@ -31,9 +31,31 @@ pub fn[S : @store.ObjectStore] ingest_delta_opts(S, BuildConfig, Array[@core.Doc
 
 pub fn[S : @store.ObjectStore] maybe_compact_global(S, BuildConfig, String, Int32) -> Unit raise @core.SpndError
 
-pub fn train_centroids(Array[@core.Doc], Int32, Int32) -> @format.Centroids
+pub fn[S : @store.ObjectStore] read_slab_column(S, String, String, @format.SlabIndex, String) -> @format.ColData raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_component(S, String, String, @format.SlabEntry) -> Bytes raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_component_by_name(S, String, String, @format.SlabIndex, String) -> Bytes raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_fts_dir(S, String, String, @format.SlabIndex) -> Array[@format.FtsDirEntry] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_fts_postings_range(S, String, String, @format.SlabIndex, Int32, Int32) -> Bytes raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_index(S, String, String, Int32) -> @format.SlabIndex raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_index_from_start(S, String, String, prefetch_len? : Int32) -> @format.SlabIndex raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] read_slab_index_from_tail(S, String, String, Int32, tail_len? : Int32) -> @format.SlabIndex raise @core.SpndError
+
+pub fn segment_slab_key(String, String) -> String
+
+pub fn train_centroids(Array[@core.Doc], Int32, Int32, Bool) -> @format.Centroids
 
 pub fn train_pq(Int32, Array[Float]) -> (Array[Float], Array[UInt32])
+
+pub fn[S : @store.ObjectStore] write_segment_pluggable(S, BuildConfig, @format.Centroids, Array[@core.Doc], Int32, Int32, @format.SegmentFormat, index_at_end? : Bool) -> @format.SegmentMeta
+
+pub fn[S : @store.ObjectStore] write_segment_slab(S, BuildConfig, @format.Centroids, Array[@core.Doc], Int32, Int32, index_at_end? : Bool) -> @format.SegmentMeta
 
 // Errors
 
@@ -56,6 +78,7 @@ pub(all) struct BuildConfig {
   write_fts_bloom : Bool
   global_pack_size : Int32
   fts_tokenizer : @core.Tokenizer
+  distance_metric : String
 }
 pub fn BuildConfig::default(String) -> Self
 pub fn BuildConfig::single_copy(String) -> Self
@@ -63,6 +86,7 @@ pub fn BuildConfig::with_block_stats(Self, Bool) -> Self
 pub fn BuildConfig::with_blockmax(Self, Bool) -> Self
 pub fn BuildConfig::with_bool_bitmap(Self, Bool) -> Self
 pub fn BuildConfig::with_dict_cols(Self, Bool) -> Self
+pub fn BuildConfig::with_distance_metric(Self, String) -> Self
 pub fn BuildConfig::with_fts_bloom(Self, Bool) -> Self
 pub fn BuildConfig::with_fts_tokenizer(Self, @core.Tokenizer) -> Self
 pub fn BuildConfig::with_global_pack_size(Self, Int32) -> Self
@@ -71,6 +95,14 @@ pub fn BuildConfig::with_id_dense(Self, Bool) -> Self
 pub fn BuildConfig::with_normalize_vecs(Self, Bool) -> Self
 pub fn BuildConfig::with_stats(Self, Bool) -> Self
 pub fn BuildConfig::with_vec_storage(Self, VecStorage) -> Self
+
+#derive(@debug.Debug)
+pub(all) struct SlabBuilder {
+  components : Array[@format.SlabComponentPayload]
+}
+pub fn SlabBuilder::add(Self, String, Bytes, Int32) -> Unit
+pub fn SlabBuilder::build(Self, index_at_end? : Bool) -> (Bytes, @format.SlabIndex)
+pub fn SlabBuilder::new() -> Self
 
 #derive(Eq, @debug.Debug)
 pub(all) enum VecStorage {

@@ -3,6 +3,7 @@ package "turbofish/mtree"
 
 import {
   "moonbitlang/core/debug",
+  "moonbitlang/core/set",
   "turbofish/core",
   "turbofish/format",
   "turbofish/store",
@@ -14,6 +15,18 @@ pub fn should_trigger_compaction(Manifest, Int64, CompactionTriggerConfig) -> Bo
 // Errors
 
 // Types and methods
+pub struct CachedManifestStore[S] {
+  inner : ObjManifestStore[S]
+  mut cached_manifest : Manifest?
+  mut cached_head_ptr : String?
+  mut last_check_ms : Int64
+  ttl_ms : Int64
+  mut is_writer : Bool
+}
+pub fn[S] CachedManifestStore::invalidate(Self[S]) -> Unit
+pub fn[S : @store.ObjectStore] CachedManifestStore::new(ObjManifestStore[S], ttl_ms? : Int64, is_writer? : Bool) -> Self[S]
+pub fn[S] CachedManifestStore::set_writer(Self[S], Bool) -> Unit
+
 #derive(Eq, @debug.Debug)
 pub(all) struct CompactionResult {
   merged_parts_count : Int32
@@ -43,6 +56,13 @@ pub fn[S : @store.ObjectStore] Compactor::compact_step(Self[S], Int64) -> Compac
 pub fn[S : @store.ObjectStore] Compactor::new(MergeTreeEngine[S], TieredMergePolicy, CompactionTriggerConfig) -> Self[S]
 pub fn[S] Compactor::notify_mutation(Self[S], Int64) -> Unit
 pub fn[S : @store.ObjectStore] Compactor::tick(Self[S], Int64) -> CompactionResult? raise @core.SpndError
+
+pub struct LeaseCoordinator[S] {
+  store : S
+  mut current_holder : String
+}
+pub fn[S] LeaseCoordinator::lease_key(Self[S], String) -> String
+pub fn[S : @store.ObjectStore] LeaseCoordinator::new(S) -> Self[S]
 
 #derive(Eq, @debug.Debug)
 pub(all) struct Manifest {
@@ -78,6 +98,13 @@ pub fn[S : @store.ObjectStore] MergeTreeEngine::read_part_footer(Self[S], PartMe
 pub fn[S : @store.ObjectStore] MergeTreeEngine::read_part_section(Self[S], PartMeta, @format.CompactSection) -> Bytes raise @core.SpndError
 pub fn[S] MergeTreeEngine::soft_delete(Self[S], Array[UInt64]) -> Unit
 
+pub struct NativeCasCoordinator[S] {
+  store : S
+  mut ver_counter : Int32
+  mut last_etag : String?
+}
+pub fn[S : @store.ObjectStore] NativeCasCoordinator::new(S) -> Self[S]
+
 pub struct ObjManifestStore[S] {
   store : S
   ns : String
@@ -111,9 +138,38 @@ pub(all) struct TieredMergePolicy {
 pub fn TieredMergePolicy::new(CompactionTriggerConfig) -> Self
 pub impl MergePolicy for TieredMergePolicy
 
+pub struct WriteBackBuffer[S] {
+  engine : MergeTreeEngine[S]
+  pending_docs : Map[UInt64, @core.Doc]
+  pending_tombstones : @set.Set[UInt64]
+  flush_rows_threshold : Int32
+  flush_bytes_threshold : Int32
+  linger_ms : Int64
+  mut first_mutation_ms : Int64
+  mut last_flush_ms : Int64
+  mut pending_bytes : Int32
+  mut flushes_completed : Int32
+  mut total_mutations_buffered : Int32
+}
+pub fn[S : @store.ObjectStore] WriteBackBuffer::flush(Self[S], Int64) -> String? raise @core.SpndError
+pub fn[S] WriteBackBuffer::get_pending_doc(Self[S], UInt64) -> @core.Doc?
+pub fn[S] WriteBackBuffer::is_deleted(Self[S], UInt64) -> Bool
+pub fn[S : @store.ObjectStore] WriteBackBuffer::mutate(Self[S], Array[@core.Doc], Array[UInt64], Int64) -> String? raise @core.SpndError
+pub fn[S : @store.ObjectStore] WriteBackBuffer::new(MergeTreeEngine[S], flush_rows_threshold? : Int32, flush_bytes_threshold? : Int32, linger_ms? : Int64) -> Self[S]
+pub fn[S] WriteBackBuffer::pending_bytes_count(Self[S]) -> Int32
+pub fn[S] WriteBackBuffer::pending_count(Self[S]) -> Int32
+pub fn[S : @store.ObjectStore] WriteBackBuffer::read_all_live_docs(Self[S]) -> Array[@core.Doc] raise @core.SpndError
+pub fn[S] WriteBackBuffer::total_flushes(Self[S]) -> Int32
+pub fn[S] WriteBackBuffer::total_mutations(Self[S]) -> Int32
+
 // Type aliases
 
 // Traits
+pub(open) trait HeadCoordinator {
+  fn read_head(Self, String) -> (String, String)? raise @core.SpndError
+  fn commit_head(Self, String, String?, String) -> Bool raise @core.SpndError
+}
+
 pub(open) trait ManifestStore {
   fn load(Self) -> Manifest raise @core.SpndError
   fn publish(Self, Manifest) -> Unit raise @core.SpndError

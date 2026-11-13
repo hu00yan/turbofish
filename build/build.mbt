@@ -33,6 +33,7 @@ pub(all) struct BuildConfig {
   write_fts_bloom : Bool // seg meta 内嵌 FTS term Bloom（跳过不可能命中的段）
   global_pack_size : Int // 全局分区分包：>1 时相邻 cid 打包成 pack-{i}.bin（1 = 每 cid 一对象）
   fts_tokenizer : @core.Tokenizer // 全文分词器（默认 Word = 旧行为；CJK 命名空间选 smartcn/kuromoji/nori）
+  distance_metric : String // "cosine"（默认，写入归一化）| "euclidean"（l2sq，不归一化）
 }
 
 ///|
@@ -57,6 +58,7 @@ pub fn BuildConfig::default(ns : String) -> BuildConfig {
     write_fts_bloom: true,
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
+    distance_metric: "cosine",
   }
 }
 
@@ -157,6 +159,16 @@ pub fn BuildConfig::with_fts_tokenizer(
 }
 
 ///|
+/// 函数式更新：距离度量。"euclidean" 时写入不归一化（cosine 退化为 dot 的
+/// 前提不成立），kmeans/IVF 按欧氏语义建分区。
+pub fn BuildConfig::with_distance_metric(
+  self : BuildConfig,
+  v : String,
+) -> BuildConfig {
+  { ..self, distance_metric: v }
+}
+
+///|
 /// 单副本推荐配置：全局 IVF（向量只存一份）+ 写入归一化（IVF 扫描 dot）+
 /// FTS Bloom。适合新 namespace；旧 namespace 可继续用 default 兼容布局。
 pub fn BuildConfig::single_copy(ns : String) -> BuildConfig {
@@ -244,7 +256,7 @@ fn[S : @store.ObjectStore] build_ingest_base(
     None => {
       let v = new_centroid_version()
       let c : @format.Centroids = if docs.length() > 0 {
-        train_centroids(docs, cfg.nlist, 8)
+        train_centroids(docs, cfg.nlist, 8, cfg.distance_metric == "euclidean")
       } else {
         { dim: cfg.vector_dim, data: [] }
       }

@@ -1,0 +1,264 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/spec"
+
+import {
+  "moonbitlang/core/debug",
+  "moonbitlang/core/set",
+}
+
+// Values
+pub const SPEC_ROAR_ARRAY_MAX : Int32 = 4096
+
+pub fn apply_append_l0(SpecMergeTree, String, Array[UInt64]) -> SpecMergeTree
+
+pub fn apply_compaction(SpecMergeTree, String) -> SpecMergeTree
+
+pub fn apply_soft_delete(SpecMergeTree, Array[UInt64]) -> SpecMergeTree
+
+pub fn array_container_contains(Array[Int32], Int32) -> Bool
+
+pub fn bitmap_container_test_bit(Array[UInt64], Int32) -> Bool
+
+pub fn cas_apply_transition(CasState, UInt64, UInt64, String) -> CasState
+
+pub fn cas_arbitrate(CasState, UInt64, UInt64, String) -> CasOutcome
+
+pub fn cas_transition_valid(UInt64, UInt64, UInt64) -> Bool
+
+pub fn catalog_acquire_lease(SpecCatalog, String, String, UInt64, UInt64) -> LeaseToken?
+
+pub fn catalog_commit_head(SpecCatalog, SpecObjectStore, String, LeaseToken, UInt64, SpecManifest, UInt64) -> CommitOutcome
+
+pub fn catalog_create_branch(SpecCatalog, String, String?, Array[String], SpecObjectStore, UInt64) -> SpecBranch?
+
+pub fn catalog_create_snapshot(SpecCatalog, String, String, UInt64) -> SpecSnapshot?
+
+pub fn catalog_delete_snapshot(SpecCatalog, String) -> Bool
+
+pub fn catalog_release_lease(SpecCatalog, LeaseToken) -> Bool
+
+pub fn catalog_renew_lease(SpecCatalog, LeaseToken, UInt64, UInt64) -> LeaseToken?
+
+pub fn catalog_restore_snapshot(SpecCatalog, SpecObjectStore, String, String, LeaseToken, UInt64) -> CommitOutcome
+
+pub fn check_doc_liveness(Bool, Bool) -> Bool
+
+pub fn check_lease_fencing(LeaseToken, LeaseToken?, UInt64) -> CommitOutcome
+
+pub fn collect_reachable_segments(SpecCatalog) -> @set.Set[String]
+
+pub fn doc_is_live(SpecMergeTree, UInt64) -> Bool
+
+pub fn eval_doc_liveness(Bool, Bool) -> Bool
+
+pub fn execute_dual_write(SpecCatalog, SpecObjectStore, String, LeaseToken, String, String, CrashStage, UInt64) -> CommitOutcome
+
+pub fn gc_identify_unreferenced(SpecCatalog, SpecObjectStore, UInt64, UInt64) -> Array[String]
+
+pub fn gc_sweep(SpecCatalog, SpecObjectStore, @set.Set[String], UInt64, UInt64) -> (Int32, Array[String])
+
+pub fn id_in_part_bounds(UInt64, UInt64, UInt64) -> Bool
+
+pub fn is_segment_key(String) -> Bool
+
+pub fn lease_token_valid(LeaseToken, LeaseToken, UInt64) -> Bool
+
+pub fn part_contains_id(SpecPart, UInt64) -> Bool
+
+pub fn parts_contain_id(Array[SpecPart], UInt64) -> Bool
+
+pub fn roaring_high_key(UInt64) -> UInt64
+
+pub fn roaring_low_key(UInt64) -> Int32
+
+pub fn roaring_reconstruct(UInt64, Int32) -> UInt64
+
+pub fn run_randomized_state_machine_model_checker(Int32, UInt64) -> ModelCheckerStats
+
+pub fn select_container_kind(Int32) -> ContainerKind
+
+pub fn sorted_array_contains(Array[UInt64], UInt64) -> Bool
+
+pub fn tombstones_contain_id(Array[UInt64], UInt64) -> Bool
+
+pub fn verify_cas_monotonicity(CasState, Array[(UInt64, String)]) -> Bool
+
+pub fn verify_compaction_live_doc_preservation(SpecMergeTree, SpecMergeTree, Array[UInt64]) -> Bool
+
+pub fn verify_roaring_equivalence(Array[UInt64], Array[UInt64]) -> Bool
+
+pub fn verify_roaring_roundtrip(Array[UInt64]) -> Bool
+
+pub fn verify_safety1_snapshot_gc_safety(SpecCatalog, @set.Set[String], SpecObjectStore) -> Bool
+
+pub fn verify_safety2_dual_write_consistency(SpecCatalog, SpecObjectStore) -> Bool
+
+pub fn verify_safety3_lease_fencing(SpecCatalog) -> Bool
+
+// Errors
+
+// Types and methods
+#derive(Eq, @debug.Debug)
+pub(all) enum CasOutcome {
+  Success(CasState)
+  Conflict(UInt64, UInt64)
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct CasState {
+  seq : UInt64
+  manifest_key : String
+  epoch : UInt64
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) enum CommitError {
+  FencingViolation(FencingError)
+  CasConflict(UInt64, UInt64)
+  MissingSegment(String)
+  CorruptSegment(String)
+  MissingManifest(String)
+  BranchNotFound(String)
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) enum CommitOutcome {
+  CommitOk(UInt64)
+  CommitRejected(CommitError)
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) enum ContainerKind {
+  ArrayContainer
+  BitmapContainer
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) enum CrashStage {
+  NoCrash
+  CrashBeforeSegmentUpload
+  CrashDuringSegmentUpload
+  CrashAfterSegmentUpload
+  CrashAfterManifestUpload
+  CrashDuringCasCommit
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) enum FencingError {
+  FencingTokenMismatch(String)
+  LeaseExpired(UInt64, UInt64)
+  NoActiveLease(String)
+  NotLeaseHolder(String, String)
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct LeaseToken {
+  token_id : UInt64
+  holder : String
+  branch : String
+  expires_at_ms : UInt64
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct ModelCheckerStats {
+  total_steps : Int32
+  branches_created : Int32
+  docs_written : Int32
+  crashes_injected : Int32
+  snapshots_created : Int32
+  snapshots_deleted : Int32
+  snapshots_restored : Int32
+  leases_expired : Int32
+  concurrent_cas_runs : Int32
+  fencing_mismatches_caught : Int32
+  gc_sweeps_run : Int32
+  segments_swept : Int32
+  safety1_checks_passed : Int32
+  safety2_checks_passed : Int32
+  safety3_checks_passed : Int32
+  all_invariants_held : Bool
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SpecBranch {
+  name : String
+  mut head_manifest_id : String
+  mut head_seq : UInt64
+  origin_branch : String?
+  origin_manifest_id : String?
+  manifest_history : Array[String]
+}
+
+#derive(@debug.Debug)
+pub(all) struct SpecCatalog {
+  branches : Map[String, SpecBranch]
+  manifests : Map[String, SpecManifest]
+  snapshots : Map[String, SpecSnapshot]
+  leases : Map[String, LeaseToken]
+  mut last_token_id : UInt64
+}
+pub fn SpecCatalog::new() -> Self
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SpecManifest {
+  id : String
+  seq : UInt64
+  segments : Array[String]
+  parent_id : String?
+  created_at_ms : UInt64
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SpecMergeTree {
+  parts : Array[SpecPart]
+  tombstones : Array[UInt64]
+}
+
+#derive(@debug.Debug)
+pub(all) struct SpecObjectStore {
+  objects : Map[String, SpecStoreObject]
+  created_at_ms : Map[String, UInt64]
+}
+pub fn SpecObjectStore::delete(Self, String) -> Unit
+pub fn SpecObjectStore::is_committed(Self, String) -> Bool
+pub fn SpecObjectStore::is_partially_written(Self, String) -> Bool
+pub fn SpecObjectStore::new() -> Self
+pub fn SpecObjectStore::put(Self, String, Int32, UInt64) -> Unit
+pub fn SpecObjectStore::put_partial(Self, String, Int32, UInt64) -> Unit
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SpecPart {
+  part_id : String
+  level : Int32
+  ids : Array[UInt64]
+  min_id : UInt64
+  max_id : UInt64
+}
+
+#derive(@debug.Debug)
+pub(all) struct SpecRng {
+  mut state : UInt64
+}
+pub fn SpecRng::new(UInt64) -> Self
+pub fn SpecRng::next_int(Self, Int32) -> Int32
+pub fn SpecRng::next_u64(Self) -> UInt64
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SpecSnapshot {
+  name : String
+  branch_name : String
+  manifest_id : String
+  pinned_segments : Array[String]
+  created_at_ms : UInt64
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) enum SpecStoreObject {
+  Committed(Int32)
+  PartiallyWritten(Int32)
+  Swept
+}
+
+// Type aliases
+
+// Traits

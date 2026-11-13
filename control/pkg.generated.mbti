@@ -2,14 +2,32 @@
 package "turbofish/control"
 
 import {
+  "moonbitlang/core/debug",
+  "moonbitlang/core/set",
   "turbofish/core",
+  "turbofish/format",
   "turbofish/query",
   "turbofish/store",
 }
 
 // Values
+pub fn default_namespace_meta(String, head_manifest? : String, vector_dim? : Int32, distance_metric? : String, fts_tokenizer? : String) -> @format.NamespaceMeta
+
+pub fn gather_merge_results(Array[Array[@query.QueryResult]], Int32) -> Array[@query.QueryResult]
+
+pub fn select_probe_partitions(@format.Centroids, Array[Float], Int32, Bool) -> Array[Int32]
+
+pub fn split_partitions(Array[Int32], Int32) -> Array[Array[Int32]]
 
 // Errors
+#derive(Eq, @debug.Debug)
+pub(all) suberror CatalogError {
+  FencingTokenMismatch(String)
+  CommitConflict(String)
+  NotFound(String)
+  LeaseExpired(String)
+  TxAborted(String)
+}
 
 // Types and methods
 pub struct ControlPlane[S] {
@@ -23,15 +41,37 @@ pub struct ControlPlane[S] {
   mut evictions : Int32
   mut probes : Int32
   mut probe_hits : Int32
+  mut authoritative : Bool
 }
 pub fn[S : @store.ObjectStore] ControlPlane::acquire(Self[S], String) -> @query.Namespace[S] raise @core.SpndError
+pub fn[S] ControlPlane::get_snapshot(Self[S], String) -> @query.Namespace[S]?
 pub fn[S : @store.ObjectStore] ControlPlane::invalidate(Self[S], String) -> Unit
+pub fn[S] ControlPlane::is_authoritative(Self[S]) -> Bool
 pub fn[S : @store.ObjectStore] ControlPlane::new(S, CtrlConfig) -> Self[S]
 pub fn[S : @store.ObjectStore] ControlPlane::pinned_manifest(Self[S], String) -> String?
 pub fn[S] ControlPlane::pinned_manifests(Self[S], String) -> Array[String]
 pub fn[S : @store.ObjectStore] ControlPlane::probe_stats(Self[S]) -> (Int32, Int32)
 pub fn[S : @store.ObjectStore] ControlPlane::release(Self[S], String) -> Unit
+pub fn[S] ControlPlane::set_authoritative(Self[S], Bool) -> Unit
 pub fn[S : @store.ObjectStore] ControlPlane::stats(Self[S]) -> (Int32, Int32, Int32, Int32, Int32)
+pub fn[S : @store.ObjectStore] ControlPlane::update_snapshot(Self[S], String, @query.Namespace[S]) -> Unit
+
+pub struct Coordinator[S] {
+  store : S
+  tenants : Map[String, TenantMetadata]
+  workers : Array[QueryWorker[S]]
+  next_worker_idx : Int32
+}
+pub fn[S : @store.ObjectStore] Coordinator::dispatch_bm25_query(Self[S], String, @query.Namespace[S], String, Int32, @query.Filter?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] Coordinator::dispatch_hybrid_query(Self[S], String, @query.Namespace[S], String, Array[Float], Int32, Int32, @query.Filter?, @query.HybridOpts?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] Coordinator::dispatch_vector_query(Self[S], String, @query.Namespace[S], Array[Float], Int32, Int32, @query.Filter?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S] Coordinator::gather_merge(Self[S], Array[Array[@query.QueryResult]], Int32) -> Array[@query.QueryResult]
+pub fn[S] Coordinator::get_tenant(Self[S], String) -> TenantMetadata?
+pub fn[S : @store.ObjectStore] Coordinator::new(S, worker_count? : Int32, worker_cache_ttl_ms? : UInt64, worker_max_bytes? : Int32) -> Self[S]
+pub fn[S] Coordinator::register_tenant(Self[S], String, String, Int32, String, String, Int32) -> Unit
+pub fn[S : @store.ObjectStore] Coordinator::scatter_gather_vector_query(Self[S], String, @query.Namespace[S], Array[Float], Int32, Int32, @query.Filter?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] Coordinator::select_worker(Self[S], String) -> QueryWorker[S]
+pub fn[S] Coordinator::update_tenant_head(Self[S], String, String, Int32) -> Unit
 
 pub(all) struct CtrlConfig {
   head_ttl_ms : UInt64
@@ -48,6 +88,134 @@ pub struct CtrlEntry[S] {
   pinned_ids : Array[String]
 }
 
+#derive(Eq, @debug.Debug)
+pub(all) struct LeaseToken {
+  ns : String
+  worker_id : String
+  epoch : UInt64
+  expires_at_ms : UInt64
+}
+
+pub struct MemRdbCatalog {
+  mut next_tx_id : UInt64
+  mut active_tx_id : UInt64?
+  tenants : Map[String, Array[RdbTenant]]
+  leases : Map[String, Array[RdbLease]]
+  snapshots : Map[String, Array[RdbSnapshot]]
+  lineages : Map[String, Array[RdbLineage]]
+  segment_refs : Map[String, Array[RdbSegmentRef]]
+  manifests : Map[String, Array[RdbManifest]]
+  undo_stack : Array[UndoOp]
+  mut mock_time_ms : UInt64?
+}
+pub fn MemRdbCatalog::begin_transaction(Self) -> UInt64
+pub fn MemRdbCatalog::commit_transaction(Self) -> Unit
+pub fn MemRdbCatalog::get_namespace_at(Self, String, UInt64) -> @format.NamespaceMeta?
+pub fn MemRdbCatalog::new() -> Self
+pub fn MemRdbCatalog::register_manifest(Self, String, @format.ManifestData) -> Unit
+pub fn MemRdbCatalog::register_manifest_segments(Self, String, String, Array[String]) -> Unit
+pub fn MemRdbCatalog::rollback_transaction(Self) -> Unit
+pub fn MemRdbCatalog::set_mock_time(Self, UInt64?) -> Unit
+pub fn[T] MemRdbCatalog::with_transaction(Self, () -> T raise CatalogError) -> T raise CatalogError
+
+pub struct QueryWorker[S] {
+  id : String
+  store : S
+  cache : WorkerTieredCache
+}
+pub fn[S : @store.ObjectStore] QueryWorker::execute_bm25_query(Self[S], @query.Namespace[S], String, Int32, @query.Filter?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] QueryWorker::execute_hybrid_query(Self[S], @query.Namespace[S], String, Array[Float], Int32, Int32, @query.Filter?, @query.HybridOpts?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] QueryWorker::execute_partition_slice(Self[S], @query.Namespace[S], Array[Float], Array[Int32], Int32, @query.Filter?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] QueryWorker::execute_vector_query(Self[S], @query.Namespace[S], Array[Float], Int32, Int32, @query.Filter?) -> Array[@query.QueryResult] raise @core.SpndError
+pub fn[S : @store.ObjectStore] QueryWorker::new(String, S, cache_ttl_ms? : UInt64, max_cache_bytes? : Int32) -> Self[S]
+
+#derive(@debug.Debug)
+type RdbLease
+
+#derive(@debug.Debug)
+type RdbLineage
+
+#derive(@debug.Debug)
+type RdbManifest
+
+#derive(@debug.Debug)
+type RdbSegmentRef
+
+#derive(@debug.Debug)
+type RdbSnapshot
+
+#derive(@debug.Debug)
+type RdbTenant
+
+pub struct S3CasCatalog[S] {
+  store : S
+  mut mock_time_ms : UInt64?
+}
+pub fn[S] S3CasCatalog::new(S) -> Self[S]
+pub fn[S : @store.ObjectStore] S3CasCatalog::register_manifest(Self[S], String, @format.ManifestData) -> Unit
+pub fn[S : @store.ObjectStore] S3CasCatalog::seed_segment(Self[S], String, String) -> Unit
+pub fn[S] S3CasCatalog::set_mock_time(Self[S], UInt64?) -> Unit
+
+pub struct TenantMetadata {
+  tenant_id : String
+  mut head_manifest_id : String
+  vector_dim : Int32
+  distance_metric : String
+  fts_tokenizer : String
+  mut num_docs : Int32
+  mut updated_at_ms : UInt64
+}
+
+pub struct TopKHeap {
+  capacity : Int32
+  mut size : Int32
+  ids : Array[UInt64]
+  scores : Array[Double]
+}
+pub fn TopKHeap::merge_candidates(Self, Array[@query.QueryResult]) -> Unit
+pub fn TopKHeap::new(Int32) -> Self
+pub fn TopKHeap::push(Self, UInt64, Double) -> Unit
+pub fn TopKHeap::to_results(Self) -> Array[@query.QueryResult]
+
+type UndoOp
+
+pub struct WorkerCacheEntry {
+  part : @format.GlobalVecPart
+  created_at_ms : UInt64
+  mut last_accessed_ms : UInt64
+  byte_size : Int32
+}
+
+pub struct WorkerTieredCache {
+  ttl_ms : UInt64
+  max_bytes : Int32
+  entries : Map[String, WorkerCacheEntry]
+  mut current_bytes : Int32
+  mut hits : Int32
+  mut misses : Int32
+  mut evictions : Int32
+  mut expirations : Int32
+}
+pub fn WorkerTieredCache::get(Self, String) -> @format.GlobalVecPart?
+pub fn WorkerTieredCache::new(ttl_ms? : UInt64, max_bytes? : Int32) -> Self
+pub fn WorkerTieredCache::put(Self, String, @format.GlobalVecPart) -> Unit
+pub fn WorkerTieredCache::stats(Self) -> (Int32, Int32, Int32, Int32, Int32)
+
 // Type aliases
 
 // Traits
+pub(open) trait MetadataCatalog {
+  fn create_namespace(Self, @format.NamespaceMeta) -> Unit raise CatalogError
+  fn get_namespace(Self, String) -> @format.NamespaceMeta? raise CatalogError
+  fn update_head_manifest(Self, String, String, expected_head? : String, lease_token? : LeaseToken) -> Unit raise CatalogError
+  fn acquire_lease(Self, String, String, UInt64) -> LeaseToken? raise CatalogError
+  fn renew_lease(Self, LeaseToken, UInt64) -> LeaseToken? raise CatalogError
+  fn release_lease(Self, LeaseToken) -> Bool raise CatalogError
+  fn register_snapshot(Self, String, String, String) -> Unit raise CatalogError
+  fn resolve_snapshot(Self, String, String) -> String? raise CatalogError
+  fn record_branch_origin(Self, String, String) -> Unit raise CatalogError
+  fn get_lineage(Self, String) -> Array[String] raise CatalogError
+  fn list_active_segment_ids(Self, String) -> @set.Set[String] raise CatalogError
+  fn mark_segment_referenced(Self, String, String) -> Unit raise CatalogError
+  fn get_unreferenced_segments(Self, String, UInt64) -> Array[String] raise CatalogError
+}

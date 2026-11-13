@@ -110,7 +110,11 @@ fn[S : @store.ObjectStore] init_namespace(
     ns_name: cfg.ns,
     head_manifest: "",
     vec_global_version: None,
-    distance_metric: "cosine",
+    distance_metric: if cfg.distance_metric == "" {
+      "cosine"
+    } else {
+      cfg.distance_metric
+    },
     vector_dim: cfg.vector_dim,
     vector_dtype: if cfg.use_f16 {
       "f16"

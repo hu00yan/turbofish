@@ -15,11 +15,60 @@
 // - fts/blockmax.bin 存在时 BM25 走 block-max WAND（正确性与暴力路径一致）
 
 ///|
-/// 过滤条件：(字段名, 期望值)。字段列文件位于 {ns}/_segments/{seg}/rows/{field}.bin。
+/// 过滤值。数值列统一 i64（JSON 数值解析为 i64）；string 按 UTF-8 字节序比较。
+pub(all) enum FVal {
+  S(String)
+  B(Bool)
+  I(Int64)
+}
+
+///|
+/// 通用过滤 AST（对齐 turbopuffer v2 过滤面）：
+/// - 等值/集合：Eq / Neq / In / NotIn
+/// - 范围：Lt / Lte / Gt / Gte（i64 数值比较；string 为 UTF-8 字节序字典序；
+///   bool 列不支持范围，加载列时报 Corrupt）
+/// - 通配符：Glob(field, pattern)（`*` 匹配 0 个或多个任意字符，`?` 匹配恰好 1 个字符）
+/// - 组合：And / Or / Not 任意嵌套
+/// 字段列文件位于 {ns}/_segments/{seg}/rows/{field}.bin。
 pub(all) enum Filter {
-  FStr(String, String)
-  FBool(String, Bool)
-  FI64(String, Int64)
+  Eq(String, FVal)
+  Neq(String, FVal)
+  In(String, Array[FVal])
+  NotIn(String, Array[FVal])
+  Lt(String, FVal)
+  Lte(String, FVal)
+  Gt(String, FVal)
+  Gte(String, FVal)
+  Glob(String, String)
+  And(Array[Filter])
+  Or(Array[Filter])
+  Not(Filter)
+}
+
+///|
+/// 旧接口兼容构造器（等值语义，等价 Eq(field, S/B/I(v))）。
+pub fn f_str(field : String, v : String) -> Filter {
+  Eq(field, S(v))
+}
+
+///|
+pub fn f_bool(field : String, v : Bool) -> Filter {
+  Eq(field, B(v))
+}
+
+///|
+pub fn f_i64(field : String, v : Int64) -> Filter {
+  Eq(field, I(v))
+}
+
+///|
+/// FVal 的调试描述（错误信息用）。
+pub fn FVal::describe(self : FVal) -> String {
+  match self {
+    S(s) => "\"\{s}\""
+    B(b) => "\{b}"
+    I(v) => "\{v}"
+  }
 }
 
 ///|
@@ -65,6 +114,7 @@ pub(all) struct CachedSeg {
   mut block_stats : (Int, Int, Array[(Int64, Int64)])? // (block_size, row_count, blocks)
   mut block_stats_tried : Bool
   matchers : Map[String, RowMatcher]
+  vec_parts : Map[Int, Bytes]
 }
 
 ///|
@@ -84,6 +134,7 @@ pub(all) struct Namespace[S] {
   mut global_gen_cids : Map[String, Array[Int]]
   // 惰性：各代 meta.json 的 pack_size（>1 = 分包；同 global_gen_cids 一次 GET 进缓存）。
   mut global_gen_packs : Map[String, Int]
+  global_parts : Map[String, @format.GlobalVecPart]
   mut head_checked_ms : UInt64 // metadata cache 最近一次 head 检查时间
 }
 
@@ -100,7 +151,7 @@ pub(all) struct MetadataCache[S] {
 
 ///|
 pub fn[S : @store.ObjectStore] MetadataCache::new() -> MetadataCache[S] {
-  { entries: Map([]), hits: 0, misses: 0, head_ttl_ms: 1000UL }
+  { entries: Map([]), hits: 0, misses: 0, head_ttl_ms: 60000UL }
 }
 
 ///|
@@ -109,6 +160,192 @@ pub fn[S : @store.ObjectStore] MetadataCache::invalidate(
   ns : String,
 ) -> Unit {
   self.entries.remove(ns)
+}
+
+///|
+pub fn[S : @store.ObjectStore] MetadataCache::put(
+  self : MetadataCache[S],
+  ns : String,
+  n : Namespace[S],
+) -> Unit {
+  self.entries.set(ns, n)
+}
+
+///|
+pub fn[S : @store.ObjectStore] MetadataCache::get(
+  self : MetadataCache[S],
+  ns : String,
+) -> Namespace[S]? {
+  self.entries.get(ns)
+}
+
+///|
+pub fn[S : @store.ObjectStore] MetadataCache::set_head_ttl(
+  self : MetadataCache[S],
+  ttl_ms : UInt64,
+) -> Unit {
+  self.head_ttl_ms = ttl_ms
+}
+
+///|
+pub fn[S : @store.ObjectStore] MetadataCache::touch(
+  self : MetadataCache[S],
+  ns : String,
+) -> Unit {
+  match self.entries.get(ns) {
+    Some(n) => n.head_checked_ms = @env.now()
+    None => ()
+  }
+}
+
+///|
+pub fn[S : @store.ObjectStore] MetadataCache::update_in_memory(
+  self : MetadataCache[S],
+  store : S,
+  ns : String,
+  meta : @format.NamespaceMeta,
+  manifest : @format.ManifestData,
+) -> Namespace[S] {
+  open_cached_or_create(self, store, ns, meta, manifest)
+}
+
+///|
+/// 直接从内存元数据构造 Namespace，零 S3 请求。
+pub fn[S : @store.ObjectStore] open_from_meta(
+  store : S,
+  ns : String,
+  meta : @format.NamespaceMeta,
+  manifest : @format.ManifestData,
+) -> Namespace[S] {
+  {
+    store,
+    ns,
+    meta,
+    manifest,
+    centroids: None,
+    cache: Map([]),
+    tombstones: None,
+    vec_global_cids: None,
+    global_gen_cids: Map([]),
+    global_gen_packs: Map([]),
+    global_parts: Map([]),
+    head_checked_ms: @env.now(),
+  }
+}
+
+fn global_gen_equal(
+  a : @format.GlobalGen?,
+  b : @format.GlobalGen?,
+) -> Bool {
+  match (a, b) {
+    (None, None) => true
+    (Some(ga), Some(gb)) =>
+      if ga.base != gb.base || ga.deltas.length() != gb.deltas.length() {
+        false
+      } else {
+        let mut eq = true
+        for i in 0..<ga.deltas.length() {
+          if ga.deltas[i] != gb.deltas[i] {
+            eq = false
+            break
+          }
+        }
+        eq
+      }
+    _ => false
+  }
+}
+
+///|
+/// 带缓存的从内存元数据打开/复用 Namespace，零 S3 请求。
+pub fn[S : @store.ObjectStore] open_cached_or_create(
+  cache : MetadataCache[S],
+  store : S,
+  ns : String,
+  meta : @format.NamespaceMeta,
+  manifest : @format.ManifestData,
+) -> Namespace[S] {
+  let now = @env.now()
+  match cache.entries.get(ns) {
+    Some(old) =>
+      if old.manifest.id == manifest.id {
+        old.head_checked_ms = now
+        cache.hits += 1
+        old
+      } else {
+        cache.misses += 1
+        let cent = if old.manifest.centroid_version == manifest.centroid_version {
+          old.centroids
+        } else {
+          None
+        }
+        let tombstones = if old.manifest.deleted_roar == manifest.deleted_roar &&
+          old.manifest.deleted == manifest.deleted {
+          old.tombstones
+        } else {
+          None
+        }
+        let vec_global_cids = if old.manifest.vec_global_version ==
+          manifest.vec_global_version &&
+          global_gen_equal(old.manifest.global_gen, manifest.global_gen) {
+          old.vec_global_cids
+        } else {
+          None
+        }
+        let n : Namespace[S] = {
+          store,
+          ns,
+          meta,
+          manifest,
+          centroids: cent,
+          cache: old.cache,
+          tombstones,
+          vec_global_cids,
+          global_gen_cids: old.global_gen_cids,
+          global_gen_packs: old.global_gen_packs,
+          global_parts: old.global_parts,
+          head_checked_ms: now,
+        }
+        cache.entries.set(ns, n)
+        n
+      }
+    None => {
+      cache.misses += 1
+      let n : Namespace[S] = {
+        store,
+        ns,
+        meta,
+        manifest,
+        centroids: None,
+        cache: Map([]),
+        tombstones: None,
+        vec_global_cids: None,
+        global_gen_cids: Map([]),
+        global_gen_packs: Map([]),
+        global_parts: Map([]),
+        head_checked_ms: now,
+      }
+      cache.entries.set(ns, n)
+      n
+    }
+  }
+}
+
+///|
+/// 预热 Namespace：将 centroids、所有段 meta 与 id 列、tombstone、全局 IVF parts 全部预加载进内存。
+pub fn[S : @store.ObjectStore] warm_namespace(
+  n : Namespace[S],
+) -> Unit raise @core.SpndError {
+  let _ = ensure_centroids(n)
+  for si in 0..<n.manifest.segments.length() {
+    let seg = n.manifest.segments[si]
+    let cs = ensure_seg(n, si)
+    if !cs.id_dense {
+      let _ = seg_ids(n, cs, seg.id)
+    }
+  }
+  let _ = tombstones_of(n)
+  preload_all_global_parts(n)
 }
 
 ///|
@@ -123,7 +360,7 @@ pub fn[S : @store.ObjectStore] open_cached(
   let now = @env.now()
   match cache.entries.get(ns) {
     Some(old) =>
-      if now - old.head_checked_ms < cache.head_ttl_ms {
+      if cache.head_ttl_ms > 0UL && now - old.head_checked_ms < cache.head_ttl_ms {
         cache.hits += 1
         return old
       }
@@ -156,6 +393,19 @@ pub fn[S : @store.ObjectStore] open_cached(
         } else {
           None
         }
+        let tombstones = if old.manifest.deleted_roar == manifest.deleted_roar &&
+          old.manifest.deleted == manifest.deleted {
+          old.tombstones
+        } else {
+          None
+        }
+        let vec_global_cids = if old.manifest.vec_global_version ==
+          manifest.vec_global_version &&
+          global_gen_equal(old.manifest.global_gen, manifest.global_gen) {
+          old.vec_global_cids
+        } else {
+          None
+        }
         let n : Namespace[S] = {
           store,
           ns,
@@ -163,10 +413,11 @@ pub fn[S : @store.ObjectStore] open_cached(
           manifest,
           centroids: cent,
           cache: old.cache,
-          tombstones: None,
-          vec_global_cids: None,
-          global_gen_cids: Map([]),
-          global_gen_packs: Map([]),
+          tombstones,
+          vec_global_cids,
+          global_gen_cids: old.global_gen_cids,
+          global_gen_packs: old.global_gen_packs,
+          global_parts: old.global_parts,
           head_checked_ms: now,
         }
         cache.entries.set(ns, n)
@@ -188,7 +439,8 @@ pub fn[S : @store.ObjectStore] open_cached(
         tombstones: None,
         vec_global_cids: None,
         global_gen_cids: Map([]),
-          global_gen_packs: Map([]),
+        global_gen_packs: Map([]),
+        global_parts: Map([]),
         head_checked_ms: now,
       }
       cache.entries.set(ns, n)
@@ -229,7 +481,8 @@ pub fn[S : @store.ObjectStore] open(
     tombstones: None,
     vec_global_cids: None,
     global_gen_cids: Map([]),
-          global_gen_packs: Map([]),
+    global_gen_packs: Map([]),
+    global_parts: Map([]),
     head_checked_ms: 0UL,
   }
 }
@@ -674,6 +927,7 @@ fn[S : @store.ObjectStore] ensure_seg(
         block_stats: None,
         block_stats_tried: false,
         matchers: Map([]),
+        vec_parts: Map([]),
       }
       n.cache.set(seg.id, cs)
       cs
@@ -814,65 +1068,183 @@ fn[S : @store.ObjectStore] row_id(
 
 ///|
 /// stats 预判：filter 与段统计不相交时整段跳过（不读任何列/fts）。
+/// 组合节点保守求值：And 全部可能、Or 任一可能、Not 恒 true（不可跳过）。
 fn seg_may_match(cs : CachedSeg, filter : Filter?) -> Bool {
   match filter {
     None => true
-    Some(FI64(field, v)) =>
-      if field == "ts" {
-        match cs.stats {
-          Some(s) =>
-            if s.has_ts {
-              v >= s.ts_min && v <= s.ts_max
-            } else {
-              true
-            }
-          None => true
+    Some(f) => seg_may_match_f(cs, f)
+  }
+}
+
+///|
+/// ts 块级 min/max 与单值/范围谓词是否可能相交（无 stats 时恒 true）。
+fn stats_may_ts(cs : CachedSeg, v : Int64, cmp : (Int64, Int64) -> Bool) -> Bool {
+  match cs.stats {
+    Some(s) => if s.has_ts { cmp(s.ts_min, s.ts_max) } else { true }
+    None => true
+  }
+}
+
+///|
+/// 字典列 value set 与单值/范围谓词是否可能相交（无 stats 时恒 true）。
+/// cmp 输入为 term_compare(x, v) 的结果。
+fn stats_may_str(cs : CachedSeg, v : String, cmp : (Int) -> Bool) -> Bool {
+  match cs.stats {
+    Some(s) =>
+      if s.has_cat {
+        let mut found = false
+        for x in s.cat_values {
+          if cmp(@format.term_compare(x, v)) {
+            found = true
+            break
+          }
         }
+        found
       } else {
         true
       }
-    Some(FStr(field, v)) =>
-      if field == "category" {
-        match cs.stats {
-          Some(s) =>
-            if s.has_cat {
-              let mut found = false
-              for x in s.cat_values {
-                if x == v {
-                  found = true
-                  break
+    None => true
+  }
+}
+
+///|
+fn seg_may_match_f(cs : CachedSeg, f : Filter) -> Bool {
+  match f {
+    Eq(field, v) =>
+      match v {
+        S(s) =>
+          if field == "category" {
+            stats_may_str(cs, s, fn(c) { c == 0 })
+          } else {
+            true
+          }
+        B(b) =>
+          if field == "public" {
+            match cs.stats {
+              Some(s) =>
+                if s.has_pub {
+                  let mut found = false
+                  for x in s.pub_values {
+                    if x == b {
+                      found = true
+                      break
+                    }
+                  }
+                  found
+                } else {
+                  true
                 }
-              }
-              found
-            } else {
-              true
+              None => true
             }
-          None => true
-        }
-      } else {
-        true
+          } else {
+            true
+          }
+        I(i) =>
+          if field == "ts" {
+            stats_may_ts(cs, i, fn(lo, hi) { i >= lo && i <= hi })
+          } else {
+            true
+          }
       }
-    Some(FBool(field, v)) =>
-      if field == "public" {
-        match cs.stats {
-          Some(s) =>
-            if s.has_pub {
-              let mut found = false
-              for x in s.pub_values {
-                if x == v {
-                  found = true
-                  break
-                }
-              }
-              found
-            } else {
-              true
-            }
-          None => true
+    Neq(_, _) => true // 反等值无整段跳过语义
+    In(field, vals) => {
+      // 任一值可能与段统计相交即不可跳过
+      let mut any = false
+      for v in vals {
+        if seg_may_match_f(cs, Eq(field, v)) {
+          any = true
+          break
         }
-      } else {
-        true
       }
+      any
+    }
+    NotIn(_, _) => true
+    Lt(field, v) =>
+      match v {
+        I(i) =>
+          if field == "ts" {
+            stats_may_ts(cs, i, fn(lo, _) { lo < i })
+          } else {
+            true
+          }
+        S(s) =>
+          if field == "category" {
+            stats_may_str(cs, s, fn(c) { c < 0 })
+          } else {
+            true
+          }
+        B(_) => true
+      }
+    Lte(field, v) =>
+      match v {
+        I(i) =>
+          if field == "ts" {
+            stats_may_ts(cs, i, fn(lo, _) { lo <= i })
+          } else {
+            true
+          }
+        S(s) =>
+          if field == "category" {
+            stats_may_str(cs, s, fn(c) { c <= 0 })
+          } else {
+            true
+          }
+        B(_) => true
+      }
+    Gt(field, v) =>
+      match v {
+        I(i) =>
+          if field == "ts" {
+            stats_may_ts(cs, i, fn(_, hi) { hi > i })
+          } else {
+            true
+          }
+        S(s) =>
+          if field == "category" {
+            stats_may_str(cs, s, fn(c) { c > 0 })
+          } else {
+            true
+          }
+        B(_) => true
+      }
+    Gte(field, v) =>
+      match v {
+        I(i) =>
+          if field == "ts" {
+            stats_may_ts(cs, i, fn(_, hi) { hi >= i })
+          } else {
+            true
+          }
+        S(s) =>
+          if field == "category" {
+            stats_may_str(cs, s, fn(c) { c >= 0 })
+          } else {
+            true
+          }
+        B(_) => true
+      }
+    And(children) => {
+      let mut all = true
+      for c in children {
+        if !seg_may_match_f(cs, c) {
+          all = false
+          break
+        }
+      }
+      all
+    }
+    Or(children) => {
+      let mut any = false
+      for c in children {
+        if seg_may_match_f(cs, c) {
+          any = true
+          break
+        }
+      }
+      any
+    }
+    Not(_) => true
+    Glob(_, _) => true // 通配符不能整段剪枝，恒 true
   }
 }
 

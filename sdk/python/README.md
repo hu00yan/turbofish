@@ -1,24 +1,40 @@
 # turbofish-client (Python)
 
-Minimal Python client for the **turbofish HTTP API v0** (JSON, no auth).
+Minimal Python client for the **turbofish HTTP API** (JSON, optional Bearer auth).
 Single file, pure standard library (`urllib.request` + `json`) — zero dependencies.
 
-## Contract v0 covered
+## Contract covered
 
 | Method | HTTP | Path | Request body | Response |
 |---|---|---|---|---|
-| `create_namespace(ns, fts_tokenizer=None)` | POST | `/v1/namespaces/{ns}/create` | `{"fts_tokenizer": "word\|smartcn\|kuromoji\|nori"}` (可省略) | `{"ok": true, "ns": ...}` |
-| `write(ns, rows, deletes=None)` | POST | `/v1/namespaces/{ns}/write` | `{"rows": [...], "deletes": [...]}` | `{"ingested": n, "head": ...}` |
-| `batch_upsert(ns, rows, batch_size=1000)` / `upsert(...)` | POST (batch) | `/v1/namespaces/{ns}/write` | 分批写入 | `{"ingested": n, "head": ..., "batches": b}` |
+| `create_namespace(ns, fts_tokenizer=None, distance_metric=None)` | POST | `/v1/namespaces/{ns}/create` | `{"fts_tokenizer": "word\|smartcn\|kuromoji\|nori"}`, `{"distance_metric": "cosine\|euclidean\|cosine_distance\|euclidean_squared"}` (均可省略) | `{"ok": true, "ns": ...}` |
+| `write(ns, rows, deletes=None, distance_metric=None)` | POST | `/v1/namespaces/{ns}/write` | `{"rows": [...], "deletes": [...]}`; `distance_metric` 在请求体顶层 | `{"ingested": n, "head": ...}` |
+| `batch_upsert(ns, rows, batch_size=1000, distance_metric=None)` / `upsert(...)` | POST (batch) | `/v1/namespaces/{ns}/write` | 分批写入 | `{"ingested": n, "head": ..., "batches": b}` |
 | `batch_delete(ns, ids, batch_size=1000)` / `delete(...)` | POST (batch) | `/v1/namespaces/{ns}/write` | 分批删除 | `{"deleted": n, "head": ..., "batches": b}` |
-| `query(ns, text=None, vector=None, top_k=10, nprobe=None, filter_category=None, attributes=None)` | POST | `/v1/namespaces/{ns}/query` | `{"text", "vector", "top_k", "nprobe", "filter_category", "attributes"}` | `{"rows": [...], "count": n}` |
-| `hybrid_search(ns, text, vector, top_k=10, nprobe=None, filter_category=None, attributes=None)` | POST | `/v1/namespaces/{ns}/query` | 混合检索与属性投影 | `{"rows": [...], "count": n}` |
+| `delete_by_filter(ns, filter)` | POST | `/v1/namespaces/{ns}/delete_by_filter` | `{"filter": [...]}` | `{"deleted": n}` |
+| `copy_namespace(source_ns, dest_ns)` | POST | `/v1/namespaces/{source_ns}/copy` | `{"destination": "dest_ns"}` | `{"ok": true}` |
+| `branch_namespace(source_ns, dest_ns)` | POST | `/v1/namespaces/{source_ns}/branch` | `{"destination": "dest_ns"}` | `{"ok": true}` |
+| `query(ns, text=None, vector=None, top_k=10, limit=None, nprobe=None, filter_category=None, attributes=None, filter=None, offset=None, aggregations=None, rank_constant=None, fusion=None, weights=None, include_attributes=None, exclude_attributes=None, consistency=None)` | POST | `/v1/namespaces/{ns}/query` | 未设置的参数省略 | `{"rows": [...], "count": n}`；`aggregations` 支持 `Count` 与 `Sum` |
+| `count(ns, filter=None, consistency=None)` | POST | `/v1/namespaces/{ns}/query` | `aggregations=["Count"]` 便捷封装，返回 `int` | `int` |
+| `hybrid_search(ns, text, vector, top_k=10, nprobe=None, filter_category=None, attributes=None, filter=None, rank_constant=None, fusion=None, weights=None)` | POST | `/v1/namespaces/{ns}/query` | 混合检索与属性投影 | `{"rows": [...], "count": n}` |
 | `health(ns)` | GET | `/v1/namespaces/{ns}/health` | — | `{"ns", "num_docs", "head", "fts_tokenizer"}` |
 
 A row is `{"id": <uint64>, "text": str, "vector": [f32...], "category": str,
 "ts": <int64>, "public": bool}`. Field names are passed through verbatim; the
 server validates them. Query results return enriched attributes (`id`, `score`, `text`,
 `category`, `ts`, `public`), and `attributes` parameter controls field projection.
+
+API Key: pass `api_key="..."` in `TurboFishClient(..., api_key=...)` to send
+`Authorization: Bearer <key>`.
+
+v1 query 参数（全部可选、向后兼容）：`filter` 接收已构造好的 turbopuffer
+数组语法并原样透传 —— 叶子 `["attr", "Eq", value]`（op ∈
+Eq/NotEq/In/NotIn/Lt/Lte/Gt/Gte/Glob）、两元糖 `["attr", value]`（等于 Eq）、组合
+`["And", [...]]` / `["Or", [...]]` / `["Not", filter]`，value 为数字/字符串/布尔
+（`In` 的 value 是数组）；`weights` 为 `{"bm25": .., "vector": ..}` dict 原样透传。
+`rank_constant` / `fusion` / `weights` 仅 hybrid（text+vector 同时给）查询生效。
+`consistency` 为 `"strong"` 或 `"eventual"`。`create_namespace` / `write`
+支持可选 `distance_metric`（`"cosine" | "euclidean" | "cosine_distance" | "euclidean_squared"`）。
 
 ## 5 分钟上手
 
@@ -30,10 +46,10 @@ pip install -e sdk/python
 ```python
 from turbofish_client import TurboFishClient, TurboFishError
 
-client = TurboFishClient("http://127.0.0.1:8080", timeout=10)
+client = TurboFishClient("http://127.0.0.1:8080", timeout=10, api_key="my-key")
 
 # 1. create a namespace with a Japanese FTS tokenizer
-client.create_namespace("demo", fts_tokenizer="kuromoji")
+client.create_namespace("demo", fts_tokenizer="kuromoji", distance_metric="cosine_distance")
 
 # 2. batch upsert rows (4-dim vectors in this example)
 client.batch_upsert("demo", rows=[
@@ -41,47 +57,28 @@ client.batch_upsert("demo", rows=[
      "category": "food", "ts": 1700000000, "public": True},
     {"id": 2, "text": "新しい服装が欲しい", "vector": [0.0, 1.0, 0.0, 0.0],
      "category": "clothing", "ts": 1700000100, "public": True},
-], batch_size=100)
+    {"id": 3, "text": "美味しいラーメン屋を探す", "vector": [0.707, 0.707, 0.0, 0.0],
+     "category": "food", "ts": 1700000200, "public": False},
+])
 
-# 3. hybrid query with attribute projection
-res = client.hybrid_search("demo", text="食べる", vector=[1.0, 0.0, 0.0, 0.0],
-                           top_k=10, nprobe=8, filter_category="food",
-                           attributes=["text", "category"])
-for row in res["rows"]:
-    print(row["id"], row["score"], row.get("text"), row.get("category"))
+# 3. hybrid search combining lexical BM25 relevance and vector cosine
+res = client.hybrid_search(
+    "demo",
+    text="寿司",
+    vector=[1.0, 0.0, 0.0, 0.0],
+    top_k=2,
+    attributes=["text", "category"],
+)
+print("hits:", res["count"])
+for r in res["rows"]:
+    print(r["id"], r["score"], r["text"], r.get("category"))
 
-# 4. batch delete
-client.batch_delete("demo", ids=[99], batch_size=100)
+# 4. delete by filter
+client.delete_by_filter("demo", ["category", "Eq", "clothing"])
 
-# 5. namespace health
-print(client.health("demo"))   # {"ns": "demo", "num_docs": 2, "head": "...", "fts_tokenizer": "kuromoji"}
+# 5. copy / branch namespace
+client.branch_namespace("demo", "demo_staging")
 
-# Error handling: any non-2xx, transport failure, or invalid JSON raises
-try:
-    client.query("missing", text="x")
-except TurboFishError as e:
-    print(e.status, e.body)    # HTTP status (None if transport failure) and raw body
+# 6. check health
+print(client.health("demo"))
 ```
-
-## API
-
-- `TurboFishClient(endpoint, timeout=30)` — `timeout` is per-request, in seconds.
-- All methods return the parsed JSON response as a `dict` and are synchronous.
-- `TurboFishError(message, status=None, body=None)` — `status` is the HTTP
-  status code or `None` (transport failure / timeout / malformed reply);
-  `body` is the raw response text or `None`.
-
-## Tests
-
-```bash
-# unit tests (mock HTTP served by a local http.server on an ephemeral port)
-python3 -m unittest discover sdk/python
-
-# end-to-end against a running turbofish server
-python3 sdk/python/test_e2e.py http://127.0.0.1:8080 [namespace]
-```
-
-`test_e2e.py` creates a uniquely-named namespace (kuromoji), writes 3 rows
-(Japanese text + 4-dim vectors), asserts an FTS hit for `食べる`, asserts a
-vector query hits id 1, and checks `health` reports `num_docs == 3`.
-Pass a namespace as the second argv to pin one instead.

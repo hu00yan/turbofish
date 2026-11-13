@@ -2,7 +2,9 @@ import {
   "moonbitlang/core/test",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",
+  "moonbitlang/core/json",
   "turbofish/core",
   "turbofish/store",
+  "turbofish/format",
   "turbofish/query",
 }

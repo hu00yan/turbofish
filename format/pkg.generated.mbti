@@ -61,6 +61,16 @@ pub const PQ_SHARED_MAGIC : String = "SPNDPQS1"
 
 pub const ROAR_MAGIC : String = "SPNDROAR"
 
+pub const SLAB_HEADER_LEN : Int32 = 14
+
+pub const SLAB_INDEX_MAGIC : String = "SLIX"
+
+pub const SLAB_MAGIC : String = "SLAB"
+
+pub const SLAB_TRAILER_LEN : Int32 = 16
+
+pub const SLAB_VERSION : Int32 = 2
+
 pub const VEC_MAGIC : String = "SPNDVEC1"
 
 pub fn bloom_from_hex(Int32, Int32, String) -> Bloom raise @core.SpndError
@@ -107,6 +117,18 @@ pub fn decode_pq_part_shared(Bytes) -> PQPart raise @core.SpndError
 
 pub fn decode_roaring(Bytes) -> Array[UInt64] raise @core.SpndError
 
+pub fn decode_slab_file(Bytes) -> (Int32, SlabIndex) raise @core.SpndError
+
+pub fn decode_slab_header(Bytes) -> (Int32, Int64) raise @core.SpndError
+
+pub fn decode_slab_index(Bytes, Int32) -> SlabIndex raise @core.SpndError
+
+pub fn decode_slab_index_from_header_bytes(Bytes) -> (Int32, SlabIndex) raise @core.SpndError
+
+pub fn decode_slab_index_from_tail_bytes(Bytes, Int32) -> SlabIndex raise @core.SpndError
+
+pub fn decode_slab_trailer(Bytes) -> (Int64, Int32) raise @core.SpndError
+
 pub fn decode_vec_col(Bytes) -> (Int32, Array[Float]) raise @core.SpndError
 
 pub fn decode_vec_payload(Bytes, Int32, Int32, Int32) -> Array[Float] raise @core.SpndError
@@ -146,6 +168,12 @@ pub fn encode_pq_part(Array[Int32], Int32, Int32, Array[Float], Array[UInt32]) -
 pub fn encode_pq_part_shared(Array[Int32], Int32, Int32, Array[UInt32]) -> Bytes
 
 pub fn encode_roaring(Array[UInt64]) -> Bytes
+
+pub fn encode_slab(Array[SlabComponentPayload], index_at_end? : Bool) -> (Bytes, SlabIndex)
+
+pub fn encode_slab_header(Int32, Int64) -> Bytes
+
+pub fn encode_slab_index(SlabIndex) -> Bytes
 
 pub fn encode_vec_col(Int32, Array[Float], Bool) -> Bytes
 
@@ -299,6 +327,14 @@ pub(all) struct Posting {
   tf : Int32
 }
 
+#derive(Eq, @debug.Debug)
+pub(all) enum SegmentFormat {
+  LegacyMultiFile
+  SlabV2
+}
+pub fn SegmentFormat::from_string(String) -> Self?
+pub fn SegmentFormat::to_string(Self) -> String
+
 #derive(@debug.Debug)
 pub(all) struct SegmentMeta {
   id : String
@@ -308,6 +344,51 @@ pub(all) struct SegmentMeta {
   doc_len_sum : Int32
   size_bytes : Int32
 }
+
+#derive(Eq, @debug.Debug)
+pub(all) enum SlabComponent {
+  Id
+  Text
+  Category
+  Ts
+  Public
+  Vector
+  FtsDir
+  FtsPostings
+  FtsDocLen
+  FtsBlockMax
+  BlockStats
+  Meta
+  Custom(String)
+}
+pub fn SlabComponent::from_name(String) -> Self
+pub fn SlabComponent::to_name(Self) -> String
+
+#derive(@debug.Debug)
+pub(all) struct SlabComponentPayload {
+  name : String
+  data : Bytes
+  row_count : Int32
+}
+pub fn SlabComponentPayload::new(String, Bytes, Int32) -> Self
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SlabEntry {
+  name : String
+  offset : Int64
+  length : Int64
+  row_count : Int32
+}
+
+#derive(Eq, @debug.Debug)
+pub(all) struct SlabIndex {
+  entries : Array[SlabEntry]
+}
+pub fn SlabIndex::get(Self, String) -> SlabEntry?
+pub fn SlabIndex::get_component(Self, SlabComponent) -> SlabEntry?
+pub fn SlabIndex::get_slice(Self, Bytes, String) -> Bytes?
+pub fn SlabIndex::has(Self, String) -> Bool
+pub fn SlabIndex::new() -> Self
 
 #derive(@debug.Debug)
 pub(all) struct VecPart {

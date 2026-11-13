@@ -66,6 +66,8 @@ pub struct ControlPlane[S] {
   mut probes : Int
   /// 探测确认 head 未变、免去全量 re-open 的次数。
   mut probe_hits : Int
+  /// 是否为 authoritative 模式（权威内存拥有者，不走 TTL/S3 探测）
+  mut authoritative : Bool
 }
 
 ///|
@@ -84,7 +86,23 @@ pub fn[S : @store.ObjectStore] ControlPlane::new(
     evictions: 0,
     probes: 0,
     probe_hits: 0,
+    authoritative: false,
   }
+}
+
+///|
+pub fn[S] ControlPlane::set_authoritative(
+  self : ControlPlane[S],
+  auth : Bool,
+) -> Unit {
+  self.authoritative = auth
+}
+
+///|
+pub fn[S] ControlPlane::is_authoritative(
+  self : ControlPlane[S],
+) -> Bool {
+  self.authoritative
 }
 
 ///|
@@ -100,8 +118,9 @@ pub fn[S : @store.ObjectStore] ControlPlane::acquire(
   let entry : CtrlEntry[S]? = self.entries.get(ns)
   match entry {
     Some(e) =>
-      // checked_ms=0 视为过期（被 invalidate 标记），不依赖 ttl 与时钟基准。
-      if e.checked_ms != 0UL && now - e.checked_ms < self.cfg.head_ttl_ms {
+      // authoritative 模式下直接命中权威内存快照；非 authoritative 按 TTL 判定。
+      if self.authoritative ||
+        (e.checked_ms != 0UL && now - e.checked_ms < self.cfg.head_ttl_ms) {
         self.hits += 1
         e.pins += 1
         e.pinned_ids.push(e.snap.manifest.id)
@@ -223,6 +242,46 @@ pub fn[S : @store.ObjectStore] ControlPlane::invalidate(
         self.entries.remove(ns)
       }
     None => ()
+  }
+}
+
+///|
+/// 权威控制面主动更新快照：用于写入、补丁、Compaction 完成后直接替换快照，
+/// 无需查询路径向 S3 轮询或 re-open。
+pub fn[S : @store.ObjectStore] ControlPlane::update_snapshot(
+  self : ControlPlane[S],
+  ns : String,
+  snap : @query.Namespace[S],
+) -> Unit {
+  let now = @env.now()
+  match self.entries.get(ns) {
+    Some(e) => {
+      e.snap = snap
+      e.checked_ms = now
+      e.last_used = now
+    }
+    None => {
+      self.entries.set(ns, {
+        snap,
+        checked_ms: now,
+        pins: 0,
+        last_used: now,
+        pinned_ids: [],
+      })
+      self.enforce_limit()
+    }
+  }
+}
+
+///|
+/// 查询是否存在已缓存的权威快照（不发起任何 I/O）。
+pub fn[S] ControlPlane::get_snapshot(
+  self : ControlPlane[S],
+  ns : String,
+) -> @query.Namespace[S]? {
+  match self.entries.get(ns) {
+    Some(e) => Some(e.snap)
+    None => None
   }
 }
 

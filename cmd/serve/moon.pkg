@@ -13,6 +13,7 @@ import {
   "turbofish/simstore",
   "turbofish/mtree",
   "turbofish/core",
+  "turbofish/control",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
   "moonbitlang/core/encoding/utf8",
@@ -22,7 +23,10 @@ options(
   "is-main": true,
   targets: {
     "main.mbt": [ "native" ],
+    "branch.mbt": [ "native" ],
     "stub.mbt": [ "wasm", "wasm-gc", "js" ],
+    "serve_wbtest.mbt": [ "native" ],
+    "branch_wbtest.mbt": [ "native" ],
   },
   link: {
     "native": {

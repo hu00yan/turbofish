@@ -15,6 +15,7 @@
 
 ///|
 /// 过滤列的行级匹配器（Q1：字典列按 code、bool 位图直接查位）。
+/// v1 扩展：集合/范围比较 + And/Or/Not 组合（子匹配器递归求值）。
 pub(all) enum RowMatcher {
   MStr(Array[String], String)
   MDict(Array[UInt16], UInt16) // codes, target code（65535 = 值不在字典）
@@ -22,139 +23,161 @@ pub(all) enum RowMatcher {
   MBitmap(Bytes, Bool) // 位图字节, target
   MI64(Array[Int64], Int64)
   MMask(FixedArray[Bool]) // 块级 stats 跳过后只标记可能命中的行
+  // —— v1 过滤扩展 ——
+  MStrSet(Array[String], Set[String]) // In（普通 str 列）
+  MDictSet(Array[UInt16], Set[UInt16]) // In（字典列）
+  MI64Set(Array[Int64], Set[Int64]) // In（i64 列）
+  MI64Cmp(Array[Int64], Int, Int64) // 范围比较；op: 0=lt 1=lte 2=gt 3=gte
+  MStrCmp(Array[String], Int, String) // string 范围（term_compare 字节序）
+  MDictCmp(Array[UInt16], Array[String], Int, String) // 字典列范围
+  MGlob(Array[String], String) // 通配符匹配（* 任意多字符，? 恰好一字符）
+  MAnd(Array[RowMatcher]) // 空数组恒 true
+  MOr(Array[RowMatcher]) // 空数组恒 false
+  MNot(RowMatcher)
 }
 
 ///|
-fn filter_field(f : Filter) -> String {
-  match f {
-    FStr(field, _) => field
-    FBool(field, _) => field
-    FI64(field, _) => field
+/// 范围比较 op 常量（MI64Cmp / MStrCmp / MDictCmp 共用）。
+const CMP_LT : Int = 0
+
+const CMP_LTE : Int = 1
+
+const CMP_GT : Int = 2
+
+const CMP_GTE : Int = 3
+
+///|
+fn i64_cmp(x : Int64, op : Int, v : Int64) -> Bool {
+  match op {
+    CMP_LT => x < v
+    CMP_LTE => x <= v
+    CMP_GT => x > v
+    _ => x >= v
   }
 }
 
 ///|
-/// 匹配器缓存 key（字段 + 目标值）。
-fn matcher_key(f : Filter) -> String {
-  match f {
-    FStr(field, v) => "\{field}=s:\{v}"
-    FBool(field, v) => "\{field}=b:\{v}"
-    FI64(field, v) => "\{field}=i:\{v}"
+/// 块级 [lo, hi] 与范围谓词是否可能相交（ts block-stats 跳块用）。
+fn block_may_match(lo : Int64, hi : Int64, op : Int, v : Int64) -> Bool {
+  match op {
+    CMP_LT => lo < v
+    CMP_LTE => lo <= v
+    CMP_GT => hi > v
+    _ => hi >= v
   }
 }
 
 ///|
-/// 加载（或从缓存取）某 segment 的过滤匹配器。
+fn fval_key(v : FVal) -> String {
+  match v {
+    S(s) => "s:\{s}"
+    B(b) => "b:\{b}"
+    I(i) => "i:\{i}"
+  }
+}
+
+///|
+fn val_list_key(vals : Array[FVal]) -> String {
+  let mut s = ""
+  for i, v in vals {
+    if i > 0 {
+      s = s + ","
+    }
+    s = s + fval_key(v)
+  }
+  s
+}
+
+///|
+/// 匹配器缓存 key：整棵过滤子树的规范化序列化（子匹配器各自也会缓存）。
+fn filter_key(f : Filter) -> String {
+  match f {
+    Eq(field, v) => "eq(\{field},\{fval_key(v)})"
+    Neq(field, v) => "ne(\{field},\{fval_key(v)})"
+    Lt(field, v) => "lt(\{field},\{fval_key(v)})"
+    Lte(field, v) => "le(\{field},\{fval_key(v)})"
+    Gt(field, v) => "gt(\{field},\{fval_key(v)})"
+    Gte(field, v) => "ge(\{field},\{fval_key(v)})"
+    In(field, vals) => "in(\{field},[\{val_list_key(vals)}])"
+    NotIn(field, vals) => "ni(\{field},[\{val_list_key(vals)}])"
+    And(children) => {
+      let mut s = "and("
+      for i, c in children {
+        if i > 0 {
+          s = s + ","
+        }
+        s = s + filter_key(c)
+      }
+      s + ")"
+    }
+    Or(children) => {
+      let mut s = "or("
+      for i, c in children {
+        if i > 0 {
+          s = s + ","
+        }
+        s = s + filter_key(c)
+      }
+      s + ")"
+    }
+    Not(inner) => "not(\{filter_key(inner)})"
+    Glob(field, pat) => "glob(\{field},\{pat})"
+  }
+}
+
+///|
+/// 加载（或从缓存取）某 segment 的过滤匹配器。支持完整过滤树：
+/// 组合节点递归加载子匹配器，叶子按列 dtype 分派（dict / bitmap / 普通列 /
+/// ts 块级 stats）。空 In = MOr([])（恒 false），NotIn(空) = 恒 true。
 fn[S : @store.ObjectStore] load_matcher(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   f : Filter,
 ) -> RowMatcher raise @core.SpndError {
-  let key = matcher_key(f)
+  let key = filter_key(f)
   match cs.matchers.get(key) {
     Some(m) => m
     None => {
-      let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{filter_field(f)}.bin"
-      let bs = get_object(n.store, col_key)
       let m = match f {
-        FStr(_, v) =>
-          if @format.is_dict_col(bs) {
-            let (dict, codes) = @format.decode_col_dict(bs)
-            let mut target : UInt16 = (65535).to_uint16()
-            for i in 0..<dict.length() {
-              if dict[i] == v {
-                target = i.to_uint16()
-                break
-              }
-            }
-            MDict(codes, target)
-          } else {
-            match @format.decode_col(bs) {
-              @format.ColStr(arr) => MStr(arr, v)
-              _ =>
-                raise @core.Corrupt(
-                  "filter column dtype mismatch for \{filter_field(f)}",
-                )
-            }
+        Eq(field, v) => load_eq_matcher(n, cs, seg_id, field, v)
+        Neq(field, v) => MNot(load_eq_matcher(n, cs, seg_id, field, v))
+        In(field, vals) => load_in_matcher(n, cs, seg_id, field, vals)
+        NotIn(field, vals) => MNot(load_in_matcher(n, cs, seg_id, field, vals))
+        Lt(field, v) => load_cmp_matcher(n, cs, seg_id, field, CMP_LT, v)
+        Lte(field, v) => load_cmp_matcher(n, cs, seg_id, field, CMP_LTE, v)
+        Gt(field, v) => load_cmp_matcher(n, cs, seg_id, field, CMP_GT, v)
+        Gte(field, v) => load_cmp_matcher(n, cs, seg_id, field, CMP_GTE, v)
+        And(children) => {
+          let ms : Array[RowMatcher] = Array::new(
+            capacity=children.length(),
+          )
+          for c in children {
+            ms.push(load_matcher(n, cs, seg_id, c))
           }
-        FBool(_, v) =>
-          // dtype=bool 且 flags bit1=位图 → 直接查位，不展开
-          if @format.is_bitmap_bool(bs) {
-            MBitmap(bs, v)
-          } else {
-            match @format.decode_col(bs) {
-              @format.ColBool(arr) => MBool(arr, v)
-              _ =>
-                raise @core.Corrupt(
-                  "filter column dtype mismatch for \{filter_field(f)}",
-                )
-            }
+          MAnd(ms)
+        }
+        Or(children) => {
+          let ms : Array[RowMatcher] = Array::new(
+            capacity=children.length(),
+          )
+          for c in children {
+            ms.push(load_matcher(n, cs, seg_id, c))
           }
-        FI64(_, v) =>
-          if filter_field(f) == "ts" {
-            match seg_block_stats(n, cs, seg_id) {
-              Some((block_size, row_count, blocks)) => {
-                let mask : FixedArray[Bool] = FixedArray::make(
-                  cs.row_count,
-                  false,
-                )
-                let ts_key = "\{n.ns}/_segments/\{seg_id}/rows/ts.bin"
-                let mut ok = true
-                for b in 0..<blocks.length() {
-                  let (lo, hi) = blocks[b]
-                  if v >= lo && v <= hi {
-                    let start = b * block_size
-                    let nrows = if start + block_size < row_count {
-                      block_size
-                    } else {
-                      row_count - start
-                    }
-                    match n.store.get_range(ts_key, 20 + start * 8, nrows * 8) {
-                      Some(pbs) =>
-                        if pbs.length() >= nrows * 8 {
-                          for i in 0..<nrows {
-                            if @core.read_i64_le(pbs, i * 8) == v {
-                              mask[start + i] = true
-                            }
-                          }
-                        } else {
-                          ok = false
-                          break
-                        }
-                      None => {
-                        ok = false
-                        break
-                      }
-                    }
-                  }
-                }
-                if ok {
-                  MMask(mask)
-                } else {
-                  match @format.decode_col(bs) {
-                    @format.ColI64(arr) => MI64(arr, v)
-                    _ =>
-                      raise @core.Corrupt("filter column dtype mismatch for ts")
-                  }
-                }
-              }
-              None =>
-                match @format.decode_col(bs) {
-                  @format.ColI64(arr) => MI64(arr, v)
-                  _ =>
-                    raise @core.Corrupt("filter column dtype mismatch for ts")
-                }
-            }
-          } else {
-            match @format.decode_col(bs) {
-              @format.ColI64(arr) => MI64(arr, v)
-              _ =>
-                raise @core.Corrupt(
-                  "filter column dtype mismatch for \{filter_field(f)}",
-                )
-            }
+          MOr(ms)
+        }
+        Not(inner) => MNot(load_matcher(n, cs, seg_id, inner))
+        Glob(field, pat) => {
+          let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
+          let bs = get_object(n.store, col_key)
+          match @format.decode_col(bs) {
+            @format.ColStr(arr) => MGlob(arr, pat)
+            _ =>
+              raise @core.Corrupt(
+                "Glob filter requires string column for \{field}",
+              )
           }
+        }
       }
       cs.matchers.set(key, m)
       m
@@ -163,6 +186,334 @@ fn[S : @store.ObjectStore] load_matcher(
 }
 
 ///|
+/// 等值叶子：字典列按 code、bool 位图直查、ts 块级 stats（只读相交块）。
+fn[S : @store.ObjectStore] load_eq_matcher(
+  n : Namespace[S],
+  cs : CachedSeg,
+  seg_id : String,
+  field : String,
+  v : FVal,
+) -> RowMatcher raise @core.SpndError {
+  let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
+  let bs = get_object(n.store, col_key)
+  match v {
+    S(s) =>
+      if @format.is_dict_col(bs) {
+        let (dict, codes) = @format.decode_col_dict(bs)
+        let mut target : UInt16 = (65535).to_uint16()
+        for i in 0..<dict.length() {
+          if dict[i] == s {
+            target = i.to_uint16()
+            break
+          }
+        }
+        MDict(codes, target)
+      } else {
+        match @format.decode_col(bs) {
+          @format.ColStr(arr) => MStr(arr, s)
+          _ =>
+            raise @core.Corrupt(
+              "filter column dtype mismatch for \{field}",
+            )
+        }
+      }
+    B(b) =>
+      // dtype=bool 且 flags bit1=位图 → 直接查位，不展开
+      if @format.is_bitmap_bool(bs) {
+        MBitmap(bs, b)
+      } else {
+        match @format.decode_col(bs) {
+          @format.ColBool(arr) => MBool(arr, b)
+          _ =>
+            raise @core.Corrupt(
+              "filter column dtype mismatch for \{field}",
+            )
+        }
+      }
+    I(i) =>
+      if field == "ts" {
+        match seg_block_stats(n, cs, seg_id) {
+          Some((block_size, row_count, blocks)) => {
+            let mask : FixedArray[Bool] = FixedArray::make(
+              cs.row_count,
+              false,
+            )
+            let ts_key = "\{n.ns}/_segments/\{seg_id}/rows/ts.bin"
+            let mut ok = true
+            for b in 0..<blocks.length() {
+              let (lo, hi) = blocks[b]
+              if i >= lo && i <= hi {
+                let start = b * block_size
+                let nrows = if start + block_size < row_count {
+                  block_size
+                } else {
+                  row_count - start
+                }
+                match n.store.get_range(ts_key, 20 + start * 8, nrows * 8) {
+                  Some(pbs) =>
+                    if pbs.length() >= nrows * 8 {
+                      for x in 0..<nrows {
+                        if @core.read_i64_le(pbs, x * 8) == i {
+                          mask[start + x] = true
+                        }
+                      }
+                    } else {
+                      ok = false
+                      break
+                    }
+                  None => {
+                    ok = false
+                    break
+                  }
+                }
+              }
+            }
+            if ok {
+              MMask(mask)
+            } else {
+              match @format.decode_col(bs) {
+                @format.ColI64(arr) => MI64(arr, i)
+                _ => raise @core.Corrupt("filter column dtype mismatch for ts")
+              }
+            }
+          }
+          None =>
+            match @format.decode_col(bs) {
+              @format.ColI64(arr) => MI64(arr, i)
+              _ => raise @core.Corrupt("filter column dtype mismatch for ts")
+            }
+        }
+      } else {
+        match @format.decode_col(bs) {
+          @format.ColI64(arr) => MI64(arr, i)
+          _ =>
+            raise @core.Corrupt(
+              "filter column dtype mismatch for \{field}",
+            )
+        }
+      }
+  }
+}
+
+///|
+/// In 叶子：值集合同型校验（兜底）→ 按值类型分派列编码。
+fn[S : @store.ObjectStore] load_in_matcher(
+  n : Namespace[S],
+  cs : CachedSeg,
+  seg_id : String,
+  field : String,
+  vals : Array[FVal],
+) -> RowMatcher raise @core.SpndError {
+  if vals.is_empty() {
+    return MOr([]) // 空集合恒 false
+  }
+  let head = vals[0]
+  for v in vals {
+    let same = match (head, v) {
+      (S(_), S(_)) | (B(_), B(_)) | (I(_), I(_)) => true
+      _ => false
+    }
+    if !same {
+      raise @core.Corrupt(
+        "In(\{field}) values must be homogeneous: \{head.describe()} vs \{v.describe()}",
+      )
+    }
+  }
+  let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
+  let bs = get_object(n.store, col_key)
+  match head {
+    B(_) => {
+      // bool In：最多两个不同值，展开为 Or(Eq..)（复用位图/普通列等值路径）
+      let ms : Array[RowMatcher] = Array::new(capacity=vals.length())
+      for v in vals {
+        match v {
+          B(b) => ms.push(load_eq_matcher(n, cs, seg_id, field, B(b)))
+          _ => raise @core.Corrupt("In(\{field}) mixed value types")
+        }
+      }
+      MOr(ms)
+    }
+    I(_) => {
+      let set : Set[Int64] = Set([])
+      for v in vals {
+        match v {
+          I(i) => set.add(i)
+          _ => raise @core.Corrupt("In(\{field}) mixed value types")
+        }
+      }
+      match @format.decode_col(bs) {
+        @format.ColI64(arr) => MI64Set(arr, set)
+        _ =>
+          raise @core.Corrupt(
+            "filter column dtype mismatch for \{field}",
+          )
+      }
+    }
+    S(_) => {
+      let set : Set[String] = Set([])
+      for v in vals {
+        match v {
+          S(s) => set.add(s)
+          _ => raise @core.Corrupt("In(\{field}) mixed value types")
+        }
+      }
+      if @format.is_dict_col(bs) {
+        let (dict, codes) = @format.decode_col_dict(bs)
+        let targets : Set[UInt16] = Set([])
+        for i in 0..<dict.length() {
+          if set.contains(dict[i]) {
+            targets.add(i.to_uint16())
+          }
+        }
+        MDictSet(codes, targets)
+      } else {
+        match @format.decode_col(bs) {
+          @format.ColStr(arr) => MStrSet(arr, set)
+          _ =>
+            raise @core.Corrupt(
+              "filter column dtype mismatch for \{field}",
+            )
+        }
+      }
+    }
+  }
+}
+
+///|
+/// 范围叶子：i64 数值比较 / string 字节序字典序。bool 列不支持范围。
+/// ts 走块级 mask：只读与谓词范围相交的块（块内逐行比较）。
+fn[S : @store.ObjectStore] load_cmp_matcher(
+  n : Namespace[S],
+  cs : CachedSeg,
+  seg_id : String,
+  field : String,
+  op : Int,
+  v : FVal,
+) -> RowMatcher raise @core.SpndError {
+  let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
+  let bs = get_object(n.store, col_key)
+  match v {
+    B(_) =>
+      raise @core.Corrupt(
+        "range comparison not supported for bool column \{field}",
+      )
+    I(i) =>
+      if field == "ts" {
+        match seg_block_stats(n, cs, seg_id) {
+          Some((block_size, row_count, blocks)) => {
+            let mask : FixedArray[Bool] = FixedArray::make(
+              cs.row_count,
+              false,
+            )
+            let ts_key = "\{n.ns}/_segments/\{seg_id}/rows/ts.bin"
+            let mut ok = true
+            for b in 0..<blocks.length() {
+              let (lo, hi) = blocks[b]
+              if block_may_match(lo, hi, op, i) {
+                let start = b * block_size
+                let nrows = if start + block_size < row_count {
+                  block_size
+                } else {
+                  row_count - start
+                }
+                match n.store.get_range(ts_key, 20 + start * 8, nrows * 8) {
+                  Some(pbs) =>
+                    if pbs.length() >= nrows * 8 {
+                      for x in 0..<nrows {
+                        if i64_cmp(@core.read_i64_le(pbs, x * 8), op, i) {
+                          mask[start + x] = true
+                        }
+                      }
+                    } else {
+                      ok = false
+                      break
+                    }
+                  None => {
+                    ok = false
+                    break
+                  }
+                }
+              }
+            }
+            if ok {
+              MMask(mask)
+            } else {
+              match @format.decode_col(bs) {
+                @format.ColI64(arr) => MI64Cmp(arr, op, i)
+                _ => raise @core.Corrupt("filter column dtype mismatch for ts")
+              }
+            }
+          }
+          None =>
+            match @format.decode_col(bs) {
+              @format.ColI64(arr) => MI64Cmp(arr, op, i)
+              _ => raise @core.Corrupt("filter column dtype mismatch for ts")
+            }
+        }
+      } else {
+        match @format.decode_col(bs) {
+          @format.ColI64(arr) => MI64Cmp(arr, op, i)
+          _ =>
+            raise @core.Corrupt(
+              "filter column dtype mismatch for \{field}",
+            )
+        }
+      }
+    S(s) => {
+      if @format.is_dict_col(bs) {
+        let (dict, codes) = @format.decode_col_dict(bs)
+        MDictCmp(codes, dict, op, s)
+      } else {
+        match @format.decode_col(bs) {
+          @format.ColStr(arr) => MStrCmp(arr, op, s)
+          _ =>
+            raise @core.Corrupt(
+              "filter column dtype mismatch for \{field}",
+            )
+        }
+      }
+    }
+  }
+}
+
+///|
+/// 通配符匹配：`*` 匹配 0 个或多个任意字符，`?` 匹配恰好 1 个字符。
+/// 使用动态规划（DP）实现，避免回溯式递归的指数复杂度。
+fn glob_match(text : String, pat : String) -> Bool {
+  let tc = text.to_array()
+  let pc = pat.to_array()
+  let n = tc.length()
+  let m = pc.length()
+  // dp[i][j] = pat[0..j) 是否匹配 text[0..i)
+  // 用两行滚动数组降低内存
+  let mut prev : Array[Bool] = Array::make(m + 1, false)
+  prev[0] = true
+  // pat 以 '*' 开头时扩展空匹配
+  for j in 1..=m {
+    if pc[j - 1] == '*' {
+      prev[j] = prev[j - 1]
+    } else {
+      break
+    }
+  }
+  for i in 1..=n {
+    let curr : Array[Bool] = Array::make(m + 1, false)
+    for j in 1..=m {
+      let p = pc[j - 1]
+      if p == '*' {
+        // '*' 匹配空串（curr[j-1]）或多消耗一个 text 字符（prev[j]）
+        curr[j] = curr[j - 1] || prev[j]
+      } else if p == '?' || p == tc[i - 1] {
+        curr[j] = prev[j - 1]
+      }
+    }
+    prev = curr
+  }
+  prev[m]
+}
+
+///|
+/// 行级谓词求值（组合节点递归）。MAnd 空 = true，MOr 空 = false。
 fn matcher_at(m : RowMatcher, row : Int) -> Bool {
   match m {
     MStr(arr, v) =>
@@ -195,6 +546,75 @@ fn matcher_at(m : RowMatcher, row : Int) -> Bool {
         mask[row]
       } else {
         false
+      }
+    MStrSet(arr, set) =>
+      match arr.get(row) {
+        Some(x) => set.contains(x)
+        None => false
+      }
+    MDictSet(codes, targets) =>
+      match codes.get(row) {
+        Some(x) => targets.contains(x)
+        None => false
+      }
+    MI64Set(arr, set) =>
+      match arr.get(row) {
+        Some(x) => set.contains(x)
+        None => false
+      }
+    MI64Cmp(arr, op, v) =>
+      match arr.get(row) {
+        Some(x) => i64_cmp(x, op, v)
+        None => false
+      }
+    MStrCmp(arr, op, v) =>
+      match arr.get(row) {
+        Some(x) =>
+          match op {
+            CMP_LT => @format.term_compare(x, v) < 0
+            CMP_LTE => @format.term_compare(x, v) <= 0
+            CMP_GT => @format.term_compare(x, v) > 0
+            _ => @format.term_compare(x, v) >= 0
+          }
+        None => false
+      }
+    MDictCmp(codes, dict, op, v) =>
+      match codes.get(row) {
+        Some(c) =>
+          if c.to_int() < dict.length() {
+            let x = dict[c.to_int()]
+            match op {
+              CMP_LT => @format.term_compare(x, v) < 0
+              CMP_LTE => @format.term_compare(x, v) <= 0
+              CMP_GT => @format.term_compare(x, v) > 0
+              _ => @format.term_compare(x, v) >= 0
+            }
+          } else {
+            false
+          }
+        None => false
+      }
+    MAnd(ms) => {
+      for x in ms {
+        if !matcher_at(x, row) {
+          return false
+        }
+      }
+      true
+    }
+    MOr(ms) => {
+      for x in ms {
+        if matcher_at(x, row) {
+          return true
+        }
+      }
+      false
+    }
+    MNot(inner) => !matcher_at(inner, row)
+    MGlob(arr, pat) =>
+      match arr.get(row) {
+        Some(x) => glob_match(x, pat)
+        None => false
       }
   }
 }

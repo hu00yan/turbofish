@@ -4,9 +4,16 @@ package "turbofish/store"
 import {
   "moonbitlang/core/debug",
   "moonbitlang/core/set",
+  "turbofish/core",
 }
 
 // Values
+pub fn assert_budget_violations(BudgetTracker, Int32) -> Unit raise @core.SpndError
+
+pub fn assert_no_budget_violations(BudgetTracker) -> Unit raise @core.SpndError
+
+pub fn assert_within_budget(BudgetTracker, IoBudget) -> Unit raise @core.SpndError
+
 pub fn classify_key(String) -> String
 
 pub fn[S : ObjectStore] gc_heads(S, String, String) -> Unit
@@ -23,6 +30,10 @@ pub fn[S : ObjectStore] read_head_pointer(S, String) -> String?
 
 pub fn[S : ObjectStore] read_head_state(S, String, String) -> (String, Array[String])
 
+pub fn[S, T] run_with_budget(S, IoBudget, (BudgetStore[S]) -> T raise) -> T raise
+
+pub fn[S, T] with_budget(BudgetStore[S], IoBudget, () -> T raise) -> T raise
+
 pub fn[S : ObjectStore] write_head(S, String, String) -> Unit
 
 pub fn[S : ObjectStore] write_head_pointer(S, String, String) -> Unit
@@ -30,6 +41,82 @@ pub fn[S : ObjectStore] write_head_pointer(S, String, String) -> Unit
 // Errors
 
 // Types and methods
+pub struct Budget {
+}
+pub fn Budget::custom(max_gets? : Int32, max_puts? : Int32, max_lists? : Int32, max_deletes? : Int32, max_head_gets? : Int32, max_bytes_read? : Int64, max_bytes_written? : Int64) -> IoBudget
+pub fn Budget::head_probe() -> IoBudget
+pub fn Budget::new() -> Self
+pub fn Budget::point_read() -> IoBudget
+pub fn Budget::single_slab_read() -> IoBudget
+pub fn Budget::unlimited() -> IoBudget
+pub fn Budget::write_batch(Int32, max_bytes_per_part? : Int64) -> IoBudget
+pub fn Budget::zero() -> IoBudget
+
+pub struct BudgetStore[S] {
+  store : S
+  mut budget : IoBudget
+  tracker : BudgetTracker
+  strict : Bool
+}
+pub fn[S] BudgetStore::assert_within_budget(Self[S]) -> Unit raise @core.SpndError
+pub fn[S] BudgetStore::budget(Self[S]) -> IoBudget
+pub fn[S] BudgetStore::check_budget(Self[S]) -> Unit raise @core.SpndError
+pub fn[S : ObjectStore] BudgetStore::delete(Self[S], String) -> Unit
+pub fn[S : ObjectStore] BudgetStore::delete_checked(Self[S], String) -> Unit raise @core.SpndError
+pub fn[S : ObjectStore] BudgetStore::get(Self[S], String) -> Bytes?
+pub fn[S : ObjectStore] BudgetStore::get_checked(Self[S], String) -> Bytes? raise @core.SpndError
+pub fn[S : ObjectStore] BudgetStore::get_many(Self[S], Array[String]) -> Array[Bytes?]
+pub fn[S : ObjectStore] BudgetStore::get_range(Self[S], String, Int32, Int32) -> Bytes?
+pub fn[S : ObjectStore] BudgetStore::get_range_checked(Self[S], String, Int32, Int32) -> Bytes? raise @core.SpndError
+pub fn[S : ObjectStore] BudgetStore::get_range_many(Self[S], Array[(String, Int32, Int32)]) -> Array[Bytes?]
+pub fn[S] BudgetStore::has_violations(Self[S]) -> Bool
+pub fn[S : ObjectStore] BudgetStore::head_version(Self[S], String) -> String?
+pub fn[S : ObjectStore] BudgetStore::head_version_checked(Self[S], String) -> String? raise @core.SpndError
+pub fn[S] BudgetStore::inner(Self[S]) -> S
+pub fn[S] BudgetStore::last_violation(Self[S]) -> String?
+pub fn[S : ObjectStore] BudgetStore::list(Self[S], String) -> Array[String]
+pub fn[S : ObjectStore] BudgetStore::list_checked(Self[S], String) -> Array[String] raise @core.SpndError
+pub fn[S] BudgetStore::new(S, IoBudget, strict? : Bool) -> Self[S]
+pub fn[S : ObjectStore] BudgetStore::put(Self[S], String, Bytes) -> Unit
+pub fn[S : ObjectStore] BudgetStore::put_checked(Self[S], String, Bytes) -> Unit raise @core.SpndError
+pub fn[S : ObjectStore] BudgetStore::put_if_match(Self[S], String, String?, Bytes) -> Bool
+pub fn[S : ObjectStore] BudgetStore::put_if_match_checked(Self[S], String, String?, Bytes) -> Bool raise @core.SpndError
+pub fn[S] BudgetStore::recording(S, IoBudget) -> Self[S]
+pub fn[S] BudgetStore::reset(Self[S]) -> Unit
+pub fn[S] BudgetStore::set_budget(Self[S], IoBudget) -> Unit
+pub fn[S] BudgetStore::strict(S, IoBudget) -> Self[S]
+pub fn[S] BudgetStore::tracker(Self[S]) -> BudgetTracker
+pub fn[S] BudgetStore::violations(Self[S]) -> Array[String]
+pub impl[S : ObjectStore] BatchStore for BudgetStore[S]
+pub impl[S : ObjectStore] ObjectStore for BudgetStore[S]
+
+#derive(Eq, @debug.Debug)
+pub(all) struct BudgetTracker {
+  mut gets : Int32
+  mut puts : Int32
+  mut lists : Int32
+  mut deletes : Int32
+  mut head_gets : Int32
+  mut bytes_read : Int64
+  mut bytes_written : Int64
+  violations : Array[String]
+}
+pub fn BudgetTracker::clone(Self) -> Self
+pub fn BudgetTracker::has_violations(Self) -> Bool
+pub fn BudgetTracker::new() -> Self
+pub fn BudgetTracker::record_delete(Self) -> Unit
+pub fn BudgetTracker::record_get(Self, Int32) -> Unit
+pub fn BudgetTracker::record_head(Self) -> Unit
+pub fn BudgetTracker::record_list(Self) -> Unit
+pub fn BudgetTracker::record_put(Self, Int32) -> Unit
+pub fn BudgetTracker::record_read_bytes(Self, Int32) -> Unit
+pub fn BudgetTracker::record_violation(Self, String) -> Unit
+pub fn BudgetTracker::reset(Self) -> Unit
+pub fn BudgetTracker::to_string(Self) -> String
+pub fn BudgetTracker::total_bytes(Self) -> Int64
+pub fn BudgetTracker::total_requests(Self) -> Int32
+pub fn BudgetTracker::violations(Self) -> Array[String]
+
 #derive(@debug.Debug)
 pub struct CostSnapshot {
   gets : Int32
@@ -47,6 +134,34 @@ pub struct CostSnapshot {
 pub fn CostSnapshot::show_table(Self) -> String
 pub fn CostSnapshot::total_read_bytes(Self) -> Int32
 pub fn CostSnapshot::total_requests(Self) -> Int32
+
+#derive(Eq, @debug.Debug)
+pub(all) struct IoBudget {
+  max_gets : Int32
+  max_puts : Int32
+  max_lists : Int32
+  max_deletes : Int32
+  max_head_gets : Int32
+  max_bytes_read : Int64
+  max_bytes_written : Int64
+}
+pub fn IoBudget::check(Self, BudgetTracker) -> Array[String]
+pub fn IoBudget::head_probe() -> Self
+pub fn IoBudget::is_exceeded(Self, BudgetTracker) -> Bool
+pub fn IoBudget::new(max_gets? : Int32, max_puts? : Int32, max_lists? : Int32, max_deletes? : Int32, max_head_gets? : Int32, max_bytes_read? : Int64, max_bytes_written? : Int64) -> Self
+pub fn IoBudget::point_read() -> Self
+pub fn IoBudget::single_slab_read() -> Self
+pub fn IoBudget::to_string(Self) -> String
+pub fn IoBudget::unlimited() -> Self
+pub fn IoBudget::with_max_bytes_read(Self, Int64) -> Self
+pub fn IoBudget::with_max_bytes_written(Self, Int64) -> Self
+pub fn IoBudget::with_max_deletes(Self, Int32) -> Self
+pub fn IoBudget::with_max_gets(Self, Int32) -> Self
+pub fn IoBudget::with_max_head_gets(Self, Int32) -> Self
+pub fn IoBudget::with_max_lists(Self, Int32) -> Self
+pub fn IoBudget::with_max_puts(Self, Int32) -> Self
+pub fn IoBudget::write_batch(Int32, max_bytes_per_part? : Int64) -> Self
+pub fn IoBudget::zero() -> Self
 
 type MemClassStat
 
@@ -93,4 +208,5 @@ pub(open) trait ObjectStore {
   fn get_range(Self, String, Int32, Int32) -> Bytes?
   fn list(Self, String) -> Array[String]
   fn delete(Self, String) -> Unit
+  fn head_version(Self, String) -> String?
 }

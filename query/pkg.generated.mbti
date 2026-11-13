@@ -12,19 +12,65 @@ import {
 // Values
 pub fn[S : @store.ObjectStore] bm25_search(Namespace[S], String, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
 
+pub fn[S : @store.ObjectStore] count_docs(Namespace[S], Filter?) -> Int32 raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] eval_filter_columnar(Namespace[S], CachedSeg, String, Filter) -> BitSet raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] eval_pushdown_filter(Namespace[S], Filter) -> MatchedDocSet raise @core.SpndError
+
+pub fn f_bool(String, Bool) -> Filter
+
+pub fn f_i64(String, Int64) -> Filter
+
+pub fn f_str(String, String) -> Filter
+
 pub fn[S : @store.ObjectStore] hybrid_search(Namespace[S], String, Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] hybrid_search_opts(Namespace[S], String, Array[Float], Int32, Int32, Filter?, HybridOpts) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] matching_ids(Namespace[S], Filter) -> Array[UInt64] raise @core.SpndError
 
 pub fn[S : @store.ObjectStore] open(S, String) -> Namespace[S] raise @core.SpndError
 
 pub fn[S : @store.ObjectStore] open_cached(MetadataCache[S], S, String) -> Namespace[S] raise @core.SpndError
 
+pub fn[S : @store.ObjectStore] open_cached_or_create(MetadataCache[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
+
+pub fn[S : @store.ObjectStore] open_from_meta(S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
+
+pub fn[S : @store.ObjectStore] sum_field(Namespace[S], String, Filter?) -> Double raise @core.SpndError
+
 pub fn[S : @store.ObjectStore] vec_search(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
 
 pub fn[S : @store.ObjectStore] vec_search_rerank(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
 
+pub fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(Namespace[S], Array[Float], Int32, Int32, Filter?, @set.Set[UInt64]?) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] vec_search_with_pushdown(Namespace[S], Array[Float], Int32, Int32, Filter?, @set.Set[UInt64]?) -> Array[QueryResult] raise @core.SpndError
+
+pub fn[S : @store.ObjectStore] warm_namespace(Namespace[S]) -> Unit raise @core.SpndError
+
 // Errors
 
 // Types and methods
+#derive(Show)
+pub(all) struct BitSet {
+  size : Int32
+  words : Array[UInt64]
+}
+pub fn BitSet::all_set(Int32) -> Self
+pub fn BitSet::and_inplace(Self, Self) -> Unit
+pub fn BitSet::clone(Self) -> Self
+pub fn BitSet::count(Self) -> Int32
+pub fn BitSet::get(Self, Int32) -> Bool
+pub fn BitSet::is_empty(Self) -> Bool
+pub fn BitSet::new(Int32) -> Self
+pub fn BitSet::not_inplace(Self) -> Unit
+pub fn BitSet::or_inplace(Self, Self) -> Unit
+pub fn BitSet::set(Self, Int32) -> Unit
+pub fn BitSet::to_rows(Self) -> Array[Int32]
+pub fn BitSet::unset(Self, Int32) -> Unit
+
 pub(all) struct CachedSeg {
   row_count : Int32
   partitions : Array[Int32]
@@ -47,13 +93,58 @@ pub(all) struct CachedSeg {
   mut block_stats : (Int32, Int32, Array[(Int64, Int64)])?
   mut block_stats_tried : Bool
   matchers : Map[String, RowMatcher]
+  vec_parts : Map[Int32, Bytes]
 }
 
-pub(all) enum Filter {
-  FStr(String, String)
-  FBool(String, Bool)
-  FI64(String, Int64)
+pub(all) enum ColumnValues {
+  ColDict(Array[String], Array[UInt16])
+  ColStr(Array[String])
+  ColBool(Array[Bool])
+  ColBitmap(Bytes)
+  ColI64(Array[Int64])
+  ColU64(Array[UInt64])
 }
+
+pub(all) enum FVal {
+  S(String)
+  B(Bool)
+  I(Int64)
+}
+pub fn FVal::describe(Self) -> String
+
+pub(all) enum Filter {
+  Eq(String, FVal)
+  Neq(String, FVal)
+  In(String, Array[FVal])
+  NotIn(String, Array[FVal])
+  Lt(String, FVal)
+  Lte(String, FVal)
+  Gt(String, FVal)
+  Gte(String, FVal)
+  Glob(String, String)
+  And(Array[Filter])
+  Or(Array[Filter])
+  Not(Filter)
+}
+
+pub(all) struct HybridOpts {
+  rank_constant : Double
+  fusion : String
+  weight_bm25 : Double
+  weight_vec : Double
+}
+pub fn HybridOpts::default() -> Self
+
+pub(all) struct MatchedDocSet {
+  total_matched : Int32
+  total_docs : Int32
+  selectivity : Double
+  seg_bitsets : Map[String, BitSet]
+  allowed_ids : @set.Set[UInt64]
+}
+pub fn MatchedDocSet::contains_id(Self, UInt64) -> Bool
+pub fn MatchedDocSet::get_seg_bitset(Self, String) -> BitSet?
+pub fn MatchedDocSet::is_empty(Self) -> Bool
 
 pub(all) struct MetadataCache[S] {
   entries : Map[String, Namespace[S]]
@@ -61,8 +152,13 @@ pub(all) struct MetadataCache[S] {
   mut misses : Int32
   mut head_ttl_ms : UInt64
 }
+pub fn[S : @store.ObjectStore] MetadataCache::get(Self[S], String) -> Namespace[S]?
 pub fn[S : @store.ObjectStore] MetadataCache::invalidate(Self[S], String) -> Unit
 pub fn[S : @store.ObjectStore] MetadataCache::new() -> Self[S]
+pub fn[S : @store.ObjectStore] MetadataCache::put(Self[S], String, Namespace[S]) -> Unit
+pub fn[S : @store.ObjectStore] MetadataCache::set_head_ttl(Self[S], UInt64) -> Unit
+pub fn[S : @store.ObjectStore] MetadataCache::touch(Self[S], String) -> Unit
+pub fn[S : @store.ObjectStore] MetadataCache::update_in_memory(Self[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
 
 pub(all) struct Namespace[S] {
   store : S
@@ -75,6 +171,7 @@ pub(all) struct Namespace[S] {
   mut vec_global_cids : Array[Int32]?
   mut global_gen_cids : Map[String, Array[Int32]]
   mut global_gen_packs : Map[String, Int32]
+  global_parts : Map[String, @format.GlobalVecPart]
   mut head_checked_ms : UInt64
 }
 
@@ -91,6 +188,16 @@ pub(all) enum RowMatcher {
   MBitmap(Bytes, Bool)
   MI64(Array[Int64], Int64)
   MMask(FixedArray[Bool])
+  MStrSet(Array[String], @set.Set[String])
+  MDictSet(Array[UInt16], @set.Set[UInt16])
+  MI64Set(Array[Int64], @set.Set[Int64])
+  MI64Cmp(Array[Int64], Int32, Int64)
+  MStrCmp(Array[String], Int32, String)
+  MDictCmp(Array[UInt16], Array[String], Int32, String)
+  MGlob(Array[String], String)
+  MAnd(Array[RowMatcher])
+  MOr(Array[RowMatcher])
+  MNot(RowMatcher)
 }
 
 #derive(@debug.Debug)

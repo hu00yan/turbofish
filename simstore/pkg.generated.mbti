@@ -2,6 +2,7 @@
 package "turbofish/simstore"
 
 import {
+  "moonbitlang/core/debug",
   "moonbitlang/core/set",
   "turbofish/core",
   "turbofish/store",
@@ -21,7 +22,122 @@ pub(all) struct BillRates {
   storage_per_gb_month : Double
   egress_per_gb : Double
 }
+pub fn BillRates::aliyun_oss() -> Self
 pub fn BillRates::aws_default() -> Self
+pub fn BillRates::azure_hot() -> Self
+pub fn BillRates::cloudflare_r2() -> Self
+pub fn BillRates::gcp_standard() -> Self
+
+#derive(Eq, @debug.Debug)
+pub(all) enum ChaosOp {
+  OpGet(String)
+  OpPut(String, Int32)
+  OpPutIfMatch(String, String?, Int32)
+  OpGetRange(String, Int32, Int32)
+  OpList(String)
+  OpDelete(String)
+  OpHeadVersion(String)
+}
+pub fn ChaosOp::to_string(Self) -> String
+
+pub struct ChaosRng {
+  mut state : UInt64
+}
+pub fn ChaosRng::new(UInt64) -> Self
+pub fn ChaosRng::next_f64(Self) -> Double
+pub fn ChaosRng::next_u64(Self) -> UInt64
+
+pub struct ChaosStore[S] {
+  inner : S
+  seed : UInt64
+  rng : ChaosRng
+  rules : Array[FaultRule]
+  trace : Array[ChaosTraceEvent]
+  mut virtual_time_us : Double
+  mut base_latency_us : Double
+  mut step : Int32
+  mut faults_injected : Int32
+  mut total_calls : Int32
+  mut last_injected_fault : InjectedFault?
+  mut enabled : Bool
+}
+pub fn[S] ChaosStore::add_rule(Self[S], FaultRule) -> Unit
+pub fn[S] ChaosStore::clear_rules(Self[S]) -> Unit
+pub fn[S] ChaosStore::clear_trace(Self[S]) -> Unit
+pub fn[S : @store.ObjectStore] ChaosStore::delete(Self[S], String) -> Unit
+pub fn[S] ChaosStore::dump_trace(Self[S]) -> String
+pub fn[S] ChaosStore::elapsed_virtual_ms(Self[S]) -> Double
+pub fn[S] ChaosStore::faults_injected(Self[S]) -> Int32
+pub fn[S : @store.ObjectStore] ChaosStore::get(Self[S], String) -> Bytes?
+pub fn[S : @store.ObjectStore] ChaosStore::get_or_raise(Self[S], String) -> Bytes raise @core.SpndError
+pub fn[S : @store.ObjectStore] ChaosStore::get_range(Self[S], String, Int32, Int32) -> Bytes?
+pub fn[S : @store.ObjectStore] ChaosStore::get_range_or_raise(Self[S], String, Int32, Int32) -> Bytes raise @core.SpndError
+pub fn[S] ChaosStore::get_trace(Self[S]) -> Array[ChaosTraceEvent]
+pub fn[S : @store.ObjectStore] ChaosStore::head_version(Self[S], String) -> String?
+pub fn[S] ChaosStore::inject_404(Self[S], key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Unit
+pub fn[S] ChaosStore::inject_412(Self[S], key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Unit
+pub fn[S] ChaosStore::inject_503(Self[S], key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Unit
+pub fn[S] ChaosStore::inject_connection_reset(Self[S], key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Unit
+pub fn[S] ChaosStore::inject_latency_spike(Self[S], Double, key_prefix? : String, probability? : Double, max_triggers? : Int32) -> Unit
+pub fn[S] ChaosStore::inject_truncated_range(Self[S], Int32, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32) -> Unit
+pub fn[S] ChaosStore::inner(Self[S]) -> S
+pub fn[S] ChaosStore::last_fault(Self[S]) -> InjectedFault?
+pub fn[S : @store.ObjectStore] ChaosStore::list(Self[S], String) -> Array[String]
+pub fn[S] ChaosStore::new(S, UInt64) -> Self[S]
+pub fn[S : @store.ObjectStore] ChaosStore::put(Self[S], String, Bytes) -> Unit
+pub fn[S : @store.ObjectStore] ChaosStore::put_if_match(Self[S], String, String?, Bytes) -> Bool
+pub fn[S] ChaosStore::replay_reset(Self[S]) -> Unit
+pub fn[S : @store.ObjectStore] ChaosStore::retry_cas(Self[S], String, Int32, (Bytes?) -> Bytes) -> Bool
+pub fn[S : @store.ObjectStore] ChaosStore::retry_get(Self[S], String, Int32) -> Bytes?
+pub fn[S : @store.ObjectStore] ChaosStore::retry_get_range(Self[S], String, Int32, Int32, Int32) -> Bytes?
+pub fn[S : @store.ObjectStore] ChaosStore::retry_put(Self[S], String, Bytes, Int32) -> Bool
+pub fn[S] ChaosStore::seed(Self[S]) -> UInt64
+pub fn[S] ChaosStore::set_base_latency(Self[S], Double) -> Unit
+pub fn[S] ChaosStore::set_enabled(Self[S], Bool) -> Unit
+pub fn[S] ChaosStore::total_calls(Self[S]) -> Int32
+pub fn[S] ChaosStore::trace_summary(Self[S]) -> String
+pub fn[S] ChaosStore::virtual_time_us(Self[S]) -> Double
+pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S]
+
+#derive(Eq, @debug.Debug)
+pub(all) struct ChaosTraceEvent {
+  step : Int32
+  virtual_time_us : Double
+  op : ChaosOp
+  injected_fault : InjectedFault?
+  success : Bool
+  result_summary : String
+}
+pub fn ChaosTraceEvent::to_string(Self) -> String
+
+#derive(@debug.Debug)
+pub(all) struct FaultRule {
+  name : String
+  op_pattern : String
+  key_prefix : String
+  probability : Double
+  fault : InjectedFault
+  latency_us : Double
+  mut max_triggers : Int32
+  mut triggered_count : Int32
+}
+pub fn FaultRule::cas_conflict_412(name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Self
+pub fn FaultRule::connection_reset(name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Self
+pub fn FaultRule::latency_spike(Double, name? : String, key_prefix? : String, probability? : Double, max_triggers? : Int32) -> Self
+pub fn FaultRule::not_found_404(name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Self
+pub fn FaultRule::rate_limit_503(name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Self
+pub fn FaultRule::truncated_range_get(Int32, name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32) -> Self
+
+#derive(Eq, @debug.Debug)
+pub(all) enum InjectedFault {
+  RateLimit503(String)
+  PreconditionFailed412(String)
+  NotFound404(String)
+  ConnectionReset(String)
+  TruncatedRangeGet(Int32)
+  LatencySpike(Double)
+}
+pub fn InjectedFault::to_string(Self) -> String
 
 pub(all) struct SimConfig {
   seed : UInt32
@@ -48,13 +164,20 @@ pub(all) struct SimConfig {
   put_error_probability : Double
   list_error_probability : Double
   delete_error_probability : Double
+  cache_remote_delay_factor : Double
 }
+pub fn SimConfig::aliyun_oss(UInt32) -> Self
 pub fn SimConfig::aws_default(UInt32) -> Self
+pub fn SimConfig::azure_hot(UInt32) -> Self
+pub fn SimConfig::cloudflare_r2(UInt32) -> Self
+pub fn SimConfig::extreme_tail(UInt32) -> Self
+pub fn SimConfig::gcp_standard(UInt32) -> Self
 pub fn SimConfig::latency_ready(Self) -> Bool
 
 pub(all) struct SimSnapshot {
   total_latency_us : Double
   concurrent_latency_us : Double
+  max_latency_us : Double
   retries : Int32
   errors : Int32
   op_count : Int32
@@ -65,6 +188,10 @@ pub(all) struct SimSnapshot {
   bill_egress : Double
   bill_requests_total : Double
   bill_total : Double
+  bill_class_a : Double
+  bill_class_b : Double
+  class_a_ops : Int32
+  class_b_ops : Int32
   s3_gets : Int32
   bytes_s3_read : Int64
   bytes_nvme_read : Int64
@@ -110,6 +237,7 @@ pub struct SimStore {
   mut bill_list : Double
   mut bill_delete : Double
   mut bill_egress : Double
+  mut max_latency_us : Double
 }
 pub fn SimStore::admit_all(Self) -> Unit
 pub fn SimStore::admit_all_label() -> String

@@ -463,3 +463,72 @@ test "stale_ok false does not push a pin on the failing acquire" {
   cp.release("test")
   assert_eq(cp.pinned_manifests("test").length(), 0)
 }
+
+///|
+test "authoritative mode: update_snapshot grants instant visibility with zero s3 gets" {
+  let s = @store.MemStore::new()
+  seed_ns(s, "test", "manifest-01")
+  let cp = ControlPlane::new(
+    s,
+    { head_ttl_ms: 1000UL, stale_ok: false, max_entries: 64 },
+  )
+  cp.set_authoritative(true)
+  assert_eq(cp.is_authoritative(), true)
+  let a = cp.acquire("test")
+  assert_eq(a.manifest.id, "manifest-01")
+  let gets1 = s.cost().gets
+  assert_eq(gets1, 2)
+
+  // Subsequent acquire in authoritative mode: hits in-memory, 0 S3 GETs
+  let b = cp.acquire("test")
+  assert_eq(b.manifest.id, "manifest-01")
+  assert_eq(s.cost().gets, gets1)
+
+  // Coordinator writes new manifest-02, builds new snap and updates authoritative control plane
+  seed_ns(s, "test", "manifest-02")
+  let snap2 = @query.open(s, "test")
+  let gets_after_open = s.cost().gets
+  cp.update_snapshot("test", snap2)
+
+  // Next acquire immediately sees manifest-02 with ZERO additional S3 gets
+  let c = cp.acquire("test")
+  assert_eq(c.manifest.id, "manifest-02")
+  assert_eq(s.cost().gets, gets_after_open)
+  assert_eq(cp.get_snapshot("test") is Some(_), true)
+}
+
+///|
+test "WorkerTieredCache: 5-minute TTL eviction and LRU capacity budget" {
+  let cache = WorkerTieredCache::new(ttl_ms=10UL, max_bytes=500)
+  let p1 : @format.GlobalVecPart = {
+    cid: 0,
+    rows: [(0, 0), (0, 1)],
+    dim: 2,
+    data: [1.0, 2.0, 3.0, 4.0],
+  }
+  cache.put("ver1/0", p1)
+  assert_eq(cache.get("ver1/0") is Some(_), true)
+  // Spin 15ms to trigger TTL expiration
+  spin_ms(15UL)
+  assert_eq(cache.get("ver1/0") is None, true)
+  let (hits, misses, _evictions, expirations, _) = cache.stats()
+  assert_eq(hits, 1)
+  assert_eq(misses, 1)
+  assert_eq(expirations, 1)
+}
+
+///|
+test "Coordinator: multi-tenant management and worker dispatch" {
+  let s = @store.MemStore::new()
+  seed_ns(s, "t1", "m1")
+  seed_ns(s, "t2", "m2")
+  let coord = Coordinator::new(s, worker_count=2, worker_cache_ttl_ms=300_000UL)
+  coord.register_tenant("t1", "m1", 2, "cosine", "word", 100)
+  coord.register_tenant("t2", "m2", 2, "cosine", "word", 200)
+  let _w1 = coord.select_worker("t1")
+  let _w2 = coord.select_worker("t2")
+  assert_eq(coord.get_tenant("t1").unwrap().num_docs, 100)
+  coord.update_tenant_head("t1", "m1_new", 150)
+  assert_eq(coord.get_tenant("t1").unwrap().head_manifest_id, "m1_new")
+  assert_eq(coord.get_tenant("t1").unwrap().num_docs, 150)
+}

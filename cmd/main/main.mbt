@@ -85,6 +85,7 @@ fn bench_bm25_score(
 ///|
 /// BM25 暴力对照：整读 text/doc_len 列，逐行 tokenize 重算 tf/df，
 /// 与 bm25_search 完全相同的管线（per-segment top-k → 合并 → tombstone → top-k）。
+/// `keep` 为 id 谓词（过滤树对照用；段内截断**之前**应用，与 matcher 语义一致）。
 fn bm25_bruteforce(
   store : @store.MemStore,
   ns : String,
@@ -92,6 +93,7 @@ fn bm25_bruteforce(
   man : @format.ManifestData,
   query : String,
   k : Int,
+  keep : (UInt64) -> Bool,
 ) -> Array[UInt64] raise @core.SpndError {
   let terms : Array[String] = Array::new()
   let seen : Set[String] = Set([])
@@ -112,6 +114,16 @@ fn bm25_bruteforce(
   for si in 0..<man.segments.length() {
     let seg = man.segments[si]
     let base = "\{ns}/_segments/\{seg.id}"
+    let ids = match
+      @format.decode_col(
+        match store.get("\{base}/rows/id.bin") {
+          Some(x) => x
+          None => raise @core.NotFound("\{base}/rows/id.bin")
+        },
+      ) {
+      @format.ColU64(a) => a
+      _ => raise @core.Corrupt("id column dtype")
+    }
     let texts = match
       @format.decode_col(
         match store.get("\{base}/rows/text.bin") {
@@ -181,7 +193,14 @@ fn bm25_bruteforce(
         }
       }
       if s > 0.0 {
-        seg_cands.push((row, s))
+        // keep 在段内截断前应用（过滤后的 per-segment top-k）
+        let id = match ids.get(row) {
+          Some(x) => x
+          None => raise @core.Corrupt("row out of range in id column")
+        }
+        if keep(id) {
+          seg_cands.push((row, s))
+        }
       }
     }
     seg_cands.sort_by(fn(a, b) { b.1.compare(a.1) })
@@ -312,7 +331,15 @@ fn run_gates(
   let mut ok1 = 0
   for i in 0..<bm25_qs.length() {
     let got = @query.bm25_search(n, bm25_qs[i], 10, None)
-    let want = bm25_bruteforce(store, ns, n.meta, n.manifest, bm25_qs[i], 10)
+    let want = bm25_bruteforce(
+      store,
+      ns,
+      n.meta,
+      n.manifest,
+      bm25_qs[i],
+      10,
+      fn(_) { true },
+    )
     let got_ids = sorted_ids_of(got)
     if got_ids == want {
       ok1 += 1
@@ -368,7 +395,7 @@ fn run_gates(
     n,
     bm25_qs[0],
     10,
-    Some(@query.FStr("category", "cat3")),
+    Some(@query.f_str("category", "cat3")),
   )
   println("  filter 结果数: \{rf.length()}")
   gate(rf.length() > 0, "filter results empty")
@@ -379,6 +406,167 @@ fn run_gates(
     }
   }
   gate(all_cat3, "filter results contain non-cat3")
+  // ---- gate 3b: 过滤树 vs BM25 暴力对照 + count 聚合
+  println("== gate 3b: filter 树（And/Or/Not/In/范围）+ count 精确计数")
+  let t0 = docs[10].ts
+  let t_in = [docs[1].ts, docs[3].ts, docs[9].ts]
+  // (过滤树, 文档谓词) 对：检索结果必须与「同一 BM25 管线 + id 谓词」的暴力
+  // 参考完全一致（谓词在段内截断前应用，与 RowMatcher 语义对齐）。
+  let tree_and : @query.Filter = @query.And([
+    @query.Eq("category", @query.S("cat3")),
+    @query.Gte("ts", @query.I(t0)),
+  ])
+  let tree_or : @query.Filter = @query.Or([
+    @query.Eq("category", @query.S("cat1")),
+    @query.Gt("ts", @query.I(docs[500].ts)),
+  ])
+  let tree_not : @query.Filter = @query.Not(@query.Eq("public", @query.B(true)))
+  let tree_in : @query.Filter = @query.In(
+    "ts",
+    [@query.I(t_in[0]), @query.I(t_in[1]), @query.I(t_in[2])],
+  )
+  let tree_range : @query.Filter = @query.Lt("ts", @query.I(docs[200].ts))
+  let trees : Array[@query.Filter] = [
+    tree_and, tree_or, tree_not, tree_in, tree_range,
+  ]
+  let keeps : Array[(UInt64) -> Bool] = [
+    fn(id) { let d = docs[id.to_int()]; d.category == "cat3" && d.ts >= t0 },
+    fn(id) {
+      let d = docs[id.to_int()]
+      d.category == "cat1" || d.ts > docs[500].ts
+    },
+    fn(id) { not(docs[id.to_int()].public) },
+    fn(id) {
+      let t = docs[id.to_int()].ts
+      t == t_in[0] || t == t_in[1] || t == t_in[2]
+    },
+    fn(id) { docs[id.to_int()].ts < docs[200].ts },
+  ]
+  for ti, tree in trees {
+    let got = @query.bm25_search(n, bm25_qs[0], 10, Some(tree))
+    let want = bm25_bruteforce(
+      store,
+      ns,
+      n.meta,
+      n.manifest,
+      bm25_qs[0],
+      10,
+      keeps[ti],
+    )
+    if sorted_ids_of(got) != want {
+      println(
+        "  tree\{ti} mismatch: got=[\{show_ids(sorted_ids_of(got))}] want=[\{show_ids(want)}]",
+      )
+      gate(false, "filter tree \{ti} results mismatch")
+    }
+    // count 精确计数：与文档谓词直算一致
+    let mut want_cnt = 0
+    for d in docs {
+      let keep = match ti {
+        0 => d.category == "cat3" && d.ts >= t0
+        1 => d.category == "cat1" || d.ts > docs[500].ts
+        2 => not(d.public)
+        3 => d.ts == t_in[0] || d.ts == t_in[1] || d.ts == t_in[2]
+        _ => d.ts < docs[200].ts
+      }
+      if keep {
+        want_cnt += 1
+      }
+    }
+    let got_cnt = @query.count_docs(n, Some(tree))
+    if got_cnt != want_cnt {
+      gate(false, "count tree \{ti}: got \{got_cnt} want \{want_cnt}")
+    }
+  }
+  gate(@query.count_docs(n, None) == docs.length(), "count unfiltered mismatch")
+  println("  5 棵过滤树：检索与 count 均与暴力参考一致")
+  // ---- gate 3c: euclidean 度量端到端
+  println("== gate 3c: euclidean 度量（独立 namespace，nprobe=all == l2sq 暴力）")
+  let cfg_e = {
+    ..@build.BuildConfig::default("bench_euclid"),
+    vector_dim: cfg.vector_dim,
+    distance_metric: "euclidean",
+    normalize_vecs: false,
+    write_stats: true,
+  }
+  let _ = @build.ingest(store, cfg_e, docs)
+  let ne = @query.open(store, "bench_euclid")
+  gate(ne.meta.distance_metric == "euclidean", "euclidean meta not persisted")
+  for i in 0..<vec_qvs.length() {
+    let qv = vec_qvs[i]
+    // 暴力参考：整读每段 rows/vector.bin（与检索同精度 f16），l2sq 升序 top-10
+    let man_e = ne.manifest
+    let cands : Array[(UInt64, Double)] = Array::new()
+    for si in 0..<man_e.segments.length() {
+      let seg = man_e.segments[si]
+      let base = "bench_euclid/_segments/\{seg.id}"
+      let (_, data) = @format.decode_vec_col(
+        match store.get("\{base}/rows/vector.bin") {
+          Some(x) => x
+          None => raise @core.NotFound("\{base}/rows/vector.bin")
+        },
+      )
+      let ids = match
+        @format.decode_col(
+          match store.get("\{base}/rows/id.bin") {
+            Some(x) => x
+            None => raise @core.NotFound("\{base}/rows/id.bin")
+          },
+        ) {
+        @format.ColU64(a) => a
+        _ => raise @core.Corrupt("id column dtype")
+      }
+      let rows = data.length() / qv.length()
+      for row in 0..<rows {
+        let id = match ids.get(row) {
+          Some(x) => x
+          None => raise @core.Corrupt("row out of range in id column")
+        }
+        if !man_e.deleted.contains(id) {
+          cands.push(
+            (id, @core.l2sq_f32(qv, 0, data, row * qv.length(), qv.length())),
+          )
+        }
+      }
+    }
+    cands.sort_by(fn(a, b) { a.1.compare(b.1) })
+    let want_ids : Array[UInt64] = Array::new()
+    for c in cands {
+      if want_ids.length() >= 10 {
+        break
+      }
+      want_ids.push(c.0)
+    }
+    want_ids.sort()
+    let got = @query.vec_search(ne, qv, 10, 64, None)
+    if sorted_ids_of(got) != want_ids {
+      println(
+        "  euclid q\{i} mismatch: got=[\{show_ids(sorted_ids_of(got))}] want=[\{show_ids(want_ids)}]",
+      )
+      gate(false, "euclidean exact mismatch q\{i}")
+    }
+    // 分数语义：score = -l2sq（第一名必须严格 < 0 且与参考一致）
+    if got.length() > 0 {
+      let best = got[0]
+      if best.score >= 0.0 {
+        gate(false, "euclidean score sign wrong")
+      }
+      let mut want_dist = 0.0
+      for c in cands {
+        if c.0 == best.id {
+          want_dist = c.1
+          break
+        }
+      }
+      let diff = if best.score + want_dist < 0.0 {
+        -(best.score + want_dist)
+      } else {
+        best.score + want_dist
+      }
+      gate(diff < 1.0e-6, "euclidean score value mismatch q\{i}")
+    }
+  }
+  println("  euclidean nprobe=all 与 l2sq 暴力排序一致，score=-l2sq 语义正确")
   // ---- gate 4: 删除
   println("== gate 4: delete 20 ids 后所有查询不再返回它们")
   let del_set : Set[UInt64] = Set([])

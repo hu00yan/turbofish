@@ -3,7 +3,7 @@
 // - MockS3Transport：记录全部请求 + 可预置响应（FIFO）+ 内置一个最小 S3 状态模拟
 //   （对象/ETag/条件写 412/ListObjectsV2 分页 XML），用于 put_if_match 语义测试
 // - S3Store：ObjectStore 实现。请求全部经 sigv4 签名；
-//   put_if_match 语义映射（见 NOTES3 §6）：
+//   put_if_match 语义映射：
 //     expected = None      → If-None-Match: *（对象不存在才成功）
 //     expected = Some(etag)→ If-Match: <etag>（412 → false）
 //   版本串 = ETag（与 MemStore 的 "v{n}" 同一地位：只做相等比较）。

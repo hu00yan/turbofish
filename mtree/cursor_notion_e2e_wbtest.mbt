@@ -111,9 +111,9 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
     let delta_part_id = engine.mutate_rows(updated_docs, old_ids)
     engine.publish_manifest()
 
-    // 断言写放大受限：本次 10 行编辑在存储层确切仅新增 1 个 Delta Part 对象！
+    // 断言写放大受限：本次 10 行编辑在存储层确切仅新增 1 个 Delta Part 对象
     let puts_after_edit = store.cost().puts
-    // mutate_rows (1 put_part) + publish_manifest (1 manifest + 1 head_ptr) = 3 PUTs，其中 Part 数据 PUT 严格仅 1 次！
+    // mutate_rows (1 put_part) + publish_manifest (1 manifest + 1 head_ptr) = 3 PUTs，其中 Part 数据 PUT 严格仅 1 次
     assert_eq(puts_after_edit - puts_before_edit, 3)
 
     let delta_part_key = engine.part_store.part_key(delta_part_id)
@@ -163,7 +163,7 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
   assert_eq(idle_early is None, true)
   assert_eq(engine.get_manifest().l0_count(), 2)
 
-  // 达到 10s 空闲超时（过 15s）：触发 idle fallback 物理化合并！
+  // 达到 10s 空闲超时（过 15s）：触发 idle fallback 物理化合并
   let idle_fired = compactor.tick(last_act + 15000L)
   assert_eq(idle_fired is Some(_), true)
   assert_eq(engine.get_manifest().l0_count(), 0)
@@ -174,7 +174,7 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
   assert_eq(engine.get_manifest().tombstones.length(), 0)
 
   // =========================================================================
-  // 阶段 4：断言读路径 100% 零 LIST 调用 (Zero LIST requests on read path)
+  // 阶段 4：断言读路径零 LIST 调用 (Zero LIST requests on read path)
   // =========================================================================
   let lists_before_reads = store.cost().lists
 
@@ -200,11 +200,11 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
   assert_eq(ptr is Some(_), true)
 
   let lists_after_reads = store.cost().lists
-  // 核心断言：读路径与打开路径新增 LIST 请求数严格为 0！
+  // 核心断言：读路径与打开路径新增 LIST 请求数严格为 0
   assert_eq(lists_after_reads - lists_before_reads, 0)
 
   // =========================================================================
-  // 阶段 5：断言 BM25 与向量查询结果 100% 正确保真、与真值绝对一致
+  // 阶段 5：断言 BM25 与向量查询结果与真值一致
   // =========================================================================
   // 1. 文档总数恒定 10,000，且每一篇文档的内容与 ground_truth 完全吻合
   assert_eq(live_docs.length(), 10000)
@@ -224,7 +224,7 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
   }
 
   // 2. BM25 全文检索一致性验证：
-  // 检索第 25 轮突变的专有词 "tag_25"：必须精准命中第 25 轮编辑的 10 篇文档，命中数严格为 10！
+  // 检索第 25 轮突变的专有词 "tag_25"：必须精准命中第 25 轮编辑的 10 篇文档，命中数严格为 10
   let mut bm25_tag25_hits = 0
   for d in live_docs {
     if d.text.contains("tag_25") {
@@ -235,7 +235,7 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
   assert_eq(bm25_tag25_hits, 10)
 
   // 检索已被修改覆盖的旧词 "base document number 5 "：
-  // id 5 在第 0 轮已被编辑覆盖，该旧内容绝不能出现在活文档集合中！
+  // id 5 在第 0 轮已被编辑覆盖，该旧内容绝不能出现在活文档集合中
   let mut old_content_hits = 0
   for d in live_docs {
     if d.text.contains("base document number 5 ") {
@@ -269,7 +269,7 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
     if b.1 < a.1 { -1 } else if b.1 > a.1 { 1 } else { 0 }
   })
 
-  // 断言 Top-5 最相似结果的 ID 与分数 100% 绝对一致
+  // 断言 Top-5 最相似结果的 ID 与分数一致
   for rank in 0..<5 {
     assert_eq(live_scores[rank].0, gt_scores[rank].0)
     let score_diff = (live_scores[rank].1 - gt_scores[rank].1).abs()

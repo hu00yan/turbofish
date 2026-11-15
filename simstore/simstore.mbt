@@ -1,4 +1,4 @@
-// SimStore：模拟器 v2 —— 三档存储层 + 延迟模型 + AWS 费率计费（契约见 NOTES2.md）。
+// SimStore：三档存储层 + 延迟模型 + 多云请求计费。
 //
 // 三档判定（get / get_range，顺序严格）：
 // 1. 内存常驻档（@store.classify_key(key) ∈ cfg.resident_classes；set_resident_enabled(false) 可关闭）：

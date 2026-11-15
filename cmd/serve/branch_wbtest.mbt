@@ -377,7 +377,7 @@ test "cmd/serve: zero-copy speed and object count guarantee" {
   // 克隆分支
   let _ = create_branch(store, src_ns, branch_ns, true)
 
-  // 验证 branch 的物理段文件数量为 0！
+  // 验证 branch 的物理段文件数量为 0
   let branch_raw_segs = raw_list(store, "\{branch_ns}/_segments/")
   assert_eq(branch_raw_segs.length(), 0)
 

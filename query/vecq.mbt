@@ -444,7 +444,7 @@ fn TopKHeap::to_results(self : TopKHeap) -> Array[QueryResult] {
 
 ///|
 /// 全量预加载全局 IVF 分区进 Namespace.global_parts。
-/// 首次调用后热查询 100% 内存直出，零 S3 请求、零网络延迟。
+/// 首次调用后热查询从内存返回，不发 S3 请求。
 fn[S : @store.ObjectStore] preload_all_global_parts(
   n : Namespace[S],
 ) -> Unit raise @core.SpndError {
@@ -632,7 +632,7 @@ fn[S : @store.ObjectStore] collect_global_candidates(
 /// 单个 global part 的行级打分与 Top-K 堆置换。
 /// 热循环优化：
 /// - 消除任何堆对象分配（无 tuple、无 intermediate 结构体）
-/// - 谓词下推 BitSet 极速位测试 O(1)，未命中行直接跳过，零 ID 查表与向量点积
+/// - 谓词下推 BitSet 位测试 O(1)，未命中行直接跳过，无 ID 查表与向量点积
 /// - 字段引用前置绑定，段级别元数据直接扁平下标索引 O(1)
 /// - tombstone 与 filter 先行短路，跳过无用向量乘法
 /// - 点积采用 8-way 并行累加器 auto-vec 级计算

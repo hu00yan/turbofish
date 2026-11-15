@@ -1,4 +1,4 @@
-// cmd/main SimStore 场景（NOTES2.md 第 5 节 bench 集成契约，工人 B）。
+// cmd/main 的 SimStore 场景。
 //
 // 数据由 main 生成一次；这里对 SimStore 再 ingest 一次（train_centroids 种子
 // 固定 42，两次 ingest 训出的中心一致；再训一次慢几分钟属预期），并复制
@@ -189,7 +189,7 @@ fn sim_measure(
 }
 
 ///|
-/// SimStore 场景主入口（NOTES2.md 第 5 节）。MemStore 流程保持原样不动；
+/// SimStore 场景主入口。MemStore 流程保持原样不动；
 /// 这里对 SimStore 独立 ingest 一次后做 sanity + 两场景测量 + 对照表。
 fn run_sim(
   store_mem : @store.MemStore,
@@ -296,7 +296,7 @@ fn run_sim(
     let a = measures[i]
     let b = measures2[i]
     println(
-      "  \{sim_pad(a.label, 20)}\{sim_pad("\{r2_fmt(a.avg_gets, 1)}→\{r2_fmt(b.avg_gets, 1)}", 22)}\{sim_pad("\{r2_fmt(a.avg_s3_bytes / 1024.0, 1)}→\{r2_fmt(b.avg_s3_bytes / 1024.0, 1)}", 22)}\{sim_pad("\{r2_fmt(a.bill_per_1m, 2)}→\{r2_fmt(b.bill_per_1m, 2)}", 24)}",
+      "  \{sim_pad(a.label, 20)}\{sim_pad("\{extra_fmt(a.avg_gets, 1)}→\{extra_fmt(b.avg_gets, 1)}", 22)}\{sim_pad("\{extra_fmt(a.avg_s3_bytes / 1024.0, 1)}→\{extra_fmt(b.avg_s3_bytes / 1024.0, 1)}", 22)}\{sim_pad("\{extra_fmt(a.bill_per_1m, 2)}→\{extra_fmt(b.bill_per_1m, 2)}", 24)}",
     )
   }
   // ---- e. 月存储费 + 总字节 + 对象数 + turbopuffer $1/PB 参照对照
@@ -312,13 +312,13 @@ fn run_sim(
   for m in measures {
     let tpu = @simstore.tpu_scan_bill(m.avg_s3_bytes.to_int64()) * 1.0e6
     println(
-      "  \{sim_pad(m.label, 16)}\{sim_pad(r2_fmt(m.bill_per_1m, 2), 20)}\{sim_pad(tpu.to_string(), 20)}",
+      "  \{sim_pad(m.label, 16)}\{sim_pad(extra_fmt(m.bill_per_1m, 2), 20)}\{sim_pad(tpu.to_string(), 20)}",
     )
   }
   for m in measures2 {
     let tpu = @simstore.tpu_scan_bill(m.avg_s3_bytes.to_int64()) * 1.0e6
     println(
-      "  \{sim_pad(m.label, 20)}\{sim_pad(r2_fmt(m.bill_per_1m, 2), 20)}\{sim_pad(tpu.to_string(), 20)}",
+      "  \{sim_pad(m.label, 20)}\{sim_pad(extra_fmt(m.bill_per_1m, 2), 20)}\{sim_pad(tpu.to_string(), 20)}",
     )
   }
 }

@@ -1,4 +1,4 @@
-// benchx/benchx.mbt — micro-bench 主体（X 工人）。
+// benchx/benchx.mbt — micro-bench 主体。
 // bench 1: dot product f32×768（标量 / 8 路展开 / extern "C" C 内核）
 // bench 2: varint 批量解码（逐条 read_uvarint / FixedArray 批量扫描）
 // 计时：@bench 单调时钟（monotonic_clock_start/end，单位微秒），
@@ -220,7 +220,7 @@ pub fn run_all() -> String raise @core.SpndError {
 
   let lines : Array[String] = Array::new()
   lines.push(
-    "== benchx micro-bench（热身 3 轮 + 计时 20 轮取 p50，@bench 单调时钟；native --release 数字见 benchx/RESULTS.md）==",
+    "== benchx micro-bench（热身 3 轮 + 计时 20 轮取 p50，@bench 单调时钟；建议用 native --release）==",
   )
   lines.push(
     "C kernel 可用: \{c_kernel_available()}   FFI 探针 add2(20,22)=\{probe_add2(20, 22)}",
@@ -363,7 +363,7 @@ pub fn run_all() -> String raise @core.SpndError {
   // ---- 汇总 ----
   lines.push("")
   lines.push(
-    "[summary] 见 benchx/RESULTS.md（auto-vec 证据、cc 优化等级、给 D 的建议）",
+    "[summary] 比较 C 内核、展开版与标量版的稳态耗时",
   )
 
   let mut out = ""

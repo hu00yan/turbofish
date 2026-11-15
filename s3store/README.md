@@ -105,4 +105,4 @@ ListObjectsV2 分页，语义与 `MockS3Transport` 一致。
   `put_if_match` 自动降级回退至租约保护下的无条件写入与版本核对。
 - **读路径 0 LIST 保证**：读/打开路径通过 `{ns}/_head_ptr` 单次 GET 解析最新 head，
   或通过 `{ns}/_manifest/{id}.json` 直接加载版本化对象，绝不调用昂贵的 LIST 请求。
-- 真实网络结果与 baseline/optimized 对照见 `../S3_MINIO_RESULTS.md`。
+- 真实网络验证可用 `cmd/s3probe` 对目标 endpoint 复现；结果取决于部署环境。

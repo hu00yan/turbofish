@@ -82,13 +82,13 @@ test "formal spec: mergetree live doc preservation under soft deletion and compa
   // Compact parts: merges base and L0 delta into new consolidated base
   let tree3 = @spec.apply_compaction(tree2, "part_consolidated_base_2")
 
-  // Verify Inductive Invariant: Live docs PRESERVED 100% across universe!
+  // Verify inductive invariant: live docs preserved across the universe.
   let universe : Array[UInt64] = [
     5UL, 10UL, 15UL, 20UL, 25UL, 30UL, 35UL, 40UL, 45UL, 50UL, 55UL, 60UL, 65UL,
   ]
   assert_eq(@spec.verify_compaction_live_doc_preservation(tree2, tree3, universe), true)
 
-  // Explicit verification: soft-deleted doc 50 (L0) and 20 (base) did NOT resurrect!
+  // Explicit verification: soft-deleted doc 50 (L0) and 20 (base) did NOT resurrect
   assert_eq(@spec.doc_is_live(tree3, 10UL), true)
   assert_eq(@spec.doc_is_live(tree3, 20UL), false)
   assert_eq(@spec.doc_is_live(tree3, 30UL), true)
@@ -148,7 +148,7 @@ test "formal spec: safety 3 linearizable cas and lease fencing" {
   assert_eq(token1.holder, "worker_1")
   assert_eq(token1.expires_at_ms, now_ms + ttl_ms)
 
-  // 3. Worker 2 attempts to acquire lease on same branch while unexpired -> Fenced/Blocked!
+  // 3. Worker 2 attempts to acquire lease on same branch while unexpired -> Fenced/Blocked
   let token2_opt = @spec.catalog_acquire_lease(catalog, "main", "worker_2", now_ms + 1000UL, ttl_ms)
   assert_eq(token2_opt is None, true)
 
@@ -166,7 +166,7 @@ test "formal spec: safety 3 linearizable cas and lease fencing" {
   let commit1 = @spec.catalog_commit_head(catalog, store, "main", token1, 1UL, man1, now_ms + 200UL)
   assert_eq(commit1, @spec.CommitOutcome::CommitOk(2UL))
 
-  // 5. Worker 2 attempts commit with forged / mismatched fencing token -> MUST fail with FencingTokenMismatch!
+  // 5. Worker 2 attempts commit with forged / mismatched fencing token -> MUST fail with FencingTokenMismatch
   let rogue_token : @spec.LeaseToken = {
     token_id: 999UL,
     holder: "worker_2",
@@ -188,7 +188,7 @@ test "formal spec: safety 3 linearizable cas and lease fencing" {
     _ => fail("Safety 3 violated: rogue commit with mismatched fencing token was not rejected!")
   }
 
-  // 6. Worker 1 lease expires -> commit fails with LeaseExpired!
+  // 6. Worker 1 lease expires -> commit fails with LeaseExpired
   let late_ms = now_ms + ttl_ms + 1000UL
   let expired_man : @spec.SpecManifest = {
     id: "main_man_expired",
@@ -263,7 +263,7 @@ test "formal spec: safety 2 dual-write crash consistency and no dangling pointer
   assert_eq(res_c3, @spec.CommitOutcome::CommitRejected(@spec.CommitError::MissingManifest("_manifest/man_crash_3.json")))
   assert_eq(@spec.verify_safety2_dual_write_consistency(catalog, store), true)
 
-  // 4. Crash after manifest upload (CAS commit never made) -> catalog head unchanged!
+  // 4. Crash after manifest upload (CAS commit never made) -> catalog head unchanged
   let res_c4 = @spec.execute_dual_write(
     catalog,
     store,
@@ -372,7 +372,7 @@ test "formal spec: safety 1 snapshot reachability and gc safety" {
   assert_eq(unref_late.length(), 1)
   assert_eq(unref_late[0], "seg_orphan_aborted")
 
-  // 10. Crucial Safety 1 Invariant: NONE of the snapshot or lineage segments are unreferenced!
+  // 10. Crucial Safety 1 Invariant: NONE of the snapshot or lineage segments are unreferenced
   let reachable = @spec.collect_reachable_segments(catalog)
   assert_eq(reachable.contains("seg_root"), true)
   assert_eq(reachable.contains("seg_v1"), true)
@@ -392,7 +392,7 @@ test "formal spec: safety 1 snapshot reachability and gc safety" {
   assert_eq(swept_list[0], "seg_orphan_aborted")
   assert_eq(store.is_committed("seg_orphan_aborted"), false)
 
-  // 12. Verify Safety 1 holds 100%
+  // 12. Verify Safety 1 holds for all steps
   assert_eq(@spec.verify_safety1_snapshot_gc_safety(catalog, swept_history, store), true)
 }
 

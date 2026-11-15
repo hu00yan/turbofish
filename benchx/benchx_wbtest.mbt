@@ -4,7 +4,7 @@ using @test {assert_eq}
 // benchx/benchx_wbtest.mbt —— 白盒测试：FFI 探针 + 数值一致性断言 + bench 数字输出。
 // 运行：
 //   moon test -p turbofish/benchx                            （默认 wasm-gc，C 内核行 N/A）
-//   moon test -p turbofish/benchx --target native --release  （native 数字，RESULTS.md 用这个）
+//   moon test -p turbofish/benchx --target native --release  （native 数字）
 
 ///|
 test "probe add2" {
@@ -122,7 +122,7 @@ test "cmat small dot" {
 ///|
 test "results" {
   // 计时跑法：moon test -p turbofish/benchx（默认 target）
-  // 或        moon test -p turbofish/benchx --target native --release（RESULTS.md 口径）
+  // 或        moon test -p turbofish/benchx --target native --release（native 口径）
   println(run_all())
 }
 

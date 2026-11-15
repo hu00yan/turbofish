@@ -150,7 +150,7 @@ pub fn apply_append_l0(
 ///|
 /// Compaction transition:
 /// Merges parts, physicalizes tombstones (purging deleted IDs),
-/// and guarantees that the set of live documents is 100% PRESERVED.
+/// and guarantees that the set of live documents is preserved.
 /// `forall id, doc_is_live(result, id) == doc_is_live(tree, id)`.
 pub fn apply_compaction(
   tree : SpecMergeTree,

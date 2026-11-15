@@ -69,7 +69,7 @@ test "Compactor: 1) conditional wake-up policy triggers properly and asserts zer
   compactor.notify_mutation(200L)
   let res2 = compactor.tick(200L)
 
-  // 断言：成功触发合并，并且读/写路径全过程零 LIST 请求！
+  // 断言：成功触发合并，并且读/写路径全过程零 LIST 请求
   assert_eq(res2 is Some(_), true)
   let lists_after = store.cost().lists
   assert_eq(lists_after - lists_before, 0)
@@ -123,7 +123,7 @@ test "Compactor: 2) tombstone ratio > 20% triggers compaction and physicalizes d
     None => fail("compaction must trigger on tombstone ratio > 20%")
   }
 
-  // 验证合并后的 Manifest 与 Part 数据：墓碑行已被彻底物理剔除！
+  // 验证合并后的 Manifest 与 Part 数据：墓碑行已被彻底物理剔除
   let m_done = engine.get_manifest()
   assert_eq(m_done.parts.length(), 1)
   assert_eq(m_done.tombstones.length(), 0) // tombstones 清理完毕
@@ -173,7 +173,7 @@ test "Compactor: 3) idle timer fallback triggers compaction for pending delta" {
 }
 
 ///|
-test "Compactor: 4) query path remains 100% unblocked and consistent during background compaction" {
+test "Compactor: 4) query path remains unblocked and consistent during background compaction" {
   let store = @store.MemStore::new()
   let ns = "compactor_concurrency_test"
   let dim = 4
@@ -206,7 +206,7 @@ test "Compactor: 4) query path remains 100% unblocked and consistent during back
   let live_after = engine.read_live_docs()
   assert_eq(live_after.length(), 70)
 
-  // 验证所有数据值依然 100% 一致保真
+  // 验证所有数据值依然一致
   for i in 0..<70 {
     assert_eq(live_before[i].id, live_after[i].id)
     assert_eq(live_before[i].text, live_after[i].text)

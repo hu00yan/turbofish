@@ -1,9 +1,8 @@
-// cmd/main bench：seekpond/v1 端到端（NOTES 第 5 节）。
+// cmd/main bench：seekpond/v1 端到端。
 //
-// 流程：生成确定性数据 → build.ingest（存根会 raise，捕获后打印提示退出）→
-// 正确性 gate（BM25 暴力对照 / 向量 nprobe=64 精确 + nprobe=8 recall / 过滤 /
-// delete 20 ids）→ 冷/热成本表（每类 20 查询，CostSnapshot::show_table）→
-// 总存储一行汇总。性能计时无稳定 API，按 NOTES 只报请求次数与 KB。
+// 流程：生成确定性数据 → build.ingest → 正确性 gate（BM25 暴力对照 /
+// 向量 nprobe=64 精确 + nprobe=8 recall / 过滤 / delete 20 ids）→
+// 冷/热成本表（每类 20 查询）→ 总存储汇总。
 
 ///|
 /// 错误转可读字符串（SpndError 只 derive 了 Debug，跨包插值不可靠，手写展开）。
@@ -840,17 +839,17 @@ fn main {
       run_gates(store, cfg, docs, bm25_gate_qs, vec_gate_qvs)
       run_cost(store, bm25_cost_qs, vec_cost_qvs)
       run_perf(store, bm25_cost_qs, vec_cost_qvs)
-      // ---- R2：阶段 3 集成 bench（追加场景，默认参数不变）
+      // ---- 扩展场景（默认参数不变）
       let small = take_docs(docs, 2000)
-      let r2_rng = @core.Rng::new(123U)
-      let r2_bm25 = gen_bm25_queries(r2_rng, cum, 10)
-      run_r2_quant(docs)
-      run_r2_stats(small, r2_bm25)
-      run_r2_cache(store, bm25_cost_qs, vec_cost_qvs)
-      run_r2_ivf(small)
-      run_r2_metadata(small, r2_bm25)
-      run_r2_global(docs)
-      run_r2_bloom(small)
+      let extra_rng = @core.Rng::new(123U)
+      let extra_bm25 = gen_bm25_queries(extra_rng, cum, 10)
+      run_extra_quant(docs)
+      run_extra_stats(small, extra_bm25)
+      run_extra_cache(store, bm25_cost_qs, vec_cost_qvs)
+      run_extra_ivf(small)
+      run_extra_metadata(small, extra_bm25)
+      run_extra_global(docs)
+      run_extra_bloom(small)
     } catch {
       e => println("bench 失败: \{err_msg(e)}")
     }
@@ -858,10 +857,8 @@ fn main {
   println(
     "total storage: \{store.total_object_bytes()} bytes, \{store.object_count()} objects",
   )
-  // ---- SimStore 场景（NOTES2.md 第 5 节）：数据生成一次、ingest 两次的第二次。
-  // MemStore 流程保持原样；SimConfig 按 aws_default(42U) 拷贝构造，显式设
-  // nvme_capacity_bytes = 512MB（≥ 全量 ~35MB → NVMe 可全热）。
-  // 存根阶段延迟/计费为 0 属预期，simstore 实装后自动变真。
+  // ---- SimStore 场景：同一批数据在模拟对象存储上再 ingest 一次。
+  // SimConfig 使用 aws_default(42U)，NVMe 容量设为 512MB（大于本 bench 数据量）。
   if built {
     let base = @simstore.SimConfig::aws_default(42U)
     let sim_cfg = { ..base, nvme_capacity_bytes: 536870912 } // 512MB

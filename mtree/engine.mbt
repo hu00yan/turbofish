@@ -52,7 +52,7 @@ pub fn[S : @store.ObjectStore] MergeTreeEngine::append_base_part(
 
 ///|
 /// 追加 L0 Delta Part（Level = 0，Cursor/Notion 增量写入）。
-/// 打包全部列、倒排和向量切片至单个紧凑 Part 文件，仅产生 1 次 S3 PUT！
+/// 打包全部列、倒排和向量切片至单个紧凑 Part 文件，仅产生 1 次 S3 PUT
 pub fn[S : @store.ObjectStore] MergeTreeEngine::append_l0_delta_part(
   self : MergeTreeEngine[S],
   docs : Array[@core.Doc]

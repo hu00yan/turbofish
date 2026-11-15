@@ -2,9 +2,9 @@
 // 针对不同云厂商对象存储的 CAS 能力差异进行解耦抽象：
 // 1. NativeCasCoordinator：适用于 AWS S3 (2024.08+ If-Match)、Cloudflare R2 (If-Match)、
 //    GCP Cloud Storage (x-goog-if-generation-match/If-Match)、Azure Blob Storage (If-Match)。
-//    数据 Part 与 Head 指针 100% 均存在对象存储内，直接利用 S3 条件写，零额外服务。
+//    数据 Part 与 Head 指针均存在对象存储内，直接利用 S3 条件写，零额外服务。
 // 2. LeaseCoordinator：适用于不支持 PUT If-Match 的对象存储（阿里云 OSS、腾讯云 COS、私有旧版 MinIO/Ceph）。
-//    数据 Part 依然 100% 存在 OSS/COS 上，仅在 Head 指针换代时使用租约锁保证无覆盖丢失。
+//    数据 Part 依然存在 OSS/COS 上，仅在 Head 指针换代时使用租约锁保证无覆盖丢失。
 
 ///|
 pub(open) trait HeadCoordinator {

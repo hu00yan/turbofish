@@ -87,13 +87,13 @@ test "WriteBackBuffer: 50 successive 10-row edits slashed from 150 PUTs to 15 PU
     }
   }
 
-  // 4. 断言：50 轮编辑后，只执行了 5 次下刷！
+  // 4. 断言：50 轮编辑后，只执行了 5 次下刷
   assert_eq(wb.total_flushes(), 5)
   assert_eq(wb.total_mutations(), 500)
 
-  // 5 次下刷产生：5 × 3 = 15 次 PUT。加上最初基线的 3 次，总计仅 18 次 PUT！
+  // 5 次下刷产生：5 × 3 = 15 次 PUT。加上最初基线的 3 次，总计仅 18 次 PUT
   // 若未攒批：50 × 3 = 150 次 PUT，外加基线 3 次 = 153 次 PUT。
-  // 写成本削减比例达到 (150 - 15) / 150 = 90.0%！
+  // 写成本削减比例达到 (150 - 15) / 150 = 90.0%
   let total_puts = store.cost().puts
   assert_eq(total_puts, 18)
 
@@ -128,7 +128,7 @@ test "CachedManifestStore eliminates S3 GETs on read path" {
     assert_eq(loaded.seq, 1UL)
   }
 
-  // 断言：由于是 Writer 节点且内存缓存命中，S3 GET 次数严格为 0！
+  // 断言：由于是 Writer 节点且内存缓存命中，S3 GET 次数严格为 0
   let reqs = store.cost().gets
   assert_eq(reqs, 0)
 }

@@ -8,13 +8,13 @@
 //   fts/doc_len.bin（缓存）→ okapi 打分（df/term/segment，N = segment.row_count，
 //   avgdl = manifest.avg_doc_len，k1/b 来自 namespace.json）。
 //
-// Q1：fts/blockmax.bin 存在时走 block-max WAND（块上界 + 全局词上界），
+// fts/blockmax.bin 存在时走 block-max WAND（块上界 + 全局词上界），
 // 正确性与逐 posting 路径一致（测试硬门）。filter 在打分阶段按段内行号过滤
 // （列缓存 + 字典 code / bool 位图直查），stats 不相交的段整段跳过。
 // per-segment top-k → 跨 segment 合并 → row→id → tombstone → top-k。
 
 ///|
-/// 过滤列的行级匹配器（Q1：字典列按 code、bool 位图直接查位）。
+/// 过滤列的行级匹配器（字典列按 code、bool 位图直接查位）。
 /// v1 扩展：集合/范围比较 + And/Or/Not 组合（子匹配器递归求值）。
 pub(all) enum RowMatcher {
   MStr(Array[String], String)
@@ -642,8 +642,8 @@ fn decode_posting_slice(
 
 ///|
 /// 在 fts 目录（按 @format.term_compare = UTF-8 字节序升序）中二分查找 term。
-/// 比较器必须与 encode_fts 的排序一致（历史坑：String::compare 长度优先，
-/// 与字节序二分错位，CJK 多字 term 查询失败——见 NOTES4）。
+/// 比较器必须与 encode_fts 的排序一致：String::compare 长度优先，
+/// 与字节序二分错位会导致 CJK 多字 term 查询失败。
 fn find_entry_idx(entries : Array[@format.FtsDirEntry], term : String) -> Int? {
   let mut lo = 0
   let mut hi = entries.length()

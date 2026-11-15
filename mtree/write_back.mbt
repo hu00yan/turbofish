@@ -4,9 +4,9 @@
 //
 // 核心运行纪律：
 // 1. 用户写入/编辑在微秒级时间内暂存在本地内存/SSD WAL 中，立即向客户端返回成功（0 次 S3 PUT）；
-// 2. 读时保证绝对强一致性（Read-Your-Own-Writes）：检索时自动将持久化 Part 与内存未刷盘 Buffer 融合；
+// 2. 读时保证读己之写（Read-Your-Own-Writes）：检索时自动将持久化 Part 与内存未刷盘 Buffer 融合；
 // 3. 攒批条件触发：达到条数阈值（如 100~500 行）、达到字节阈值（如 64KB~256KB）或超时窗口（如 1000ms）时，
-//    一次性打包为单一 L0 Delta Part 上传至 S3，仅产生 1 次 Part PUT，将写成本削减 95%~98%！
+//    一次性打包为单一 L0 Delta Part 上传至 S3，减少重复的小 PUT
 
 ///|
 pub struct WriteBackBuffer[S] {
@@ -119,7 +119,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::flush(
     docs_arr.push(d)
   }
 
-  // 3. 执行单次批量原子下刷（确切产生 1 次 Part S3 PUT！）
+  // 3. 执行单次批量原子下刷（产生 1 次 Part PUT）
   if !tombstones_arr.is_empty() {
     self.engine.soft_delete(tombstones_arr)
   }

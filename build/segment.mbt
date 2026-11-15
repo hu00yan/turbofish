@@ -1,6 +1,6 @@
 // segment 构建与头指针发布：对象 key 构造、JSON 读写、CAS、列/倒排/分区落盘。
 //
-// key 约定（与 NOTES.md 第 2 节对象布局一一对应）：
+// key 约定：
 //   {ns}/_meta/namespace.json
 //   {ns}/_meta/schema.json
 //   {ns}/_manifest/{manifest_id}.json        manifest_id 存 next_manifest_id() 全名
@@ -395,7 +395,7 @@ fn build_blockmax(
 
 ///|
 /// 写一个 segment（docs[start..end)）的全部对象并返回 manifest 元数据：
-/// - rows/id|text|category|ts|public|vector.bin：六列编码；B1 开关控制
+/// - rows/id|text|category|ts|public|vector.bin：六列编码；配置开关控制
 ///   category 字典 / public 位图 / 向量存储方式（VF16/VSq8/VPq16）
 /// - fts/dir.bin + fts/postings.bin + fts/doc_len.bin；可选 fts/blockmax.bin
 /// - vec/part-{cid}.bin：按 cosine 最近中心分配；VSq8 用整段同一套量化参数，
@@ -497,7 +497,7 @@ fn[S : @store.ObjectStore] write_segment(
   let partitions : Array[Json] = Array::new()
   // 全局 IVF 模式：向量只存一份（global part），不写 rows/vector.bin
   if !use_global {
-    // 向量列 + 分区（B1 vec_storage）
+    // 向量列 + 分区（按 vec_storage 选择编码）
     let bs_vec = match cfg.vec_storage {
       VF16 => @format.encode_vec_col(dim, enc_flat, cfg.use_f16)
       VSq8 => {

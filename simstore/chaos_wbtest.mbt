@@ -101,7 +101,7 @@ test "DST Chaos: S3 503 RateLimit/SlowDown fault injection and retry resilience"
   assert_eq(direct2, None)
   assert_eq(store.faults_injected(), 2)
 
-  // 第三次 get 超过 max_triggers，应该成功！
+  // 第三次 get 超过 max_triggers，应该成功
   let direct3 = store.get("ns/meta")
   assert_eq(direct3, Some(b"meta-content"))
   assert_eq(store.faults_injected(), 2) // 没有增加
@@ -147,7 +147,7 @@ test "DST Chaos: S3 412 PreconditionFailed CAS conflict and retry resilience" {
   let cas2 = store.put_if_match("ns/_head_ptr", v1, b"manifest-v2")
   assert_eq(cas2, false)
 
-  // 尝试 CAS 写入：第 3 次超过 max_triggers，真实 CAS 成功！
+  // 尝试 CAS 写入：第 3 次超过 max_triggers，真实 CAS 成功
   let cas3 = store.put_if_match("ns/_head_ptr", v1, b"manifest-v2")
   assert_eq(cas3, true)
   assert_eq(store.get("ns/_head_ptr"), Some(b"manifest-v2"))
@@ -261,8 +261,8 @@ test "DST Chaos: partial truncated Range GET drops tail bytes and triggers Trunc
 }
 
 ///|
-test "DST Chaos: 100% reproducible deterministic replay with identical seed" {
-  // 驱动相同的随机混沌规则与工作负载，验证 100% 确定性回放
+test "DST Chaos: deterministic replay with identical seed" {
+  // 驱动相同的随机混沌规则与工作负载，验证确定性回放
   fn run_simulation_workload(s : ChaosStore[@store.MemStore]) -> Unit {
     s.put("ns/k1", b"val1")
     s.put("ns/k2", b"val2")

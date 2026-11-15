@@ -56,7 +56,7 @@ test "10-row edit produces exactly 1 S3 PUT and zero base rewrite" {
   // 执行 10 行更新：写入 L0 Delta Part
   let delta_part_id = engine.mutate_rows(edited_docs, old_ids)
 
-  // 3. 核心断言 1：本次 10 行编辑确切仅产生 1 次 S3 PUT！
+  // 3. 核心断言 1：本次 10 行编辑确切仅产生 1 次 S3 PUT
   let puts_after = store.cost().puts
   let delta_puts = puts_after - puts_before
   assert_eq(delta_puts, 1)
@@ -142,7 +142,7 @@ test "repeated delta appends and tombstone mask accumulation" {
     let updated = make_test_docs(start_id, 5, dim, "step_\{step}")
     let _ = engine.mutate_rows(updated, old_ids)
 
-    // 每次突变仅增加 1 次 S3 PUT！
+    // 每次突变仅增加 1 次 S3 PUT
     let current_puts = store.cost().puts
     assert_eq(current_puts - puts_init, step + 1)
   }

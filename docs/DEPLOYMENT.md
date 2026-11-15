@@ -4,12 +4,17 @@ Turbofish is an **S3-Native Hybrid Search Engine** (BM25 full-text + IVF vector 
 
 ---
 
-## 1. Build Performance & Footprint
+## 1. Build & Footprint
 
-- **Native Compile Time**: **~2.3 seconds** cold, **< 0.1 seconds** incremental (`moon build --target native --release cmd/serve`).
-- **Binary Footprint**: **1.5MB** single standalone native binary (linked only against `libc` and `libcurl`).
-- **Cold Boot Latency**: **< 5ms** from process start to serving HTTP requests.
-- **Docker Image**: **< 25MB** multi-stage Alpine runtime.
+Build and startup numbers depend on the toolchain, host, and linked libraries. Measure on your target machine instead of treating any figure below as a guarantee.
+
+```bash
+moon build --target native --release cmd/serve
+ls -lh _build/native/release/build/cmd/serve/serve.exe
+docker build -t turbofish:local .
+```
+
+A native build links against `libc` and `libcurl`; the container image is a multi-stage Alpine runtime.
 
 ---
 
@@ -185,6 +190,6 @@ spec:
 
 ## 5. Horizontal Scaling & Scale-to-Zero Architecture
 
-Because all index parts, manifest metadata, and head pointers reside on Object Storage:
-1. **Any Worker Serves Any Namespace**: Worker nodes do not hold persistent partitions. If traffic surges on a specific namespace, an arbitrary worker pool can answer queries using cached manifests and Range GETs.
-2. **Scale to Zero**: During idle hours (e.g. at night), compute replicas can scale down to `0`. When the first HTTP request arrives, the cold node spins up in **< 5ms**, pulls the compact manifest in a single GET, and serves the query. Storage costs remain strictly based on S3 volume ($0.015/GB/mo on R2 / S3 Standard).
+Because index parts, manifest metadata, and head pointers reside on object storage:
+1. **Any worker can serve any namespace**: workers do not own persistent partitions; they answer queries from cached manifests and Range GETs.
+2. **Scale to zero**: idle replicas can be scaled down to zero. A cold worker starts, loads the manifest, and serves the first query; the first request therefore pays the model's cold-read cost, not the warm-cache latency. Storage cost follows the provider's volume pricing.

@@ -3,7 +3,7 @@
 // 语义：
 // - 行 = 各段按 (segment 顺序, 段内行号) 拼接，跳过 manifest.deleted 里的 id
 // - fts/doc_len/vec 全量重建；centroids 复用头 manifest 钉住的版本（不重训）
-// - 编码按传入 cfg 的 B1 开关（stats/id_dense/dict/bitmap/vec_storage）
+// - 编码按传入 cfg 的开关（stats/id_dense/dict/bitmap/vec_storage）
 // - 新 manifest 只含 1 段、deleted=[]、parent=旧 manifest，CAS 发布
 //
 // 收益：消除 per-segment 局部性放大（向量查询读 part 文件数 = nprobe × 段数）。

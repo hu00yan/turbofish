@@ -163,46 +163,42 @@ UX/DX/AX：`MetadataCache` 暴露 `hits/misses/invalidate`；`open_cached` 文�
 
 ## 13. Bench / 场景状态
 
-`GenDocs → Ingest → Gates → Cost → Perf → R2(a..h) → Report`
+`GenDocs → Ingest → Gates → Cost → Perf → Extended scenarios`
 
-- 每个场景独立 store；R2 新场景追加，不改默认参数。
+- 每个场景独立 store；扩展场景追加输出，不改默认参数。
 - 失败：gate 失败即 raise；场景失败打印并继续（bench 不中断）。
 
-## 14. 真实 S3 transport（待实现）
+## 14. S3 transport
 
 `Idle → Signing → Connecting → Sent → Response → Retry/Error`
 
-- 未来：`HttpTransport` 实现（curl/HTTP C 库）；错误分类 5xx/429/网络；
-  重试/backoff；与 SimStore 的 retry/spike 模型对齐。
+- `s3http` 通过 libcurl FFI 实现传输层；`s3store` 负责 SigV4 签名与请求构造。
 - 不变量：SigV4 签名确定性；条件写 412 → 上层 CAS 仲裁；不记录凭据。
+- 当前未实现自动重试/backoff；调用方需要区分网络错误与 4xx/5xx。
 
-## 15. 最佳决定（本轮）
+## 15. 设计取舍
 
-1. **单副本 global IVF**：删除 per-segment vector 重复；R2-g 存储 33.3→18.7MB，
-   请求 48.8→22.0（-54.9%）。
-2. **Bloom 嵌入 seg meta**：不增加 GET；缺失 term 请求 100→60（-40%），
-   KB 14.2→3.3（-77%）。
-3. **进程级 metadata cache**：请求 272→83（-69%）；head 变只重载 manifest。
-4. **显式降级**：无 Bloom/无 global/无块统计 → 旧路径；PQ 不 global。
+1. **单副本 global IVF**：删除 per-segment vector 重复，代价是写入时需要维护全局分区代际。
+2. **Bloom 嵌入 seg meta**：不增加对象 GET；缺失 term 直接跳过 dir/postings。
+3. **进程级 metadata cache**：head 未变时零 manifest/segment 读。
+4. **显式降级**：无 Bloom / 无 global / 无块统计 → 旧路径；PQ 不 global。
 5. **延迟注入**：默认 0，保持旧确定性；可配 WAN jitter/spike/retry。
-6. **API/DX**：`BuildConfig::single_copy`、`MetadataCache`/`open_cached`、
-   `vec_search`/`vec_search_rerank`、`gc_global_versions`；文档 + 测试覆盖。
-7. **不破坏**：旧 36 测试全保；当前 117 测试全过；新路径默认关闭或自动回退。
+6. **形式化 spec**：状态迁移有运行时断言与随机模型检查；不是完整实现证明。
 
 ## 16. 测试映射
 
 | 状态机 | 测试 |
 |---|---|
-| Namespace/CAS | `B1 CAS conflict` |
-| Segment/compact | `B1 compact...`、`B1 compact global single-copy...` |
-| Query cache | `Q1 metadata cache hits/reloads` |
-| Global IVF | `B1 global vec parts`、`Q1 global IVF matches per-segment` |
-| Bloom | `bloom membership/hex`、`B1 seg meta embeds FTS bloom` |
-| Tombstone | `B1 delete_docs writes roaring`、`Q1 roaring tombstone filters` |
+| Namespace/CAS | `CAS conflict` |
+| Segment/compact | `compact...`、`compact global single-copy...` |
+| Query cache | `metadata cache hits/reloads` |
+| Global IVF | `global vec parts`、`global IVF matches per-segment` |
+| Bloom | `bloom membership/hex`、`seg meta embeds FTS bloom` |
+| Tombstone | `delete_docs writes roaring`、`roaring tombstone filters` |
 | SimStore | `latency injection deterministic`、三档/LRU/计费 |
-| Latency units | R2 表 ms、`[perf]` µs；文档已注明 |
+| Latency units | bench 表 ms、`[perf]` µs |
 
-## 12. global IVF delta 链
+## 17. global IVF delta 链
 
 | 状态 | 判定 | 迁移 |
 |---|---|---|

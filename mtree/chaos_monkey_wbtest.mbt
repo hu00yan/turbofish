@@ -91,7 +91,7 @@ test "Chaos 2: WriteBackBuffer linger trigger on initial batch" {
   // 在 t = 1500ms（过去 1400ms > linger_ms=1000ms）发生无数据心跳/或下一笔小突变
   let r2 = wb.mutate([], [], 1500L)
   
-  // 核心断言：超过 linger 窗口后必须自动触发刷盘！若 last_flush_ms 未妥善初始化则会死锁停滞！
+  // 核心断言：超过 linger 窗口后必须自动触发刷盘！若 last_flush_ms 未妥善初始化则会死锁停滞
   let did_flush = r2 is Some(_) || wb.pending_count() == 0
   assert_eq(did_flush, true)
 }
@@ -119,7 +119,7 @@ test "Chaos 3: Pure deletion bursts should not leak or ignore thresholds" {
 
   let r = wb.mutate([], tombstones, 500L)
 
-  // 核心断言：纯删除也是突变操作，积累达到阈值后绝不可无限堆积在内存！
+  // 核心断言：纯删除也是突变操作，积累达到阈值后绝不可无限堆积在内存
   // 若未刷盘，pending_tombstones 会持续泄露
   if r is None {
     // 若未能按 rows 触发，至少在手动 flush 时必须正确持久化到 manifest
@@ -150,11 +150,11 @@ test "Chaos 4: True deletion in L0 Delta Part should not resurrect after compact
 
   assert_eq(engine.read_live_docs().length(), 7)
 
-  // 3. 混沌攻击：软删除 L0 中的 100UL！
+  // 3. 混沌攻击：软删除 L0 中的 100UL
   engine.soft_delete([100UL])
   engine.publish_manifest()
 
-  // 核心断言 A：read_live_docs 必须立即过滤掉 100UL！不可因为 100UL 在 L0 就豁免墓碑！
+  // 核心断言 A：read_live_docs 必须立即过滤掉 100UL！不可因为 100UL 在 L0 就豁免墓碑
   let live_mid = engine.read_live_docs()
   let mut has_100_in_live = false
   for d in live_mid {
@@ -180,7 +180,7 @@ test "Chaos 4: True deletion in L0 Delta Part should not resurrect after compact
   let comp_res = compactor.tick(1001L)
   assert_eq(comp_res is Some(_), true)
 
-  // 核心断言 B：Compaction 物理化后，100UL 绝不可死而复活（Resurrection Anomaly）！
+  // 核心断言 B：Compaction 物理化后，100UL 绝不可死而复活（Resurrection Anomaly）
   let live_post_compact = engine.read_live_docs()
   let mut has_100_post = false
   for d in live_post_compact {

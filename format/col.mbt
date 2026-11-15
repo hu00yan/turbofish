@@ -141,7 +141,7 @@ fn encode_col_str_dict(arr : Array[String]) -> Bytes? {
 
 ///|
 /// 普通（非字典）字符串列编码（flags=0）：(count+1) offsets + UTF-8 data。
-/// B1 的 `use_dict_cols=false` 默认路径用这个，保证旧行为不变。
+/// `use_dict_cols=false` 的默认路径用这个。
 pub fn encode_col_str_plain(arr : Array[String]) -> Bytes {
   let datas = Buffer()
   let offs = Buffer()
@@ -162,7 +162,7 @@ pub fn encode_col_str_plain(arr : Array[String]) -> Bytes {
 
 ///|
 /// 旧格式布尔列编码（每值 1B，flags=0）。
-/// B1 的 `use_bool_bitmap=false` 默认路径用这个，保证旧行为不变。
+/// `use_bool_bitmap=false` 的默认路径用这个。
 pub fn encode_col_bool_plain(arr : Array[Bool]) -> Bytes {
   let b = Buffer()
   write_col_header(b, DT_BOOL, 0, arr.length(), 0)

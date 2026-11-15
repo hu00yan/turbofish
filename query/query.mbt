@@ -7,7 +7,7 @@
 // - vec/part-*.bin、rows/*.bin（id / 过滤列）：整对象 GET
 // - 一次查询绑定 open 时的 manifest 快照（强一致读）
 //
-// Q1 增强（全部自动启用，旧数据无新字段时逐字节兼容）：
+// 读路径增强（自动启用；旧数据无新字段时保持兼容）：
 // - per-segment 解码缓存（dir/doc_len/id/过滤列/blockmax，跨查询复用）
 // - seg meta.json stats：filter 与段统计不相交时整段跳过
 // - id_encoding=dense_u64：row→id 用 min_id+行号，不读 id.bin

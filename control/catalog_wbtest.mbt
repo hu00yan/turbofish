@@ -116,7 +116,7 @@ test "MemRdbCatalog: Distributed Fencing lease expiration and token mismatch" {
   assert_eq(tok2.worker_id, "worker-2")
   assert_eq(tok2.epoch, 2UL)
 
-  // 6. Worker 1（拿着过期的旧 epoch 1 令牌）尝试提交 head manifest，被 FencingTokenMismatch 拒绝！
+  // 6. Worker 1（拿着过期的旧 epoch 1 令牌）尝试提交 head manifest，被 FencingTokenMismatch 拒绝
   let stale_commit : Result[Unit, CatalogError] = try {
     cat.update_head_manifest("fenced_ns", "mid-stale", lease_token=tok1)
     Ok(())
@@ -125,7 +125,7 @@ test "MemRdbCatalog: Distributed Fencing lease expiration and token mismatch" {
   }
   assert_eq(stale_commit is Err(_), true)
 
-  // 7. Worker 2（持有合法 epoch 2 令牌）正常提交 head manifest，成功！
+  // 7. Worker 2（持有合法 epoch 2 令牌）正常提交 head manifest，成功
   cat.update_head_manifest("fenced_ns", "mid-valid", lease_token=tok2)
   let ns = cat.get_namespace("fenced_ns").unwrap()
   assert_eq(ns.head_manifest, "mid-valid")
@@ -234,7 +234,7 @@ test "MemRdbCatalog: GC Reference Safety across head, snapshots, lineage and gra
   // 3. child_ns head 引用 seg-child-head
   cat.register_manifest_segments("child_ns", "m-child", ["seg-child-head"])
 
-  // child_ns 的活跃段应当包括自身的段、祖先的 head 段、以及祖先快照保护的段！
+  // child_ns 的活跃段应当包括自身的段、祖先的 head 段、以及祖先快照保护的段
   let active = cat.list_active_segment_ids("child_ns")
   assert_eq(active.contains("seg-child-head"), true)
   assert_eq(active.contains("seg-root-head"), true)
@@ -253,7 +253,7 @@ test "MemRdbCatalog: GC Reference Safety across head, snapshots, lineage and gra
   let unref_late = cat.get_unreferenced_segments("child_ns", 5000UL)
   assert_eq(unref_late.contains("seg-staging"), true)
 
-  // 但是所有处于活跃状态的段永远不会被标记为 unreferenced！
+  // 但是所有处于活跃状态的段永远不会被标记为 unreferenced
   assert_eq(unref_late.contains("seg-child-head"), false)
   assert_eq(unref_late.contains("seg-root-head"), false)
   assert_eq(unref_late.contains("seg-root-snap"), false)

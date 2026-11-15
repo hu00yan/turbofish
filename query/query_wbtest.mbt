@@ -469,7 +469,7 @@ test "hybrid rrf recomputable" {
 }
 
 // ============================================================================
-// Q1：WAND / stats 跳过 / dense id / 字典与位图过滤 / PQ ADC
+// WAND / stats 跳过 / dense id / 字典与位图过滤 / PQ ADC
 // ============================================================================
 
 ///|
@@ -595,7 +595,7 @@ fn make_wand_store() -> @store.MemStore {
 }
 
 ///|
-test "Q1 WAND matches non-WAND and uses 4 blocks for hot" {
+test "WAND matches non-WAND and uses 4 blocks for hot" {
   let s = make_wand_store()
   let n = open(s, "wand")
   let cs = ensure_seg(n, 0)
@@ -645,7 +645,7 @@ test "Q1 WAND matches non-WAND and uses 4 blocks for hot" {
 }
 
 ///|
-test "Q1 parse stats and seg_may_match" {
+test "parse stats and seg_may_match" {
   let j = @utf8.encode(
     (
       #|{"id":"s","row_count":10,"min_id":1,"max_id":10,"partitions":[0],
@@ -741,7 +741,7 @@ test "Q1 parse stats and seg_may_match" {
 }
 
 ///|
-test "Q1 dict/bitmap filter matchers avoid expansion" {
+test "dict/bitmap filter matchers avoid expansion" {
   let s = @store.MemStore::new()
   let cats : Array[String] = ["a", "b", "a", "c", "b"]
   let pubs : Array[Bool] = [true, false, true, false, true]
@@ -840,7 +840,7 @@ test "Q1 dict/bitmap filter matchers avoid expansion" {
 }
 
 ///|
-test "Q1 PQ ADC ranks nearest code first" {
+test "PQ ADC ranks nearest code first" {
   let codebooks : Array[Float] = Array::new(capacity=256)
   for j in 0..<256 {
     codebooks.push(Float::from_int(j))
@@ -866,7 +866,7 @@ test "Q1 PQ ADC ranks nearest code first" {
 }
 
 ///|
-test "Q1 roaring tombstone object filters results" {
+test "roaring tombstone object filters results" {
   let s = make_test_store([])
   // 重写 manifest-01：deleted 留空，deleted_roar 指向 roaring 对象
   let man : @format.ManifestData = {
@@ -916,7 +916,7 @@ test "Q1 roaring tombstone object filters results" {
 }
 
 ///|
-test "Q1 blockstats ts filter only reads matching blocks" {
+test "blockstats ts filter only reads matching blocks" {
   let s = make_test_store([])
   tput(
     s,
@@ -937,7 +937,7 @@ test "Q1 blockstats ts filter only reads matching blocks" {
 }
 
 ///|
-test "Q1 metadata cache hits and reloads on head change" {
+test "metadata cache hits and reloads on head change" {
   let s = make_test_store([])
   let cache : MetadataCache[@store.MemStore] = MetadataCache::new()
   let n1 = open_cached(cache, s, "test")
@@ -995,7 +995,7 @@ fn[S : @store.ObjectStore] tget(s : S, key : String) -> Bytes? {
 }
 
 ///|
-test "Q1 global IVF partition path matches per-segment" {
+test "global IVF partition path matches per-segment" {
   let s = make_test_store([])
   let n0 = open(s, "test")
   // 从 mini store 的 per-segment part 合成两个全局 part（cid 0/1）
@@ -1070,7 +1070,7 @@ test "Q1 global IVF partition path matches per-segment" {
 }
 
 ///|
-test "Q1 missing global meta raises instead of silent empty" {
+test "missing global meta raises instead of silent empty" {
   let s = make_test_store([])
   let n0 = open(s, "test")
   let meta2 : @format.NamespaceMeta = {
@@ -1093,7 +1093,7 @@ test "Q1 missing global meta raises instead of silent empty" {
 }
 
 ///|
-test "Q1 global meta missing cids raises instead of silent empty" {
+test "global meta missing cids raises instead of silent empty" {
   let s = make_test_store([])
   let n0 = open(s, "test")
   let meta2 : @format.NamespaceMeta = {
@@ -1148,7 +1148,7 @@ fn make_delta_chain_store(deleted : Array[UInt64]) -> @store.MemStore raise {
     "\{ns}/_segments/seg-01C/meta.json",
     seg_meta_json_bytes("seg-01C", 2, 7UL, 8UL, [0, 1]),
   )
-  // base 代：从 seg-01A/01B 的 per-segment part 合成（与 Q1 全局测试同布局）
+  // base 代：从 seg-01A/01B 的 per-segment part 合成（与全局测试同布局）
   let a0 = match tget(s, "\{ns}/_segments/seg-01A/vec/part-0.bin") {
     Some(b) => @format.decode_part(b)
     None => fail("seg-01A part0 missing")

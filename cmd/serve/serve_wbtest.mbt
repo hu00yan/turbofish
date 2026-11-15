@@ -80,7 +80,7 @@ test "cmd/serve: In-process Compactor conditional wake-up & idle fallback" {
 
   assert_eq(state.engine.get_manifest().l0_count(), 4)
 
-  // 3. 唤醒并驱动 tick：由于 L0 count == 4 >= 4，触发条件合并！
+  // 3. 唤醒并驱动 tick：由于 L0 count == 4 >= 4，触发条件合并
   state.compactor.notify_mutation(2000L)
   let res_comp = state.compactor.tick(2000L)
   assert_eq(res_comp is Some(_), true)
@@ -118,7 +118,7 @@ test "cmd/serve: In-process Compactor conditional wake-up & idle fallback" {
   let res_early = state.compactor.tick(11000L)
   assert_eq(res_early is None, true)
 
-  // 超过 idle_fallback_ms (过 6000ms)：触发 idle fallback 合并！
+  // 超过 idle_fallback_ms (过 6000ms)：触发 idle fallback 合并
   let res_idle = state.compactor.tick(17000L)
   assert_eq(res_idle is Some(_), true)
   assert_eq(state.engine.get_manifest().l0_count(), 0)
@@ -634,7 +634,7 @@ test "cmd/serve: coordinator authoritative in-memory metadata with zero S3 calls
     assert_eq(a.category, "coordinator")
   }
   let gets_after_ten = sim.cost().s3_gets
-  // Zero additional S3 GETs!
+  // Zero additional S3 GETs
   assert_eq(gets_after_ten, gets_after_first)
 
   // 2. Partial patch: patch category of doc 2, state updates immediately

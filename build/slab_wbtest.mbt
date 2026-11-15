@@ -131,7 +131,7 @@ test "build: 1 Range request reads index header at fixed offset" {
   let before = store.cost().ranged_gets
   let index = read_slab_index_from_start(store, cfg.ns, meta.id, prefetch_len=1024)
   let after = store.cost().ranged_gets
-  // EXACTLY 1 Range request performed!
+  // EXACTLY 1 Range request performed
   assert_eq(after - before, 1)
   assert_eq(index.has("id"), true)
   assert_eq(index.has("text"), true)
@@ -174,7 +174,7 @@ test "build: 1 Range request reads index trailer at tail" {
     tail_len=1024,
   )
   let after = store.cost().ranged_gets
-  // EXACTLY 1 Range request to read index at tail!
+  // EXACTLY 1 Range request to read index at tail
   assert_eq(after - before, 1)
   assert_eq(index.has("id"), true)
   assert_eq(index.has("text"), true)

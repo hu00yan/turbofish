@@ -1,4 +1,4 @@
-// D：format decode 批量化 micro-bench（before/after 数字写 benchx/RESULTS.md）。
+// format decode 批量化的 micro-bench。
 //
 // 构造典型列/分区/倒排对象，跑 decode 20 轮取 p50（µs/次）。数据在计时区外
 // 生成；每轮结果累加进校验和防止死代码消除。

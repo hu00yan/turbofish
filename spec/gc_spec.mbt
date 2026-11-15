@@ -114,7 +114,7 @@ pub fn gc_sweep(
   let swept : Array[String] = []
 
   for seg in unreferenced {
-    // Assert Safety 1 invariant: Never sweep a reachable segment!
+    // Assert Safety 1 invariant: Never sweep a reachable segment
     if reachable.contains(seg) {
       abort("Safety 1 Violation: Attempted to sweep reachable segment " + seg)
     }
@@ -441,7 +441,7 @@ pub fn run_randomized_state_machine_model_checker(
               rogue_man,
               now_ms,
             )
-            // Safety 3 Assertion: Rogue commit MUST be rejected!
+            // Safety 3 Assertion: Rogue commit MUST be rejected
             match rogue_outcome {
               CommitOutcome::CommitRejected(CommitError::FencingViolation(_)) =>
                 fencing_mismatches_caught = fencing_mismatches_caught + 1

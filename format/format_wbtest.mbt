@@ -168,7 +168,7 @@ test "manifest json roundtrip" {
 }
 
 ///|
-/// S1：`global_gen`（base + deltas 代际链）的 JSON 往返。
+/// `global_gen`（base + deltas 代际链）的 JSON 往返。
 /// - Some：写 `"global_gen":{"base":...,"deltas":[...]}`，解析回来一致；
 /// - None：**不写** `global_gen` 键（旧 manifest JSON 字节不变），解析回来也是 None。
 test "manifest global_gen json roundtrip" {

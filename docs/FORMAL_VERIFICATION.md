@@ -1,35 +1,35 @@
-# MoonBit Formal Verification: Research, Tooling & Turbofish Formal Specifications
+# MoonBit Verification: Contracts, Specifications & Runtime Checks
 
-This document presents the complete formal verification research, toolchain architecture, and formal state machine specifications for **Turbofish** (an object-storage-native search engine written in MoonBit). It details how formal verification can be applied directly within MoonBit without requiring external TLA+, Coq, or Lean toolchains.
+This document describes the contract-style specifications in `spec/` and the verification tooling that exists in the MoonBit ecosystem. The specifications currently run as ordinary MoonBit tests. WhyML emission and SMT discharge are optional follow-up steps, not a completed proof of the implementation.
 
 ---
 
-## 1. Executive Summary & Toolchain Status
+## 1. Toolchain Status
 
-MoonBit incorporates native formal verification capabilities directly into its standard toolchain (`moon` version `0.1.20261104`).
+The project uses MoonBit's contract syntax (`where { proof_require, proof_ensure }`, `#proof_pure`, `proof_assert`) and checks the specs with `moon test`. The current toolchain (`moon 0.1.20261104`) ships `moonc-prove`, but does **not** expose `moon prove` as a first-class subcommand in this project's environment. This document therefore distinguishes runtime checks from SMT-backed proofs.
 
 ### 1.1 Toolchain Components
 
 | Component | Path / Location | Purpose |
 | :--- | :--- | :--- |
-| **CLI Command** | `moon prove` | Package-level verification driver (mirrors `moon build` / `moon test`) |
+| **Verification frontend** | `~/.moon/bin/moonc-prove` | Parses contracts and can emit WhyML; availability depends on the installed toolchain |
 | **Compiler Backend** | `~/.moon/bin/moonc-prove` | Formal verification frontend; parses MoonBit contracts, verifies proof typing, and compiles to WhyML |
 | **Verification Engine** | Embedded Why3 runtime (`~/.moon/lib/why3/commands/why3prove.cmxs`) | Generates Verification Conditions (VCs) and manages proof tasks |
 | **Proof Preludes** | `~/.moon/lib/prelude_proof/moonbit_builtin_prelude.mlw`<br>`~/.moon/lib/prelude_proof_machine_int/moonbit_builtin_prelude.mlw` | Models mathematical integers, machine integers, bitvectors, `FixedArray`, and `Bytes` |
 | **SMT Solvers** | `alt-ergo`, `cvc5`, `z3` | Solves generated SMT-LIB2 / Why3 goals (searched via `PATH` or `ALTERGOPATH`, `CVC5PATH`, `Z3PATH`) |
 
-### 1.2 Availability & Readiness Assessment
+### 1.2 What Is Actually Checked
 
-1. **Integrated CLI**: `moon prove` is a first-class command alongside `moon build`, `moon test`, and `moon check`.
-2. **Intermediate Representation**: `moonc-prove` translates MoonBit functions, contracts, and loop invariants into **WhyML** (`.mlw`).
-3. **Inspectable & CI-Friendly**: Running `moonc-prove -std-path <path> -whyml-output-path output.mlw -emit-only source.mbt` extracts the complete mathematical specification without requiring an active SMT solver daemon, making verification conditions auditable and portable.
-4. **Dual Execution Semantics**: MoonBit programs with formal contract clauses (`where { proof_require, proof_ensure }`) compile cleanly under `moon build` and `moon test` with zero runtime penalty, while simultaneously acting as the formal specification under `moon prove`.
+1. **Runtime checks**: `spec/spec_test.mbt` executes state transitions, invariant assertions, and a randomized model checker under `moon test`.
+2. **Contract syntax**: the `spec/*.mbt` files state pre/postconditions and pure predicates in MoonBit syntax; these compile with the normal toolchain.
+3. **WhyML emission**: `moonc-prove` can be used to emit WhyML for inspection. This repository does not claim that CI discharges those verification conditions.
+4. **No proof claim**: passing tests show that the modeled transitions satisfy the assertions on the tested inputs. They do not prove the full implementation correct for all inputs.
 
 ---
 
 ## 2. Comparative Analysis: MoonBit vs. TLA+, Coq, Lean, and Dafny
 
-| Dimension | TLA+ | Coq / Lean | Dafny | MoonBit (`moon prove`) |
+| Dimension | TLA+ | Coq / Lean | Dafny | MoonBit contracts |
 | :--- | :--- | :--- | :--- | :--- |
 | **Primary Philosophy** | High-level system & concurrent protocol model checking | Mechanized theorem proving in constructive type theory | Auto-active verification for imperative programs | **Proof-as-Code** in a production systems language |
 | **Specification Language** | Temporal Logic of Actions (TLA) | Gallina / Dependent Type Calculus | Dafny verification language | Native MoonBit syntax (`where`, `#proof_pure`, `proof_assert`) |
@@ -130,7 +130,7 @@ pub fn advance_seq(current : UInt64, next : UInt64) -> UInt64 where {
 
 ## 4. Formal Specifications for Turbofish Core State Machines
 
-Turbofish's verified formal specifications are implemented in [`spec/`](file:///Users/huyan00/mycode/turbofish/spec).
+The specifications live in [`spec/`](../spec).
 
 ### 4.1 CAS State Machine (Head Pointer Atomicity & Monotonicity)
 
@@ -139,7 +139,7 @@ In an object-storage-native architecture (S3/R2/SimStore), the namespace head po
 1. **Atomicity**: If two workers race with the same `expected_ver`, at most ONE can succeed (no split-brain).
 2. **Monotonicity**: Versions strictly increase (`seq_{t+1} > seq_t`), preventing ABA hazards and stale manifest rollbacks.
 
-#### Formal Contract & Model ([`spec/cas_spec.mbt`](file:///Users/huyan00/mycode/turbofish/spec/cas_spec.mbt))
+#### Contract & Model ([`spec/cas_spec.mbt`](../spec/cas_spec.mbt))
 
 ```moonbit
 #derive(Debug, Eq)
@@ -233,7 +233,7 @@ $$\text{live}(i, M) \iff \Big(\exists p \in M.\text{parts},\, p.\text{contains}(
 
 **Chaos Bug Revelation**: The test suite revealed that if compactor or reader logic checks tombstones only on `level > 0` (bypassing L0), soft-deleted rows in L0 resurrect after compaction. Formalizing the invariant mathematically catches this flaw before execution.
 
-#### Formal Contract & Model ([`spec/mergetree_spec.mbt`](file:///Users/huyan00/mycode/turbofish/spec/mergetree_spec.mbt))
+#### Contract & Model ([`spec/mergetree_spec.mbt`](../spec/mergetree_spec.mbt))
 
 ```moonbit
 #derive(Debug, Eq)
@@ -274,7 +274,7 @@ pub fn doc_is_live(tree : SpecMergeTree, id : UInt64) -> Bool {
 For any universe of document IDs, compaction preserves the exact truth value of `doc_is_live`:
 $$\forall i \in \text{Universe},\quad \text{doc\_is\_live}(M_{\text{after}}, i) \equiv \text{doc\_is\_live}(M_{\text{before}}, i)$$
 
-Verified in [`spec/spec_test.mbt`](file:///Users/huyan00/mycode/turbofish/spec/spec_test.mbt):
+Covered by [`spec/spec_test.mbt`](../spec/spec_test.mbt):
 - Base doc deletions remain dead.
 - L0 delta doc deletions remain dead (zero resurrection).
 - Live documents are retained in the new consolidated base part.
@@ -284,12 +284,12 @@ Verified in [`spec/spec_test.mbt`](file:///Users/huyan00/mycode/turbofish/spec/s
 ### 4.3 Roaring Bitmap Correctness & Representation Invariant
 
 #### Problem
-Tombstone masks are stored as compact Roaring Bitmaps ([`format/roaring.mbt`](file:///Users/huyan00/mycode/turbofish/format/roaring.mbt)). We must prove that:
+Tombstone masks are stored as compact Roaring Bitmaps ([`format/roaring.mbt`](../format/roaring.mbt)). The specification checks that:
 1. High/low key partitioning is bijective: $\text{reconstruct}(\text{high}(x), \text{low}(x)) = x$.
 2. Both Array Containers ($< 4096$ items) and Bitmap Containers ($\ge 4096$ items) preserve exact membership semantics.
 3. $\forall \text{ids}, \forall q:\quad \text{roaring\_contains}(\text{encode\_roaring}(\text{ids}), q) \iff q \in \text{ids}$.
 
-#### Formal Contract & Model ([`spec/roaring_spec.mbt`](file:///Users/huyan00/mycode/turbofish/spec/roaring_spec.mbt))
+#### Contract & Model ([`spec/roaring_spec.mbt`](../spec/roaring_spec.mbt))
 
 ```moonbit
 #proof_pure
@@ -330,49 +330,38 @@ Tested across:
 
 ---
 
-## 5. Practical Adoption Strategy for Turbofish
+## 5. Adoption Path
 
-How Turbofish can maintain rigorous formal guarantees in CI without external TLA+ or Lean dependencies:
+The project currently gets useful coverage from ordinary tests, without adding a separate proof toolchain to every build:
 
 ```mermaid
 flowchart TD
-    A["MoonBit Source Code (spec/ + core/ + mtree/)"] --> B["Tier 1: moon check"]
-    A --> C["Tier 2: moon test (Native & Wasm)"]
-    A --> D["Tier 3: moonc-prove -emit-only"]
-    A --> E["Tier 4: moon prove (SMT Solvers: Z3 / Alt-Ergo)"]
-    
-    B --> F["Type Safety & Ownership Invariants"]
-    C --> G["Runtime Assertion & Fuzz Invariant Verification"]
-    D --> H["WhyML VC Audit & Generation in CI"]
-    E --> I["SMT Mathematical Proof of Correctness"]
+    A["spec/ + core/ + mtree/"] --> B["moon check"]
+    A --> C["moon test"]
+    A --> D["moonc-prove -emit-only (optional)"]
+    B --> F["Type checking"]
+    C --> G["State-machine assertions and randomized model checks"]
+    D --> H["WhyML inspection"]
 ```
 
-1. **Tier 1 (Compiler Type System)**:
-   Strict type checking, immutability, and option typing eliminate null-pointer exceptions and data races.
-2. **Tier 2 (In-Tree Invariant Test Suite)**:
-   [`spec/spec_test.mbt`](file:///Users/huyan00/mycode/turbofish/spec/spec_test.mbt) executes formal state machine transitions, concurrent race simulations, and compaction cycles on native hardware.
-3. **Tier 3 (Automated WhyML Generation in CI)**:
-   Add a CI step running:
-   ```bash
-   moonc-prove -std-path ~/.moon/lib/core/_build/native/release/bundle \
-     -whyml-output-path _build/proofs/cas_spec.mlw \
-     -emit-only spec/cas_spec.mbt
-   ```
-   Ensures that every commit produces valid WhyML verification conditions.
-4. **Tier 4 (SMT Solver Verification)**:
-   When `z3` or `alt-ergo` is available in CI runners, `moon prove` discharges all verification conditions automatically.
+1. **Type checking**: `moon check` catches type and interface errors.
+2. **Runtime specification tests**: `spec/spec_test.mbt` runs the state transitions and asserts the modeled invariants.
+3. **Optional WhyML emission**: if `moonc-prove` and the proof preludes are available, emit WhyML for review. This is not part of the default test command.
+4. **Future work**: if SMT-backed proofs are required, add a dedicated CI job with pinned solver versions and document exactly which verification conditions are discharged.
 
 ---
 
-## 6. Verification Results
+## 6. Current Verification Results
 
-All formal specifications and invariant assertions compile and execute cleanly in Turbofish:
+The tests in `spec/` pass under the normal test runner. Representative cases:
 
 ```bash
-$ moon test -p turbofish/spec --target native
-Total tests: 3, passed: 3, failed: 0.
+moon test -p turbofish/spec --target native
 ```
 
-- `formal spec: cas head monotonicity and atomicity`: **PASSED**
-- `formal spec: mergetree live doc preservation under soft deletion and compaction`: **PASSED**
-- `formal spec: roaring bitmap membership equivalence and roundtrip`: **PASSED**
+- `formal spec: cas head monotonicity and atomicity`
+- `formal spec: mergetree live doc preservation under soft deletion and compaction`
+- `formal spec: roaring bitmap membership equivalence and roundtrip`
+- Safety model-checking cases for GC reachability, dual-write crash consistency, and lease fencing
+
+These are runtime checks over the test harness and randomized model, not a machine-checked proof of the production implementation.

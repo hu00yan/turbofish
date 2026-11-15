@@ -1,10 +1,9 @@
 // build 包：写路径 —— segment 构建、kmeans 训练、ingest、tombstone。
-// 公开 API（BuildConfig / ingest / delete_docs / train_centroids）是
-// build/query/bench 三方契约，签名不得更改（NOTES.md 第 3 节）。
+// 公开 API（BuildConfig / ingest / delete_docs / train_centroids）由 query 与 bench 共用。
 // 对象 key 构造、JSON IO、CAS 发布在 segment.mbt；kmeans 在 kmeans.mbt。
 
 ///|
-/// 向量存储方式（B1）：VF16 保持旧行为（由 use_f16 决定 f16/f32），
+/// 向量存储方式：VF16 由 use_f16 决定 f16/f32，
 /// VSq8 用 SQ8 量化向量列 + 分区，VPq16 分区用 PQ16（向量列仍存 f16/f32
 /// 供精排/暴力对照）。
 pub(all) enum VecStorage {
@@ -14,7 +13,7 @@ pub(all) enum VecStorage {
 } derive(Debug, Eq)
 
 ///|
-/// 构建配置。B1 新增字段全部默认关闭旧行为（NOTES3 契约）。
+/// 构建配置。所有可选编码开关默认关闭，保持与旧数据兼容。
 pub(all) struct BuildConfig {
   ns : String
   segment_rows : Int // 每 N 行一个 segment
@@ -400,7 +399,7 @@ pub fn[S : @store.ObjectStore] ingest(
 }
 
 ///|
-/// 追加写入（global IVF 的 delta 写路径，S1）：与 `ingest` 的 segment /
+/// 追加写入（global IVF 的 delta 写路径）：与 `ingest` 的 segment /
 /// centroid / manifest 逻辑完全一致，**只有 global 部分不同**：
 /// - 只把本批新段的向量写进新代 `vec/global/{new_manifest_id}`（不重写旧 base，
 ///   不读旧 base/delta），新代 meta.json 带 `"kind":"delta"` 与 `"base"`；

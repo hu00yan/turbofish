@@ -1,6 +1,6 @@
 // 计费：AWS S3 Standard 请求费（美元），费率表在 SimConfig.rates（BillRates）。
 //
-// 口径（NOTES2.md 第 4 节）：
+// 计费口径：
 // - 只有真正打到 S3 的 GET 才计 GET 费（内存/NVMe 命中不计）；
 // - put/put_if_match **每次尝试**都计 PUT 费（含 CAS 失败——真 S3 条件写失败也是一次请求）；
 // - list 每页（本场景每次调用）一次 LIST 费；delete 一次 DELETE 费（S3 Standard 默认 0）；

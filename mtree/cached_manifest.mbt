@@ -50,7 +50,7 @@ pub fn[S] CachedManifestStore::invalidate(
 impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with load(
   self
 ) -> Manifest raise @core.SpndError {
-  // 1. Writer 节点或租约有效窗口内：零 S3 GET 极速直接返回
+  // 1. Writer 节点或租约有效窗口内：零 S3 GET 直接返回
   if self.is_writer {
     match self.cached_manifest {
       Some(m) => return m
@@ -75,7 +75,7 @@ impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with load(
     return empty
   }
 
-  // 若 Head 指针与本地缓存一致，直接复用已解析的 Manifest，省去下载并解析 manifest-N.json！
+  // 若 Head 指针与本地缓存一致，直接复用已解析的 Manifest，省去下载并解析 manifest-N.json
   match (self.cached_head_ptr, self.cached_manifest) {
     (Some(cached_ptr), Some(cached_m)) =>
       if cached_ptr == head_val {

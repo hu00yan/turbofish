@@ -56,6 +56,16 @@ let meta_cache : @query.MetadataCache[AnyStore] = @query.MetadataCache::new()
 let meta_url : Ref[String] = { val: "" }
 
 ///|
+/// 元数据 key 前缀（SPND_META_PREFIX）。多个 bucket 共用一个 metad 时用它隔离，
+/// 例如 bucket 名加 "/"。
+let meta_prefix : Ref[String] = { val: "" }
+
+///|
+fn meta_key(key : String) -> String {
+  meta_prefix.val + key
+}
+
+///|
 /// 元数据服务使用独立的短连接 transport；只在冷启动加载元数据时使用，
 /// 热查询路径命中进程内缓存后不会再访问它。
 let meta_http : @s3http.CurlTransport = @s3http.CurlTransport::new()
@@ -67,7 +77,7 @@ fn meta_get(key : String) -> Bytes? {
   }
   let (status, _headers, body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
     "GET",
-    meta_url.val + @meta.METAD_KV_PREFIX + key,
+    meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
     [],
     b"",
   )
@@ -85,7 +95,7 @@ fn meta_put(key : String, bs : Bytes) -> Unit {
   }
   let (_status, _headers, _body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
     "PUT",
-    meta_url.val + @meta.METAD_KV_PREFIX + key,
+    meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
     [],
     bs,
   )
@@ -98,7 +108,7 @@ fn meta_delete(key : String) -> Unit {
   }
   let (_status, _headers, _body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
     "DELETE",
-    meta_url.val + @meta.METAD_KV_PREFIX + key,
+    meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
     [],
     b"",
   )
@@ -2383,6 +2393,7 @@ async fn dispatch(
 async fn main {
   let port = env_or("SPND_PORT", "8080")
   meta_url.val = env_or("SPND_META_URL", "")
+  meta_prefix.val = env_or("SPND_META_PREFIX", "")
   let store = make_store() catch {
     e => {
       println("store init failed: \{err_msg(e)}")

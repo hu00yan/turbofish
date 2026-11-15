@@ -76,7 +76,7 @@ UX/DX/AX：`MetadataCache` 暴露 `hits/misses/invalidate`；`open_cached` 文�
 
 - `expected = Some(old_head)`（S3 If-Match / MemStore 版本）。
 - 失败：重读 head；已变 → `CommitConflict`；未变（store 版本语义差异）→ 直接 put。
-- 测试：`B1 CAS conflict`。
+- 测试：CAS 冲突用例（`simstore/chaos_wbtest.mbt`、`control/catalog_wbtest.mbt`）。
 
 ## 5. Compaction
 
@@ -88,7 +88,7 @@ UX/DX/AX：`MetadataCache` 暴露 `hits/misses/invalidate`；`open_cached` 文�
 - 失败：任一步失败，旧 head 仍有效；新对象成为孤儿（GC）。
 - 全局模式：`compact` 从 global parts 预加载旧段向量；新段不写 per-segment
   vector；发布后 GC 旧 global 代。
-- 测试：`B1 compact...`、`B1 compact global single-copy...`。
+- 测试：`format/compact_wbtest.mbt`、`format/globalpack_wbtest.mbt`。
 
 ## 6. Tombstone
 
@@ -110,7 +110,7 @@ UX/DX/AX：`MetadataCache` 暴露 `hits/misses/invalidate`；`open_cached` 文�
 - GC：publish 后按**被替代时刻**保留 grace（后继代 `created_ms + 60s`，覆盖
   MetadataCache TTL）；只删超龄旧代。显式 `gc_global_versions` 仍可立即清理。
 - 回退：无 global → per-segment；PQ 不支持 global → per-segment。
-- 测试：`B1 global vec parts`、`Q1 global IVF...`、R2-g。
+- 测试：`query/query_wbtest.mbt` 中的 global IVF 用例。
 
 ## 8. FTS Bloom
 
@@ -121,7 +121,7 @@ UX/DX/AX：`MetadataCache` 暴露 `hits/misses/invalidate`；`open_cached` 文�
 - query：`may_contain` 全 false → 跳过 dir/postings/doc_len。
 - 不变量：Bloom 只可能 false positive，不允许 false negative；参数 m/k 随
   meta 存储，旧数据无 Bloom 走原路径。
-- 测试：`bloom membership/hex`、`B1 seg meta embeds FTS bloom`、R2-h。
+- 测试：`format/bloom_wbtest.mbt` 与 segment meta 解析用例。
 
 ## 9. Filter matcher 路径
 

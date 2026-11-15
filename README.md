@@ -23,6 +23,7 @@ the current manifest snapshot.
 | `simstore/` | Deterministic object-store simulator with latency and request billing |
 | `fsstore/`, `s3store/`, `s3http/` | Local filesystem and S3-compatible backends |
 | `cmd/serve/` | HTTP API server |
+| `cmd/metad/` | Local SSD-backed metadata service (namespace/manifest/segment metadata) |
 | `cmd/main/`, `cmd/bench1m/` | End-to-end and large-scale benchmarks |
 | `cmd/simcompare/`, `cmd/delta_bench/` | Storage-tier and write-amplification comparisons |
 | `cmd/idxrepo/` | Index a source tree and run BM25/vector queries |
@@ -37,6 +38,7 @@ the current manifest snapshot.
 moon check
 moon test
 moon build --target native --release cmd/serve
+moon build --target native --release cmd/metad
 ```
 
 Run the local server with the filesystem backend:
@@ -47,7 +49,9 @@ SPND_STORE=fs:/tmp/turbofish-data SPND_PORT=8080 \
 ```
 
 For S3, MinIO, Cloudflare R2, Docker, and Kubernetes examples, see
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Run `cmd/metad` on the query host and
+set `SPND_META_URL` on `cmd/serve` to keep namespace/segment metadata off the
+object-storage path; without it, metadata still comes from the object store.
 
 ## API quickstart
 

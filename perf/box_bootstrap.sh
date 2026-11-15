@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/hu00yan/turbofish.git}"
-COMMIT="${COMMIT:-3911395f96574a8d370b9cd030275b42461a6884}"
+COMMIT="${COMMIT:-291b260a43829b296f67ed48ff20d715b7a7e5ee}"
 ROOT="${ROOT:-$HOME/turbofish-perf}"
 TARGET="${MOON_TARGET:-native}"
 
@@ -34,14 +34,17 @@ git fetch --depth 1 origin "$COMMIT" 2>/dev/null || git fetch --depth 50 origin
 git checkout --detach "$COMMIT"
 test "$(git rev-parse HEAD)" = "$COMMIT"
 
-echo "== building cmd/serve --release"
+echo "== building cmd/serve + cmd/metad --release"
 moon build cmd/serve --target "$TARGET" --release
+moon build cmd/metad --target "$TARGET" --release
 
 BIN="$ROOT/_build/$TARGET/release/build/cmd/serve/serve.exe"
+METAD_BIN="$ROOT/_build/$TARGET/release/build/cmd/metad/metad.exe"
 test -x "$BIN"
+test -x "$METAD_BIN"
 echo "== serve binary: $BIN"
-ls -l "$BIN"
-sha256sum "$BIN"
+ls -l "$BIN" "$METAD_BIN"
+sha256sum "$BIN" "$METAD_BIN"
 
 echo "== dependency check"
 python3 - <<'PY'

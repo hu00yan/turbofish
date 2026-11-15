@@ -1116,7 +1116,7 @@ test "global meta missing cids raises instead of silent empty" {
 }
 
 // ---------------------------------------------------------------------------
-// S2a：query 读 global base + deltas（`manifest.global_gen` 代际链）。
+// query 读 global base + deltas（`manifest.global_gen` 代际链）。
 // 手工构造：base 代 g-base 覆盖 seg-01A/01B，delta 代 g-delta 只覆盖新段
 // seg-01C。rows 仍是 (seg_idx, row)，读路径不重排全局行号。
 // ---------------------------------------------------------------------------
@@ -1257,7 +1257,7 @@ fn make_delta_chain_store(deleted : Array[UInt64]) -> @store.MemStore raise {
 }
 
 ///|
-test "S2a global delta chain merges base and delta rows" {
+test "global delta chain merges base and delta rows" {
   let s = make_delta_chain_store([])
   let n = open(s, "test")
   assert_eq(n.manifest.global_gen is Some(_), true)
@@ -1287,7 +1287,7 @@ test "S2a global delta chain merges base and delta rows" {
 }
 
 ///|
-test "S2a global delta chain skips cid absent from delta meta" {
+test "global delta chain skips cid absent from delta meta" {
   let s = make_delta_chain_store([])
   // delta 代只声明 cid 0，且真的没有 part-1：probe cid 1 时该代是合法空分区，
   // 不能报错，也不能让整次查询变空。
@@ -1315,7 +1315,7 @@ test "S2a global delta chain skips cid absent from delta meta" {
 }
 
 ///|
-test "S2a global delta chain missing delta meta raises NotFound" {
+test "global delta chain missing delta meta raises NotFound" {
   let s = make_delta_chain_store([])
   let n0 = open(s, "test")
   let bad : @format.ManifestData = {
@@ -1338,7 +1338,7 @@ test "S2a global delta chain missing delta meta raises NotFound" {
 }
 
 ///|
-test "S2a global delta chain delta meta missing cids raises" {
+test "global delta chain delta meta missing cids raises" {
   let s = make_delta_chain_store([])
   // delta 代 meta 在但缺 cids：不能当成空代静默跳过
   tput(s, "test/vec/global/g-delta/meta.json", @utf8.encode("{\"dim\":2}"))
@@ -1353,7 +1353,7 @@ test "S2a global delta chain delta meta missing cids raises" {
 }
 
 ///|
-test "S2a global delta chain applies tombstones across generations" {
+test "global delta chain applies tombstones across generations" {
   let s = make_delta_chain_store([7UL])
   let n = open(s, "test")
   let ids = sorted_ids(vec_search(n, [10.0, 0.0], 10, 2, None))

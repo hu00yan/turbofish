@@ -19,14 +19,16 @@ REMOTE_ROOT="${REMOTE_ROOT:-/home/user/turbofish-perf}"
 box() { "$BOX_BIN" "$BOX_JS" exec --box "$BOX_NAME" -c "$1"; }
 
 # 1. ensure the pinned checkout + release binary exist
-box "test -x '$REMOTE_ROOT/_build/native/release/build/cmd/serve/serve.exe'" >/dev/null 2>&1 || {
+box "test -x '$REMOTE_ROOT/_build/native/release/build/cmd/serve/serve.exe' && test -x '$REMOTE_ROOT/_build/native/release/build/cmd/metad/metad.exe'" >/dev/null 2>&1 || {
   echo "== bootstrapping box (clone + release build)"
   TARBALL="$(mktemp)"
   tar czf "$TARBALL" -C "$HERE" perf
   B64="$(base64 < "$TARBALL" | tr -d '\n')"
   rm -f "$TARBALL"
   box "mkdir -p '$REMOTE_ROOT' && printf '%s' '$B64' | base64 -d | tar xzf - -C '$REMOTE_ROOT'"
-  box "bash '$REMOTE_ROOT/perf/box_bootstrap.sh'"
+  # The previous commit did not track perf/, so git checkout refuses to overwrite
+  # the just-uploaded files. They are re-uploaded after bootstrap.
+  box "cp '$REMOTE_ROOT/perf/box_bootstrap.sh' /tmp/tf-box-bootstrap.sh && rm -rf '$REMOTE_ROOT/perf' && bash /tmp/tf-box-bootstrap.sh"
 }
 
 # 2. upload only perf/ (the source tree in the box stays at the pinned commit)

@@ -301,6 +301,8 @@ class ServeProc:
     serve_bin: Path
     base_env: Dict[str, str]
     log_dir: Path
+    metad_url: str = ""
+    metad_prefix: str = ""
     proc: Optional[subprocess.Popen] = None
     log_file: Optional[Any] = None
 
@@ -319,6 +321,9 @@ class ServeProc:
                 "SPND_WORKER_CACHE_TTL_SEC": "300",
             }
         )
+        if self.metad_url:
+            env["SPND_META_URL"] = self.metad_url
+            env["SPND_META_PREFIX"] = self.metad_prefix
         return env
 
     def start(self) -> float:
@@ -375,6 +380,60 @@ class ServeProc:
                 return time.perf_counter() - t0
             time.sleep(0.25)
         raise TimeoutError(f"{self.name}: num_docs never reached {expected}")
+
+
+# --------------------------------------------------------------------------
+# Metadata service process
+# --------------------------------------------------------------------------
+@dataclass
+class MetadProc:
+    port: int
+    root: Path
+    metad_bin: Path
+    log_dir: Path
+    proc: Optional[subprocess.Popen] = None
+    log_file: Optional[Any] = None
+
+    def start(self) -> float:
+        t0 = time.perf_counter()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.log_file = open(self.log_dir / "metad.log", "ab")
+        env = dict(os.environ)
+        env.update(
+            {
+                "SPND_META_PORT": str(self.port),
+                "SPND_META_DIR": str(self.root),
+            }
+        )
+        self.proc = subprocess.Popen(
+            [str(self.metad_bin)],
+            env=env,
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        wait_port("127.0.0.1", self.port, timeout=60)
+        return time.perf_counter() - t0
+
+    def stop(self) -> None:
+        if self.proc is None:
+            return
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+            except OSError:
+                pass
+            self.proc.wait(timeout=10)
+        self.proc = None
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None
 
 
 # --------------------------------------------------------------------------
@@ -858,6 +917,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--serve-bin", type=Path,
                    default=repo / "_build/native/release/build/cmd/serve/serve.exe")
+    p.add_argument("--metad-bin", type=Path,
+                   default=repo / "_build/native/release/build/cmd/metad/metad.exe")
+    p.add_argument("--metad-port", type=int, default=8090)
+    p.add_argument("--metad-url", default="",
+                   help="use an already-running metadata service instead of starting one")
     p.add_argument("--repo", type=Path, default=repo)
     p.add_argument("--out-dir", type=Path, default=here / "results")
     p.add_argument("--work-dir", type=Path, default=None)
@@ -954,6 +1018,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "direct_endpoint": args.minio_endpoint,
             "toxiproxy_endpoint": args.toxi_endpoint,
             "qdrant_storage": str(args.qdrant_storage),
+            "metad_url": args.metad_url or f"http://127.0.0.1:{args.metad_port}",
         },
         "buckets": {"direct": bucket_direct, "toxiproxy": bucket_toxi},
         "qdrant_collection": qd_collection,
@@ -963,9 +1028,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "service kept running, worker/metadata caches and OS caches warm"
         ),
         "cold_definition": (
-            "service process restarted (Turbofish server / Qdrant), no burn-in, "
-            "first 20 queries measured. OS page cache and MinIO are NOT dropped; "
-            "Qdrant serves from local disk/mmap, Turbofish must fetch objects from MinIO"
+            "Turbofish server / Qdrant process restarted, no burn-in, first 20 "
+            "queries measured. The metadata service stays up (it is a long-lived "
+            "SSD-backed service, not part of the query process); OS page cache and "
+            "MinIO are NOT dropped. Qdrant serves from local disk/mmap; Turbofish "
+            "reads metadata from metad and vector shards from MinIO"
         ),
         "errors": [],
     }
@@ -983,9 +1050,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # -- preflight -----------------------------------------------------
     serve_bin = args.serve_bin.resolve()
+    metad_bin = args.metad_bin.resolve()
     if not serve_bin.exists():
         raise SystemExit(
             f"missing serve binary {serve_bin}; run perf/box_bootstrap.sh inside the VM first"
+        )
+    if not args.metad_url and not metad_bin.exists():
+        raise SystemExit(
+            f"missing metad binary {metad_bin}; run perf/box_bootstrap.sh inside the VM first"
         )
     for url in (
         "http://127.0.0.1:9000/minio/health/live",
@@ -1062,15 +1134,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     base_env = dict(minio_env)
     # Credentials come from ~/.mc/config.json and are never printed.
+    metad_url = args.metad_url or f"http://127.0.0.1:{args.metad_port}"
+    metad = None if args.metad_url else MetadProc(
+        port=args.metad_port, root=work / "metad", metad_bin=metad_bin,
+        log_dir=work,
+    )
+    if metad is not None:
+        progress("== starting metadata service")
+        metad.start()
+        progress(f"   metad {metad_url} root={metad.root}")
     srv_direct = ServeProc(
         name="direct", port=args.tf_port, bucket=bucket_direct,
         s3_endpoint=args.minio_endpoint, serve_bin=serve_bin,
-        base_env=base_env, log_dir=work,
+        base_env=base_env, log_dir=work, metad_url=metad_url,
+        metad_prefix=bucket_direct + "/",
     )
     srv_toxi = ServeProc(
         name="toxi", port=args.tf_toxi_port, bucket=bucket_toxi,
         s3_endpoint=args.toxi_endpoint, serve_bin=serve_bin,
-        base_env=base_env, log_dir=work,
+        base_env=base_env, log_dir=work, metad_url=metad_url,
+        metad_prefix=bucket_toxi + "/",
     )
     qd = QdrantHTTP(port=6333, collection=qd_collection)
     qproc = QdrantProc()
@@ -1360,6 +1443,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for srv in (srv_direct, srv_toxi):
             try:
                 srv.stop()
+            except Exception:
+                pass
+        if metad is not None:
+            try:
+                metad.stop()
             except Exception:
                 pass
         for client in tf_clients.values():

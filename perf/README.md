@@ -11,10 +11,12 @@ Scope and non-claims:
 * **Vector-only.** Qdrant has no BM25 equivalent here, so no hybrid / BM25
   parity is measured or claimed. Turbofish's FTS columns are written and stored
   because that is how the server stores rows, but queries are vector queries.
-* **Different storage classes.** Turbofish reads its index from MinIO over the
-  network (optionally through toxiproxy); Qdrant memory-maps local disk. The
-  direct-MinIO and toxiproxy runs make that difference visible instead of
-  hiding it. They are not "same storage" comparisons.
+* **Different storage classes.** Turbofish keeps metadata (namespace,
+  manifests, segment meta/columns, centroids, tombstones) in a local SSD-backed
+  service (`cmd/metad`), and reads vector/FTS data shards from MinIO over the
+  network (optionally through toxiproxy). Qdrant memory-maps local disk. The
+  direct-MinIO and toxiproxy runs make the data-shard difference visible
+  instead of hiding it; they are not "same storage" comparisons.
 * Results are environment-specific. `perf/RESULTS.md` records what was actually
   measured by one run, including the exact VM, binary and config.
 
@@ -24,9 +26,14 @@ Scope and non-claims:
 | --- | --- |
 | `run_compare.py` | End-to-end runner: dataset, exact ground truth, ingest, iso-recall tuning, warm/cold measurement, RSS/storage/request counts, JSON output. |
 | `clients.py` | Persistent-connection clients: `http.client` keep-alive for Turbofish, `qdrant_client` for Qdrant; per-query timing. |
-| `box_bootstrap.sh` | Run **inside** the Linux VM: clone the pinned commit and build `cmd/serve` in release mode. |
+| `box_bootstrap.sh` | Run **inside** the Linux VM: clone the pinned commit and build `cmd/serve` and `cmd/metad` in release mode. |
 | `run_on_box.sh` | Laptop helper: upload only `perf/` into the VM and run the comparison there. |
 | `results/*.json` | Machine-readable output of real runs (written inside the VM). |
+
+The runner starts `cmd/metad` automatically and gives each Turbofish server a
+`SPND_META_URL`. Direct and toxiproxy buckets share one metad process but use
+different `SPND_META_PREFIX` values (the bucket name), so their metadata cannot
+collide.
 
 The harness never edits the Turbofish source tree. The measurement build is a
 fresh clone inside the VM, checked out at the commit recorded in the JSON.
@@ -92,11 +99,14 @@ ground truth and each engine's top-10.
 * **Warm**: after 100 burn-in queries per engine, with the service process kept
   running. Worker caches, metadata caches, Qdrant's loaded HNSW and the OS page
   cache are warm. The measured sequence is 400 queries per repetition.
-* **Cold (cold process, not cold object storage)**: the service process is
-  restarted and the first 20 queries are measured without burn-in. The OS page
-  cache is **not** dropped and MinIO itself is not restarted.
-  * Turbofish: new server process, empty worker/metadata caches; it must fetch
-    objects from MinIO over the network.
+* **Cold (cold process, not cold object storage)**: the query service process
+  is restarted and the first 20 queries are measured without burn-in. The OS
+  page cache is **not** dropped, MinIO is not restarted, and the local metadata
+  service stays up. The metadata service is a long-lived SSD-backed service,
+  not part of the query process; restarting it would be a different experiment.
+  * Turbofish: new server process, empty worker/metadata caches; metadata is
+    loaded from `metad` over local HTTP, and vector/FTS data shards are fetched
+    from MinIO over the network.
   * Qdrant: the shared Qdrant service is gracefully restarted (same binary, same
     storage directory) and the collection is loaded lazily on the first query.
     Qdrant serves from local disk / mmap, so this is not comparable to a cold
@@ -135,6 +145,8 @@ window, per repetition.
   separate window because it adds overhead; it is excluded from latency stats.
   Warm request counts can legitimately be 0 when everything is cached.
   Post-restart cold counts and ingest request counts are measured separately.
+  Local HTTP requests to `metad` are **not** S3 requests and are not counted in
+  this table; the S3 count is specifically the object-storage data path.
 
 ## Reproduction
 
@@ -143,7 +155,7 @@ Inside the VM (4 vCPU x86_64, MinIO on `127.0.0.1:9000`, toxiproxy on
 
 ```bash
 export PATH="$HOME/.moon/bin:$PATH"
-bash ~/turbofish-perf/perf/box_bootstrap.sh          # pinned clone + release build
+bash ~/turbofish-perf/perf/box_bootstrap.sh          # pinned clone + release builds
 cd ~/turbofish-perf
 python3 perf/run_compare.py --smoke                  # functional smoke test
 python3 perf/run_compare.py \
@@ -169,7 +181,8 @@ Notes:
   runs at the end unless `--keep-data` is passed, and only ever deletes names
   with those prefixes.
 * Turbofish ports are `8081`/`8082` so an existing server on `8080` is not
-  disturbed.
+  disturbed. The metadata service listens on `127.0.0.1:8090` by default
+  (`--metad-port`); its run-specific directory is under the work dir.
 * Qdrant restarts for the cold window keep the same binary, cwd and storage
   directory, and verify that all pre-existing collections are still present.
   Use `--no-qdrant-restart` to skip them.
@@ -196,11 +209,12 @@ pooled across repetitions.
 ## Threats to validity
 
 1. **Storage is not the same class.** Qdrant reads local disk/mmap; Turbofish
-   reads MinIO over HTTP (with 50 ms ±20 ms downstream latency through the
-   toxiproxy proxy configured in this VM, and no bandwidth toxic enabled at the
-   time of the run — see the captured proxy config). Warm Turbofish queries can
-   be fully cache-resident and then do zero S3 GETs; the cold window and the
-   direct/toxiproxy difference expose the storage path.
+   reads metadata from a local SSD service and data shards from MinIO over HTTP
+   (with 50 ms ±20 ms downstream latency through the toxiproxy proxy configured
+   in this VM, and no bandwidth toxic enabled at the time of the run — see the
+   captured proxy config). Warm Turbofish queries can be fully cache-resident
+   and then do zero S3 GETs; the cold window and the direct/toxiproxy difference
+   expose the data-shard path.
 2. **Vector encoding differs.** Turbofish stores f16 vectors by default; Qdrant
    stores f32. This affects both storage bytes and score rounding. Storage
    numbers are reported as measured, not normalised.
@@ -231,8 +245,12 @@ pooled across repetitions.
    With limited queries, recall estimates have sampling noise.
 10. **`mc admin trace` adds overhead** and is excluded from latency windows.
     Warm counts of 0 mean "served from cache", not "no requests were measured".
-11. **Client-side serialization is inside the latency.** Turbofish rows are
+11. **The metadata service is local and single-node.** It is populated on write
+    and S3 remains the durable source of truth; a lost metadata directory
+    degrades to S3 reads. Multi-node sharing/failover and metadata-service
+    restart are not measured here.
+12. **Client-side serialization is inside the latency.** Turbofish rows are
     JSON; Qdrant uses its own JSON/protobuf transport. The numbers reflect
     end-to-end single-request latency for these clients.
-12. **This is not a claim about Turbofish's hybrid/BM25 performance.** Only
+13. **This is not a claim about Turbofish's hybrid/BM25 performance.** Only
     vector queries are compared.

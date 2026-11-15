@@ -8,12 +8,16 @@
 
 - 已有 `query.MetadataCache` + `open_cached`：进程内缓存 `Namespace`，每次只
   GET 一次 `namespace.json` 检查 head；head 未变则零 manifest/segment 读。
-  R2-f：10 查询请求 272→83（-69%）。
+  一次 10 查询的测试中，请求数从 272 降到 83（-69%）。
+- 已实现单机 `cmd/metad`：`cmd/serve` 在写路径把 namespace / manifest /
+  segment meta / 行属性列 / centroids / tombstone / global IVF meta 镜像到
+  本机 SSD（`fsstore`），查询冷启动从 `metad` 读，不再走 S3。可用
+  `SPND_META_PREFIX` 让多个 bucket 共享一个 metad 进程。
 - 但还缺：
-  - 进程重启后内存缓存丢失；需要 NVMe 快照/对象缓存。
-  - head 变化靠每次 `GET namespace.json` 发现；需要轮询/推送 + TTL。
-  - 大 metadata（dir/doc_len）没有独立 LRU；NVMe 只存在于 SimStore 模型里。
-  - 多查询进程/多节点没有共享；单机先做“每机一个 cache 进程”。
+  - head 变化仍靠 `open_cached` 的 `namespace.json` TTL 探测；需要轮询/推送。
+  - 大 metadata（dir/doc_len）没有按字节的独立 LRU；metad 依赖文件系统。
+  - 多节点没有共享；`metad` 是单机进程，跨机需每机部署或加复制。
+  - metad 进程重启后的冷启动会回源 S3；尚未做启动时预热/快照。
 
 ## 1. 状态分层
 
@@ -137,16 +141,16 @@ metad:  若 RPC 到，立即 reload；否则 TTL 轮询发现
 | head 检查 | `open_cached` 内 `GET namespace.json` |
 | tombstone | `tombstones_of` + roaring |
 | 全局 IVF 索引 | `ensure_global_cids` + `vec_global_search` |
-| NVMe 落盘 | 待实现：`fsstore`（native）或独立 `metad` 进程 |
+| NVMe 落盘 | `cmd/metad` + `fsstore`（native），写路径镜像、查询路径读取 |
 | 写通知 | 待实现：RPC / 文件 watch；先 TTL 轮询 |
 
 ## 9. 单机落地顺序
 
-1. 把 `MetadataCache` 从 query 包抽成 `metacache` 包（内存 + 统计）。
-2. 加 `DiskCache`（native，基于 fsstore）：metadata 快照 + LRU block 缓存。
-3. 加 head watcher（TTL + 可选 inotify/RPC）。
-4. bench：`open_cached` vs `open` vs `open_cached+NVMe` 的请求/延迟/命中率。
-5. 再考虑跨机共享（lease/fencing、head 推送、快照 GC）。
+1. ~~`DiskCache`（native，基于 fsstore）：metadata 快照~~ → 已由 `cmd/metad`
+   覆盖；下一步是加按字节的 LRU 和启动预热。
+2. 加 head watcher（TTL + 可选 inotify/RPC），减少每查询的 head 探测。
+3. bench：`open` vs `open_cached` vs `open_cached+metad` 的请求/延迟/命中率。
+4. 再考虑跨机共享（lease/fencing、head 推送、快照 GC）。
 
 ## 10. 非目标
 

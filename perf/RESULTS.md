@@ -1,12 +1,11 @@
-# Results: Turbofish (MinIO) vs Qdrant (local disk), vector-only
+# Results: Turbofish (MinIO + local metadata service) vs Qdrant
 
 This file reports one real run of `perf/run_compare.py`. All numbers below are
 read from
-[`results/compare-20261115T093654Z-31288.json`](results/compare-20261115T093654Z-31288.json),
-which has `"errors": []`. Nothing here is hard-coded or estimated. Manual
-supplementary measurements are marked as such and their commands are given.
+[`results/compare-20261115T101916Z-33642.json`](results/compare-20261115T101916Z-33642.json),
+which has `"errors": []`. Nothing here is hard-coded or estimated.
 
-Run window: **2026-11-15T09:36:54Z → 2026-11-15T09:52:41Z** (15m47s wall).
+Run window: **2026-11-15T10:19:16Z → 2026-11-15T10:28:57Z** (9m41s wall).
 The JSON's `started_at` / `finished_at` and per-phase values are authoritative;
 the wall time includes dataset generation, both Turbofish ingests, tuning,
 warm/cold measurement and storage capture.
@@ -15,10 +14,10 @@ warm/cold measurement and storage capture.
 
 | Item | Value |
 | --- | --- |
-| Turbofish commit | `3911395f96574a8d370b9cd030275b42461a6884` (pinned clone in the VM) |
+| Turbofish commit | `291b260a43829b296f67ed48ff20d715b7a7e5ee` (pinned clone in the VM) |
 | Turbofish binary | `_build/native/release/build/cmd/serve/serve.exe` |
-| Binary SHA-256 | `81c3e5792413dd34a0475acfe002cc58433748a13ffab746aed16ce8972269bb` |
-| Binary build time | 2026-11-15T08:16:16Z |
+| Binary SHA-256 | `9aa90bf7cd4dfc2f392fca3e2111461d5098e395641d161591957c3c4ef174d5` |
+| Metadata service | `cmd/metad` built from the same commit; SSD-backed local store under the run work dir |
 | MoonBit toolchain | `moon 0.1.20261104 (940aa18 2026-11-04)` |
 | Host | Simular box `main`, Linux 6.8.0-142-generic, x86_64 |
 | CPU | Intel Xeon Platinum 8581C @ 2.10 GHz, 4 vCPU |
@@ -32,11 +31,28 @@ warm/cold measurement and storage capture.
 **Actual toxiproxy configuration** (captured from `/proxies` by the runner, not
 assumed): proxy `minio`, `127.0.0.1:19000 → 127.0.0.1:9000`, one toxic:
 **latency, downstream, 50 ms ±20 ms jitter**. There is **no bandwidth toxic**
-configured. Earlier descriptions of this environment mentioned 30 ms ±10 ms and
-100 MB/s; those were not the live configuration, so all "toxiproxy" numbers
-here are for 50 ms ±20 ms with unlimited bandwidth.
+configured. The direct endpoint is `http://127.0.0.1:9000` (local MinIO, no
+proxy).
 
-The direct endpoint is `http://127.0.0.1:9000` (local MinIO, no proxy).
+### Architecture change from the previous result
+
+The previous run read namespace/segment metadata from S3 on every cold start:
+422 `GetObject` requests for 20 queries, a 558 ms first query direct and a
+23.1 s first query through toxiproxy. That was the wrong architecture for a
+metadata-bearing service on the same VM.
+
+This run adds `cmd/metad`, a small SSD-backed metadata service. `cmd/serve`
+mirrors namespace / manifest / segment-meta / row-column / centroid /
+tombstone / global-IVF-meta objects into it on write, and reads them from it on
+cold start. Query data shards (segment vectors, FTS postings, global IVF vector
+parts) remain in object storage and are fetched by the query process. Metadata
+service requests are local HTTP, not S3, and are therefore not included in the
+S3 counts below.
+
+The metadata service is deliberately **not restarted** for the cold window: it
+is a long-lived local service, like a catalog or a local SSD page cache. The
+cold window restarts the query process, which is the thing whose cold-start
+behaviour is being measured.
 
 ## 2. Dataset, queries and ground truth
 
@@ -68,13 +84,13 @@ force. Every grid point is listed; the chosen point is closest to recall 0.95
 
 | nprobe | recall@10 | direct p50 / p95 / p99 (ms) | toxiproxy p50 / p95 / p99 (ms) |
 | ---: | ---: | ---: | ---: |
-| 1 | 0.792 | 0.694 / 1.059 / 1.194 | 0.675 / 0.894 / 1.000 |
-| **2** | **0.953** | **0.722 / 1.128 / 1.693** | **0.742 / 1.127 / 1.193** |
-| 4 | 0.996 | 0.998 / 1.444 / 1.574 | 1.062 / 1.481 / 1.903 |
-| 8 | 0.998 | 1.427 / 1.930 / 2.063 | 1.568 / 2.007 / 2.182 |
-| 16 | 0.998 | 2.456 / 3.583 / 4.716 | 2.372 / 3.029 / 3.660 |
-| 32 | 0.998 | 3.835 / 4.627 / 4.829 | 4.015 / 4.824 / 5.167 |
-| 64 | 0.998 | 6.537 / 7.321 / 7.791 | 7.120 / 7.684 / 8.491 |
+| 1 | 0.792 | 0.619 / 0.982 / 1.183 | 0.716 / 1.044 / 1.127 |
+| **2** | **0.953** | **0.674 / 1.055 / 1.159** | **0.777 / 1.252 / 1.428** |
+| 4 | 0.996 | 0.997 / 1.559 / 1.776 | 1.042 / 1.464 / 1.641 |
+| 8 | 0.998 | 1.527 / 2.149 / 2.313 | 1.548 / 2.046 / 2.130 |
+| 16 | 0.998 | 2.149 / 3.032 / 3.178 | 2.340 / 3.013 / 3.120 |
+| 32 | 0.998 | 3.723 / 4.357 / 4.682 | 3.846 / 4.544 / 4.787 |
+| 64 | 0.998 | 6.318 / 7.062 / 7.403 | 6.416 / 7.282 / 7.998 |
 
 Turbofish index: IVF, `nlist=64` (server default for this build), f16 vector
 storage, one global IVF base after `POST /compact`.
@@ -83,19 +99,19 @@ storage, one global IVF base after `POST /compact`.
 
 | hnsw_ef | recall@10 | p50 / p95 / p99 (ms) |
 | ---: | ---: | ---: |
-| 16 | 0.589 | 1.958 / 2.271 / 3.461 |
-| 24 | 0.706 | 1.996 / 2.427 / 2.586 |
-| 32 | 0.796 | 2.025 / 2.274 / 2.492 |
-| 48 | 0.886 | 2.074 / 2.328 / 2.405 |
-| 64 | 0.934 | 2.102 / 2.362 / 2.489 |
-| **80** | **0.960** | **2.197 / 2.589 / 2.727** |
-| 96 | 0.971 | 2.150 / 2.730 / 2.989 |
-| 128 | 0.986 | 2.256 / 2.563 / 2.694 |
-| 160 | 0.992 | 2.269 / 2.664 / 2.800 |
-| 192 | 0.995 | 2.286 / 2.499 / 2.515 |
-| 224 | 0.997 | 2.328 / 2.657 / 2.799 |
-| 256 | 0.999 | 2.292 / 2.684 / 2.873 |
-| 384 | 0.999 | 2.376 / 2.783 / 2.920 |
+| 16 | 0.614 | 1.842 / 2.059 / 2.354 |
+| 24 | 0.705 | 1.867 / 2.115 / 2.372 |
+| 32 | 0.781 | 1.886 / 2.145 / 2.217 |
+| 48 | 0.870 | 1.959 / 2.383 / 2.911 |
+| 64 | 0.912 | 2.146 / 2.625 / 3.736 |
+| **80** | **0.944** | **2.090 / 2.540 / 2.742** |
+| 96 | 0.962 | 2.057 / 2.374 / 2.632 |
+| 128 | 0.974 | 2.098 / 2.299 / 2.379 |
+| 160 | 0.982 | 2.118 / 2.387 / 2.589 |
+| 192 | 0.984 | 2.127 / 2.414 / 4.510 |
+| 224 | 0.986 | 2.078 / 2.342 / 2.561 |
+| 256 | 0.989 | 2.201 / 2.429 / 2.900 |
+| 384 | 0.989 | 2.258 / 2.527 / 2.784 |
 
 Collection was created with `indexing_threshold=1` (kB) and
 `default_segment_number=1`; ingestion then waited until
@@ -103,22 +119,21 @@ Collection was created with `indexing_threshold=1` (kB) and
 (`50000/50000`, 2 segments, `green`). `indexing_threshold=0` is *not* "index
 everything": Qdrant documents it as disabling vector indexing, and a discarded
 run confirmed recall 1.000 with plain scans. The server-default 10,000 kB
-threshold (the value recorded in the run-2 collection config) left a ~4.6 MB /
-9,000-vector segment brute-forced at this scale; that configuration was also
-discarded.
+threshold left a ~9,000-vector segment brute-forced at this scale; that
+configuration was also discarded.
 
 ### Chosen operating point
 
 | Engine | Parameter | Tuning recall | Tuning p50 | Warm recall (400 q × 3) |
 | --- | ---: | ---: | ---: | ---: |
-| Turbofish direct | nprobe=2 | 0.953 | 0.722 ms | **0.9447** |
-| Turbofish toxiproxy | nprobe=2 | 0.953 | 0.742 ms | **0.9447** |
-| Qdrant | hnsw_ef=80 | 0.960 | 2.197 ms | **0.9365** |
+| Turbofish direct | nprobe=2 | 0.953 | 0.674 ms | **0.9447** |
+| Turbofish toxiproxy | nprobe=2 | 0.953 | 0.777 ms | **0.9447** |
+| Qdrant | hnsw_ef=80 | 0.944 | 2.090 ms | **0.9467** |
 
-The operating point is close but not exact: Turbofish's measured recall is
-0.82 percentage points higher than Qdrant's. With 400 queries the binomial
+The operating point is close but not exact: Qdrant's measured recall is
+0.2 percentage points higher than Turbofish's. With 400 queries the binomial
 standard error on each recall estimate is roughly 1.1 pp, so this difference is
-within sampling noise; the comparison is "at approximately equal recall",
+far inside sampling noise; the comparison is "at approximately equal recall",
 not a mathematically exact iso-recall pair.
 
 ## 4. Warm latency and throughput
@@ -130,27 +145,26 @@ single-threaded, concurrency 1.
 
 | Engine | rep | recall@10 | p50 ms | p95 ms | p99 ms | qps |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Turbofish direct | 1 | 0.9447 | 0.716 | 1.136 | 1.420 | 1102.3 |
-| | 2 | 0.9447 | 0.729 | 1.147 | 1.339 | 1090.6 |
-| | 3 | 0.9447 | 0.709 | 1.128 | 1.256 | 1136.3 |
-| | mean | 0.9447 | **0.718** | **1.137** | **1.338** | **1109.7** |
-| Turbofish toxiproxy | 1 | 0.9447 | 0.785 | 1.253 | 1.656 | 1006.5 |
-| | 2 | 0.9447 | 0.735 | 1.147 | 1.306 | 1086.5 |
-| | 3 | 0.9447 | 0.748 | 1.154 | 1.311 | 1071.7 |
-| | mean | 0.9447 | **0.756** | **1.185** | **1.424** | **1054.9** |
-| Qdrant | 1 | 0.9365 | 2.010 | 2.420 | 3.592 | 475.4 |
-| | 2 | 0.9365 | 1.960 | 2.623 | 4.169 | 468.5 |
-| | 3 | 0.9365 | 2.172 | 2.468 | 2.861 | 447.1 |
-| | mean | 0.9365 | **2.047** | **2.504** | **3.541** | **463.7** |
+| Turbofish direct | 1 | 0.9447 | 0.681 | 1.177 | 1.404 | 1161.1 |
+| | 2 | 0.9447 | 0.647 | 1.090 | 1.338 | 1231.6 |
+| | 3 | 0.9447 | 0.652 | 1.096 | 1.274 | 1222.1 |
+| | mean | 0.9447 | **0.660** | **1.121** | **1.338** | **1204.9** |
+| Turbofish toxiproxy | 1 | 0.9447 | 0.709 | 1.196 | 1.597 | 1103.2 |
+| | 2 | 0.9447 | 0.660 | 1.086 | 1.264 | 1198.4 |
+| | 3 | 0.9447 | 0.673 | 1.101 | 1.383 | 1144.2 |
+| | mean | 0.9447 | **0.681** | **1.128** | **1.415** | **1148.6** |
+| Qdrant | 1 | 0.9467 | 2.001 | 2.300 | 3.106 | 452.3 |
+| | 2 | 0.9467 | 2.009 | 2.305 | 2.465 | 483.0 |
+| | 3 | 0.9467 | 2.017 | 2.282 | 2.589 | 483.0 |
+| | mean | 0.9467 | **2.009** | **2.296** | **2.720** | **472.8** |
 
 Means in this table are arithmetic means of the three per-repetition
 statistics; percentiles are not pooled across repetitions (the JSON keeps each
 repetition separately under `warm` and their spread under `warm_pooled`).
 
-At this operating point the Turbofish p50 is ~2.85× lower than Qdrant's
-(0.718 vs 2.047 ms) and serial throughput ~2.39× higher (1110 vs 464 qps),
-at 0.8 pp higher measured recall. p99 is noisier: Qdrant's per-repetition p99 ranged 2.9–4.2 ms,
-while Turbofish's stayed at 1.3–1.4 ms (direct and toxiproxy).
+At this operating point the Turbofish p50 is ~3.0× lower than Qdrant's
+(0.660 vs 2.009 ms) and serial throughput ~2.55× higher (1205 vs 473 qps), at
+0.2 pp lower measured recall (inside sampling noise).
 
 **Warm requests to MinIO were zero.** In the traced warm window (100 queries
 after warm-up) both Turbofish endpoints issued **0 S3 requests** and read 0
@@ -167,9 +181,9 @@ batch, health wait, then `POST /compact` and a second health wait. Qdrant:
 
 | Engine | write time | write docs/s | batch p50 / p95 (ms) | indexing/compaction | total write+index |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Qdrant | 3.180 s | 15,724.9 | 50.72 / 62.23 | 15.063 s index wait | 18.243 s |
-| Turbofish direct MinIO | 55.789 s | 896.2 | 696.49 / 2659.51 | 1.847 s compact | 57.636 s |
-| Turbofish toxiproxy | 659.822 s | 75.8 | 8938.87 / 42101.25 | 33.277 s compact (+2.918 s health) | 696.017 s |
+| Qdrant | 4.038 s | 12,383.0 | 62.33 / 93.15 | 14.067 s index wait | 18.105 s |
+| Turbofish direct MinIO | 53.088 s | 941.8 | 688.47 / 2164.03 | 1.706 s compact | 54.794 s |
+| Turbofish toxiproxy | 417.656 s | 119.7 | 4366.37 / 34044.46 | 23.063 s compact (+1.422 s health) | 442.141 s |
 
 Turbofish's write times include the server's synchronous auto-compaction
 (delta chain threshold 8); the final `POST /compact` is reported separately.
@@ -177,45 +191,51 @@ Qdrant's HNSW build happens after writes and is reported as index wait. These
 are not identical work, so compare them as end-to-end ingest-to-searchable
 costs, not as "index build throughput".
 
-Turbofish's toxiproxy batch p95 of ~42 s is a direct consequence of the
-per-write S3 request fan-out at 50 ms downstream latency (a separate traced
-1000-row write issued 172 S3 requests); the direct MinIO path does the same
-requests without that latency.
+Turbofish's toxiproxy batch p95 of ~34 s is a direct consequence of the
+per-write S3 request fan-out at 50 ms downstream latency; the direct MinIO path
+does the same requests without that latency. The traced 1,000-doc ingest probe
+issued 92 S3 requests (84 `PutObject`, 5 `GetObject`, 3 `ListObjectsV2`), and
+took 0.91 s direct versus 5.76 s through toxiproxy.
 
 ## 6. Cold process (not cold object storage)
 
-Each repetition restarts the service and measures the first 20 queries with no
-burn-in. "Restart" means the process; OS page caches, MinIO's caches and
-toxiproxy buffers are **not** cleared. Qdrant is restarted gracefully with the
-same binary/cwd/storage and all pre-existing collections are verified present
-after restart; its collection is local disk/mmap.
+Each repetition restarts the query service and measures the first 20 queries
+with no burn-in. "Restart" means the process; OS page caches, MinIO's caches,
+toxiproxy buffers and the metadata service are **not** cleared. Qdrant is
+restarted gracefully with the same binary/cwd/storage and all pre-existing
+collections are verified present after restart; its collection is local
+disk/mmap.
 
 | Engine | rep | first query ms | p50 / p95 / p99 of 20 (ms) | recall@10 | process start→ready |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Turbofish direct | 1 | 575.2 | 0.90 / 30.05 / 466.19 | 0.945 | 0.104 s |
-| | 2 | 535.7 | 0.73 / 27.97 / 434.14 | 0.960 | 0.104 s |
-| | 3 | 562.7 | 0.82 / 29.34 / 456.01 | 0.955 | 0.104 s |
-| | mean | **557.9** | 0.82 / 29.12 / 452.11 | 0.953 | |
-| Turbofish toxiproxy | 1 | 22,945.4 | 0.96 / 1148.52 / 18586.04 | 0.945 | 0.104 s |
-| | 2 | 23,211.9 | 0.87 / 1161.73 / 18801.83 | 0.960 | 0.104 s |
-| | 3 | 23,199.5 | 0.92 / 1161.50 / 18791.92 | 0.955 | 0.104 s |
-| | mean | **23,118.9** | 0.92 / 1157.25 / 18726.60 | 0.953 | |
-| Qdrant | 1 | 17.2 | 5.39 / 8.83 / 15.49 | 0.910 | 0.41 s |
-| | 2 | 15.0 | 5.81 / 19.54 / 88.61 | 0.945 | 0.41 s |
-| | 3 | 11.8 | 4.91 / 9.02 / 11.21 | 0.905 | 0.41 s |
-| | mean | **14.6** | 5.37 / 12.46 / 38.44 | 0.920 | |
+| Turbofish direct | 1 | 39.6 | 7.42 / 14.91 / 34.64 | 0.945 | 0.103 s |
+| | 2 | 38.5 | 7.20 / 14.52 / 33.74 | 0.960 | 0.104 s |
+| | 3 | 36.9 | 6.13 / 21.55 / 33.85 | 0.955 | 0.102 s |
+| | mean | **38.3** | 6.92 / 16.99 / 34.07 | 0.953 | |
+| Turbofish toxiproxy | 1 | 175.2 | 120.60 / 155.98 / 171.39 | 0.945 | 0.103 s |
+| | 2 | 173.3 | 132.32 / 156.75 / 170.01 | 0.960 | 0.104 s |
+| | 3 | 191.3 | 137.93 / 157.71 / 191.24 | 0.955 | 0.104 s |
+| | mean | **180.0** | 130.28 / 156.81 / 175.34 | 0.953 | |
+| Qdrant | 1 | 11.5 | 4.87 / 7.88 / 10.40 | 0.955 | 0.41 s |
+| | 2 | 11.9 | 4.54 / 8.50 / 11.28 | 0.950 | 0.41 s |
+| | 3 | 14.1 | 4.82 / 7.89 / 12.92 | 0.940 | 0.41 s |
+| | mean | **12.5** | 4.74 / 8.09 / 11.64 | 0.948 | |
 
-The first query dominates the cold window. The runner's separate cold trace
-measured **422 S3 `GetObject` requests for the 20 queries, i.e. 21.1
-requests/query and 15.81 MB of response bytes** on both Turbofish endpoints.
-At 50 ms ±20 ms per request, that is ~23 s for the first query through
-toxiproxy versus ~0.56 s direct. The median of the remaining 19 queries is
-sub-millisecond because the server's worker caches have been repopulated.
+The first query still dominates: the runner's separate cold trace measured
+**31 S3 `GetObject` requests in the whole 20-query window** on both Turbofish
+endpoints (1.55/query average, 7.44 MB of response bytes). These are data
+shards; the metadata reads are local HTTP to `metad`. All 31 requests occurred
+inside the first ~160 ms of the traced window, and the median of the remaining
+queries is sub-millisecond because their probed parts are now resident.
+
+That is the visible result of the architecture change. The previous run had
+422 S3 GETs / 21.1 per query and a 23.1 s toxiproxy first query. This run has
+31 S3 GETs / 1.55 per query, a 38 ms direct first query and a 180 ms toxiproxy
+first query. The remaining gap to Qdrant's 12.5 ms is object-storage/data-shard
+latency plus process startup, not metadata lookup.
 
 Qdrant's `restart_seconds` (0.41 s) is only launch→`/readyz`; collection load
-happens lazily and is captured by its first-query latency (11.8–17.2 ms). The
-Qdrant cold window also has a ~5 ms p50, higher than its warm 2.05 ms, because
-the 20-query window overlaps lazy collection/index loading.
+happens lazily and is captured by its first-query latency (11.5–14.1 ms).
 
 ## 7. Storage and memory
 
@@ -226,7 +246,7 @@ much larger because Qdrant preallocates sparse mmap/WAL files.
 
 | Store | bytes | objects | bytes/doc |
 | --- | ---: | ---: | ---: |
-| Turbofish + MinIO, direct ingest | 282,259,370 | 3,828 | 5,645.2 |
+| Turbofish + MinIO, direct ingest | 282,254,748 | 3,828 | 5,645.1 |
 | Turbofish + MinIO, toxiproxy ingest | 310,113,227 | 3,830 | 6,202.3 |
 | Qdrant collection | 72,011,776 | — | 1,440.2 |
 
@@ -234,40 +254,31 @@ For context only (not a correction of the measured numbers): the raw vector
 payload is 12.8 MB at f16 (50k×128×2 B) or 25.6 MB at f32. Turbofish stores f16
 vectors plus FTS/attribute columns; Qdrant stores f32 vectors plus payload.
 
-**Post-run storage (same command, after cold window):**
-`mc du --json local/<bucket>` gives 283,206,811 B / 3,910 objects (direct) and
-311,060,675 B / 3,912 objects (toxiproxy); Qdrant is 72,007,680 B. The
-Turbofish buckets grew by ~0.95 MB and 82 objects *after* the snapshot because
-background merge-tree compaction continued to write new part objects while the
-cold windows ran. This is real billed object storage, not a measurement
-artifact.
+**Post-run storage (same command, after cold window):** direct
+283,202,189 B / 3,910 objects, toxiproxy 311,060,668 B / 3,912 objects, Qdrant
+72,007,680 B. The Turbofish buckets grew by ~0.95 MB and 82 objects *after* the
+snapshot because background merge-tree compaction continued to write new part
+objects while the cold windows ran. This is real billed object storage, not a
+measurement artifact.
 
-**Object breakdown of the direct bucket at post-run** (manual
-`mc ls --recursive --json`, summed by prefix):
-
-| Prefix | bytes | objects | share |
-| --- | ---: | ---: | ---: |
-| `perf/_parts/` (merge-tree base parts) | 210,148,695 | 63 | 74.2% |
-| `perf/` other (segments, global IVF, manifests) | 72,686,816 | 3,766 | 25.7% |
-| ingest-probe namespace (1,000 docs) | 371,300 | 81 | 0.1% |
-
-63 retained merge-tree base parts account for almost three quarters of the
-Turbofish bucket. Superseded compaction outputs are not garbage-collected in
-object storage here, so 5.6 KB/doc is **not** the logical vector/index size; it
-is the cumulative object bytes of this write/compaction history. A fair
-"steady-state" storage claim would need a retention/GC policy that this
-version does not apply automatically. Qdrant's 72 MB conversely includes
-payload storage and sparse preallocation, so neither side is a pure vector-byte
-comparison.
+Retained merge-tree base parts are the main reason the Turbofish bucket is
+larger than the vector payload. Superseded compaction outputs are not
+garbage-collected in object storage here, so 5.6 KB/doc is **not** the logical
+vector/index size; it is the cumulative object bytes of this write/compaction
+history. This run did not capture a per-prefix breakdown, so the split between
+parts and segment/index objects is not asserted here. A fair "steady-state"
+storage claim would need a retention/GC policy that this version does not apply
+automatically. Qdrant's 72 MB conversely includes payload storage and sparse
+preallocation, so neither side is a pure vector-byte comparison.
 
 **RSS** (`VmRSS` / peak `VmHWM` from `/proc/<pid>/status`, measured after warm):
 
 | Process | VmRSS | VmHWM |
 | --- | ---: | ---: |
-| Turbofish direct server | 47,520 kB | 47,520 kB |
-| Turbofish toxiproxy server | 46,712 kB | 46,712 kB |
-| Qdrant | 206,680 kB | 487,176 kB |
-| MinIO | 371,836 kB | 395,724 kB |
+| Turbofish direct server | 48,196 kB | 48,196 kB |
+| Turbofish toxiproxy server | 46,736 kB | 47,060 kB |
+| Qdrant | 206,380 kB | 339,916 kB |
+| MinIO | 374,828 kB | 415,632 kB |
 
 Qdrant's RSS includes the unrelated pre-existing `bench_100k` collection
 (121 MB on disk) because the service is shared; it is not attributable solely
@@ -278,49 +289,51 @@ and each had its own 4×64 MB worker-cache budget.
 
 Counted from real `mc admin trace --json local` events filtered to the run's
 bucket, never packet captures. Tracing windows are separate from the latency
-measurements because tracing adds overhead.
+measurements because tracing adds overhead. These counts are S3 only; local
+metadata-service HTTP requests are not in this table.
 
 | Window | Queries/docs | S3 requests | Requests/query | By API |
 | --- | ---: | ---: | ---: | --- |
 | Warm direct | 100 queries | 0 | 0.0 | — |
 | Warm toxiproxy | 100 queries | 0 | 0.0 | — |
-| Cold direct | 20 queries | 422 | 21.1 | GetObject ×422 |
-| Cold toxiproxy | 20 queries | 422 | 21.1 | GetObject ×422 |
-| Ingest probe (1,000 docs, one write) | 1,000 docs | 172 | 0.172/docs | GetObject ×85, PutObject ×84, ListObjectsV2 ×3 |
+| Cold direct | 20 queries | 31 | 1.55 | GetObject ×31 |
+| Cold toxiproxy | 20 queries | 31 | 1.55 | GetObject ×31 |
+| Ingest probe (1,000 docs, one write) | 1,000 docs | 92 | 0.092/docs | GetObject ×5, PutObject ×84, ListObjectsV2 ×3 |
 
 The 0-request warm result is the expected consequence of a fully cache-resident
-working set; it is reported rather than hidden. The ingest probe's traced
-elapsed time was 1.071 s direct versus 10.041 s toxiproxy for the same 172
-requests (separate namespace, not the timed 50k ingest).
+working set; it is reported rather than hidden. The cold window's 31 requests
+are all data shards fetched while the restarted process repopulates its worker
+caches.
 
 ## 9. What this run shows, and what it does not
 
 What it shows:
 
-* At approximately equal recall (~0.94–0.95), warm Turbofish queries were
-  ~2.7–2.9× faster at p50 and ~2.4× higher serial throughput than Qdrant on
-  this VM. Turbofish's recall was slightly higher, not lower.
+* Moving metadata to a long-lived local SSD service removes the cold-start
+  metadata fan-out: 422 S3 GETs → 31, 558 ms → 38 ms direct first query,
+  23.1 s → 180 ms through 50 ms ±20 ms toxiproxy.
+* At approximately equal recall (~0.945), warm Turbofish queries were ~3.0×
+  faster at p50 and ~2.55× higher serial throughput than Qdrant on this VM.
 * When Turbofish's working set is cache-resident, the MinIO/toxiproxy path
   disappears from query latency (0 S3 GETs; direct ≈ toxiproxy).
-* With empty process caches, the storage path dominates: 422 GETs over 50 ms
-  latencies produced a 23.1 s first query through toxiproxy versus 0.56 s
-  direct and 14.6 ms for local-disk Qdrant.
-* Ingest through toxiproxy is ~11.8× slower than direct MinIO by write
-  throughput (75.8 vs 896.2 docs/s; ~12.1× end-to-end including compaction)
-  and ~38× slower than Qdrant's write+index path here, driven by the S3
-  request fan-out per 1000-row write (172 traced requests) and 50 ms
-  per-response latency.
+* Qdrant still wins the cold-process window (12.5 ms vs 38.3 ms direct and
+  180.0 ms toxiproxy) because it serves from local disk/mmap and has no
+  object-storage hop.
+* Ingest through toxiproxy is ~7.9× slower than direct MinIO by write
+  throughput (119.7 vs 941.8 docs/s; ~8.1× end-to-end including compaction)
+  and ~24× slower than Qdrant's write+index path here, driven by the S3 request
+  fan-out per 1000-row write and 50 ms per-response latency.
 * The Turbofish bucket is ~3.9–4.3× Qdrant's allocated bytes for this dataset,
-  mostly because of retained merge-tree base parts (74% of the bucket).
+  mostly because of retained merge-tree base parts.
 
 What it does not show:
 
 * It is not a hybrid/BM25 comparison. Qdrant has no BM25 here; only vector
   queries were measured.
 * It is not "object storage is faster than local disk" or vice versa. Warm
-  Turbofish was effectively in-memory; cold Turbofish was dominated by
-  network/storage latency. The honest statement is that warm CPU-side search
-  was fast and the cold storage path was expensive.
+  Turbofish was effectively in-memory; cold Turbofish paid object-storage
+  latency. The honest statement is that warm CPU-side search was fast and the
+  cold data-shard path still costs tens to hundreds of milliseconds.
 * It is not a statement about steady-state Turbofish storage size without a
   compaction/GC policy; the bucket contains retained compacted generations.
 * It is not a concurrency or saturation benchmark: concurrency was 1 and the
@@ -328,8 +341,8 @@ What it does not show:
 
 ## 10. Run history and discarded configurations
 
-Four full 50k runs were made while validating the harness; the reported file is
-run 4. The earlier runs are summarized for transparency, not as evidence:
+Earlier 50k runs validated the harness and are summarized for transparency, not
+as evidence:
 
 * **Run 2** used Qdrant's default optimiser settings. It indexed 41,000/50,000
   vectors and left a 9,000-vector segment brute-forced. Warm: Turbofish
@@ -337,16 +350,18 @@ run 4. The earlier runs are summarized for transparency, not as evidence:
   Turbofish direct 739 docs/s, toxiproxy 77.6 docs/s. Storage: 282.3/310.1 MB
   vs Qdrant 71.5 MB. Its Qdrant cold window had only one successful restart
   because of a harness bug (an unreaped Qdrant child looked alive); that bug
-  was fixed before run 4.
+  was fixed before the next run.
 * **Run 3** set `indexing_threshold=0`, which Qdrant defines as *disabling*
   vector indexing. It reported recall 1.000 and ~3.9 ms p50 for Qdrant because
   the collection was fully scanned; it is not an iso-recall comparison and was
   discarded.
-* **Run 4** (reported here) uses `indexing_threshold=1` +
-  `default_segment_number=1` and waits for all 50,000 vectors to be HNSW
-  indexed.
+* **Run 4** (the previous reported run) used `indexing_threshold=1` +
+  `default_segment_number=1`, but still read metadata from S3. Its cold window
+  was the 422-GET / 23.1 s result that motivated `cmd/metad`.
+* **Run 5** (reported here) keeps the same Qdrant configuration and adds the
+  local metadata service.
 
-Warm Turbofish results are stable across these runs (p50 0.66–0.78 ms at
+Warm Turbofish results are stable across these runs (p50 0.65–0.78 ms at
 nprobe=2), which is reassuring; Qdrant numbers moved with its index
 configuration, as expected.
 
@@ -358,10 +373,11 @@ configuration, as expected.
 2. **Warm caches hide storage cost.** The 50k working set fits in Turbofish's
    4×64 MB worker caches. A larger dataset would produce warm S3 reads and
    different warm latency. No cache-size sweep was done.
-3. **Cold is cold-process, not cold-storage.** OS page cache and MinIO's caches
-   were warm; dropping caches needs root and would disturb other tenants. The
-   cold numbers are a lower bound for a truly cold object store and are not
-   directly comparable to Qdrant's local-disk cold start.
+3. **Cold is cold-process, not cold-storage.** OS page cache, MinIO's caches
+   and the metadata service were warm; dropping caches needs root and would
+   disturb other tenants. The cold numbers are a lower bound for a truly cold
+   object store and are not directly comparable to Qdrant's local-disk cold
+   start.
 4. **Storage/media asymmetry.** Qdrant uses local disk/mmap; Turbofish uses
    MinIO over a 50 ms ±20 ms proxy (no bandwidth limit). This is the intended
    contrast, but it means "latency" results are not same-medium.
@@ -369,28 +385,29 @@ configuration, as expected.
    via qdrant-client; Turbofish over HTTP JSON with `http.client`. A gRPC
    Qdrant client or a lower-overhead client could lower Qdrant's ~2 ms p50.
    Both clients ran on the same client CPU.
-6. **Recall is approximate iso-recall.** Turbofish 0.9447 vs Qdrant 0.9365.
-   The 0.8 pp gap is within the ~1.1 pp sampling error of 400 queries.
-   Qdrant's recall at a fixed `ef` also depends on the index build/configuration:
-   `ef=64` gave tuning recall 0.932 in run 2 (41k vectors indexed, 9k
-   brute-forced) and 0.934 in the final run (all 50k HNSW-indexed). Exact
-   recall equivalence would need repeated builds and/or interpolation between
-   `ef` points.
+6. **Recall is approximate iso-recall.** Turbofish 0.9447 vs Qdrant 0.9467.
+   The 0.2 pp gap is far inside the ~1.1 pp sampling error of 400 queries.
+   Qdrant's recall at a fixed `ef` also depends on the index build/configuration.
+   Exact recall equivalence would need repeated builds and/or interpolation
+   between `ef` points.
 7. **Qdrant is a shared service.** Restarting it reloads `bench_100k`
    (121 MB) and other collections; Qdrant cold numbers include unrelated work,
    and its RSS includes those collections.
-8. **Indexing work is different.** Qdrant builds HNSW after writes (15.1 s
+8. **Indexing work is different.** Qdrant builds HNSW after writes (14.1 s
    wait here); Turbofish compacts inside the write path and with a final
-   `POST /compact` (1.8 s direct, 33.3 s toxiproxy). Ingest numbers are
+   `POST /compact` (1.7 s direct, 23.1 s toxiproxy). Ingest numbers are
    end-to-end costs, not equal units of index work.
 9. **Storage snapshot timing.** Turbofish background compaction kept writing
    after the snapshot (+0.95 MB / +82 objects during cold). The reported
    storage bytes are for the defined snapshot; post-run values are also given.
-10. **Tail noise.** p99 has few samples and occasional outliers (Qdrant's
-    per-rep warm p99 ranged 2.9–4.2 ms here). Medians and the per-rep spread
-    are more stable than single p99 digits.
+10. **Tail noise.** p99 has few samples and occasional outliers. Medians and
+    the per-rep spread are more stable than single p99 digits.
 11. **No concurrency sweep, no filters, no hybrid, one VM.** Serial throughput
     is not a saturation number, and hybrid/BM25 behavior is out of scope.
+12. **Metadata service durability is out of scope.** `metad` is a local
+    SSD-backed cache/service populated on write; S3 remains the durable source
+    of truth. Losing the metadata directory degrades to S3 reads, not data
+    loss. Multi-node sharing/failover was not tested.
 
 ## 12. Reproduce
 
@@ -398,7 +415,7 @@ Inside the benchmark VM:
 
 ```bash
 export PATH="$HOME/.moon/bin:$PATH"
-bash ~/turbofish-perf/perf/box_bootstrap.sh          # pinned clone + release build
+bash ~/turbofish-perf/perf/box_bootstrap.sh          # pinned clone + release builds
 cd ~/turbofish-perf
 python3 perf/run_compare.py \
   --docs 50000 --dim 128 --queries 400 --reps 3 \
@@ -412,8 +429,14 @@ cd ~/turbofish-perf
 python3 perf/run_compare.py --docs 50000 --queries 400 --reps 3 --keep-data
 ```
 
+`run_compare.py` starts `cmd/metad` automatically on `127.0.0.1:8090` with a
+run-specific `SPND_META_DIR`, and passes `SPND_META_URL` plus a per-bucket
+`SPND_META_PREFIX` to both Turbofish servers. The metadata service stays up for
+the cold window. Use `--metad-url` to reuse an already-running service, or
+`--metad-bin` to point at a different binary.
+
 All other values were defaults documented in `perf/README.md`. The JSON path is
-`perf/results/compare-20261115T093654Z-31288.json`; the harness printed
+`perf/results/compare-20261115T101916Z-33642.json`; the harness printed
 `"errors": []`. Manual commands used for the supplementary numbers:
 
 ```bash

@@ -331,7 +331,7 @@ fn DocGen::new(
 ) -> DocGen {
   let rng = @core.Rng::new(seed)
   // 中心先于 doc 生成 ⇒ 中心只由 (seed, dim, n_clusters) 决定，跨批稳定。
-  let centers : Array[Float] = Array::new(capacity=n_clusters * dim)
+  let centers : Array[Float] = Array(capacity=n_clusters * dim)
   for _c in 0..<n_clusters {
     for _d in 0..<dim {
       centers.push(Float::from_double(rng.next_range(-1.0, 1.0)))
@@ -355,7 +355,7 @@ fn DocGen::new(
 
 ///|
 fn DocGen::next_batch(self : DocGen, n : Int) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for _ in 0..<n {
     let i = self.next_index
     self.next_index += 1
@@ -364,7 +364,7 @@ fn DocGen::next_batch(self : DocGen, n : Int) -> Array[@core.Doc] {
     let cluster = ((i.to_int64() * 2654435761L) %
       self.n_clusters.to_int64()).to_int()
     let base = cluster * self.dim
-    let v : Array[Float] = Array::new(capacity=self.dim)
+    let v : Array[Float] = Array(capacity=self.dim)
     for d in 0..<self.dim {
       let x = self.centers[base + d].to_double() +
         self.rng.next_range(-self.noise, self.noise)
@@ -405,15 +405,15 @@ fn collect_queries(
   gen : DocGen,
   qnoise : Double,
 ) -> (Array[String], Array[Array[Float]]) {
-  let bm : Array[String] = Array::new(capacity=nq * 2)
-  let vecs : Array[Array[Float]] = Array::new(capacity=nq * 2)
+  let bm : Array[String] = Array(capacity=nq * 2)
+  let vecs : Array[Array[Float]] = Array(capacity=nq * 2)
   let n = docs.length()
   for i in 0..<(nq * 2) {
     let d = docs[(i * 37 + 11) % n]
     let toks = @core.tokenize(d.text)
     bm.push(if toks.is_empty() { "alpha" } else { toks[0] })
     if qnoise > 0.0 {
-      let v : Array[Float] = Array::new(capacity=gen.dim)
+      let v : Array[Float] = Array(capacity=gen.dim)
       for x in d.vector {
         v.push(Float::from_double(
           x.to_double() + gen.rng.next_range(-qnoise, qnoise),
@@ -575,11 +575,11 @@ fn measure(
     }
   }
   store.inner.reset_cost()
-  let lat : Array[Double] = Array::new(capacity=n)
-  let gets : Array[Int] = Array::new(capacity=n)
-  let lists : Array[Int] = Array::new(capacity=n)
-  let s3b : Array[Int] = Array::new(capacity=n)
-  let logical : Array[Int] = Array::new(capacity=n)
+  let lat : Array[Double] = Array(capacity=n)
+  let gets : Array[Int] = Array(capacity=n)
+  let lists : Array[Int] = Array(capacity=n)
+  let s3b : Array[Int] = Array(capacity=n)
+  let logical : Array[Int] = Array(capacity=n)
   let mut errs = 0
   let mut prev_lat = 0.0
   let mut prev_gets = 0
@@ -676,7 +676,7 @@ fn manifest_line(store : CountingStore, ns : String) -> String {
   let key = "\{ns}/_manifest/\{head}.json"
   let body = match store.get(key) {
     Some(bs) =>
-      @utf8.decode(bs.view()) catch {
+      @utf8.decode(bs.exact_view()) catch {
         _ => return "head=\{head}: manifest is not utf8 (key exists)"
       }
     None => return "head=\{head}: manifest key MISSING (\{key})"
@@ -807,8 +807,8 @@ fn exact_top10(
   }
   qn = qn.sqrt()
   // 10 槽 (score, id) 最小堆语义用有序数组近似：score 升序，[0] 为当前最差。
-  let top_s : Array[Double] = Array::new(capacity=10)
-  let top_i : Array[Int] = Array::new(capacity=10)
+  let top_s : Array[Double] = Array(capacity=10)
+  let top_i : Array[Int] = Array(capacity=10)
   for j in 0..<n {
     let base = j * dim
     let mut dot = 0.0
@@ -877,7 +877,7 @@ fn run_recall(
 ) -> Unit raise @core.SpndError {
   let gt_nprobe = nlist
   let probes = recall_probe_list(nprobe_cfg, nlist)
-  let gts : Array[Set[UInt64]] = Array::new(capacity=nq)
+  let gts : Array[Set[UInt64]] = Array(capacity=nq)
   let mut gt_min = 10
   if exact_gt {
     for i in 0..<nq {
@@ -909,7 +909,7 @@ fn run_recall(
   // 候选查询与 GT 共享同一个 Namespace 快照（exact 模式下 GT 不走索引，
   // 但候选仍走索引，因此这里统一 open）。
   let n = @query.open(store, ns)
-  let rows : Array[RecallRow] = Array::new(capacity=probes.length())
+  let rows : Array[RecallRow] = Array(capacity=probes.length())
   for np in probes {
     let mut hits = 0
     for i in 0..<nq {
@@ -1025,12 +1025,12 @@ fn run() -> Unit raise @core.SpndError {
   let store = CountingStore::new(seed.reinterpret_as_uint())
   store.inner.require_latency()
   let gen = DocGen::new(seed.reinterpret_as_uint(), dim, n_clusters, noise)
-  let stats : Array[BatchStat] = Array::new(capacity=batches)
-  let bm25_qs : Array[String] = Array::new()
-  let vec_qvs : Array[Array[Float]] = Array::new()
+  let stats : Array[BatchStat] = Array(capacity=batches)
+  let bm25_qs : Array[String] = Array()
+  let vec_qvs : Array[Array[Float]] = Array()
   // 精确 GT 的工作集（BENCH_EXACT_GT=1 才填充）：全量 id + 原始 f32 向量。
-  let gt_ids : Array[UInt64] = Array::new(capacity=docs_n)
-  let gt_vecs : Array[Float] = Array::new(capacity=docs_n * dim)
+  let gt_ids : Array[UInt64] = Array(capacity=docs_n)
+  let gt_vecs : Array[Float] = Array(capacity=docs_n * dim)
   let mut docs_done = 0
   let mut put_bytes_total = 0
   let mut puts_total = 0
@@ -1152,8 +1152,8 @@ fn run() -> Unit raise @core.SpndError {
     "== query tiers (\{nq} queries/class；样本取自 batch0；$1M=S3 请求费，tpuF=$1/PB 最低 1.28GB) ==",
   )
   print_query_header()
-  let cells : Array[Cell] = Array::new(capacity=4)
-  let ctrl_rows : Array[CtrlRow] = Array::new(capacity=4)
+  let cells : Array[Cell] = Array(capacity=4)
+  let ctrl_rows : Array[CtrlRow] = Array(capacity=4)
   for cold_meta in [true, false] {
     let burn = if cold_meta { 0 } else { nq }
     for cls in ["bm25", "vec"] {
@@ -1337,3 +1337,7 @@ fn main {
     e => println("bench1m failed: \{err_msg(e)}")
   }
 }
+
+
+
+extend CountingStore with @turbofish/store.ObjectStore::{get, list}

@@ -101,9 +101,9 @@ fn make_docs(n : Int, dim : Int) -> Array[@core.Doc] {
     "search", "vector", "object", "storage", "latency", "cost", "查询", "向量",
     "存储", "延迟", "成本",
   ]
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for _ in 0..<dim {
       v.push(Float::from_double(rng.next_range(-1.0, 1.0)))
     }
@@ -129,13 +129,15 @@ fn make_docs(n : Int, dim : Int) -> Array[@core.Doc] {
 }
 
 ///|
+#derive(Eq)
 enum Tier {
   TColdProcess
   TColdMetadata
   TWarmTouched
   THot
   TAllHot
-} derive(Eq)
+}
+
 
 ///|
 fn tier_label(t : Tier) -> String {
@@ -231,13 +233,13 @@ fn measure_tier(
     }
   }
   store.reset_cost()
-  let lat : Array[Double] = Array::new(capacity=n)
-  let gets : Array[Int] = Array::new(capacity=n)
-  let lists : Array[Int] = Array::new(capacity=n)
-  let s3b : Array[Int] = Array::new(capacity=n)
-  let nvb : Array[Int] = Array::new(capacity=n)
-  let logical : Array[Int] = Array::new(capacity=n)
-  let hits : Array[Int] = Array::new(capacity=n)
+  let lat : Array[Double] = Array(capacity=n)
+  let gets : Array[Int] = Array(capacity=n)
+  let lists : Array[Int] = Array(capacity=n)
+  let s3b : Array[Int] = Array(capacity=n)
+  let nvb : Array[Int] = Array(capacity=n)
+  let logical : Array[Int] = Array(capacity=n)
+  let hits : Array[Int] = Array(capacity=n)
   let mut prev_lat = 0.0
   let mut prev_gets = 0
   let mut prev_lists = 0
@@ -345,8 +347,8 @@ fn main_impl() -> Unit raise @core.SpndError {
     "  延迟=SimStore 虚拟时钟（S3 GET 30ms p50 + 100MB/s；非墙钟）；$/1M=S3 请求费；tpuF=逐查询 $1/PB 最低 1.28GB。",
   )
   let docs = make_docs(n, dim)
-  let bm25_qs : Array[String] = Array::new()
-  let vec_qvs : Array[Array[Float]] = Array::new()
+  let bm25_qs : Array[String] = Array()
+  let vec_qvs : Array[Array[Float]] = Array()
   for i in 0..<(samples * 2) {
     bm25_qs.push(@core.tokenize(docs[(i * 17) % n].text)[0])
     vec_qvs.push(docs[(i * 31) % n].vector)

@@ -14,7 +14,7 @@ pub struct CachedManifestStore[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] CachedManifestStore::new(
+pub fn[S] CachedManifestStore::new(
   inner : ObjManifestStore[S],
   ttl_ms~ : Int64 = 2000L,
   is_writer~ : Bool = true
@@ -47,7 +47,7 @@ pub fn[S] CachedManifestStore::invalidate(
 }
 
 ///|
-impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with load(
+pub impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with load(
   self
 ) -> Manifest raise @core.SpndError {
   // 1. Writer 节点或租约有效窗口内：零 S3 GET 直接返回
@@ -62,7 +62,7 @@ impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with load(
   let head_key = self.inner.head_ptr_key()
   let head_val = match self.inner.store.get(head_key) {
     Some(bs) =>
-      @utf8.decode(bs.view()) catch {
+      @utf8.decode(bs.exact_view()) catch {
         _ => raise @core.Corrupt("invalid head_manifest pointer utf8 in cache")
       }
     None => ""
@@ -92,7 +92,7 @@ impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with load(
 }
 
 ///|
-impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with publish(
+pub impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with publish(
   self,
   m : Manifest
 ) -> Unit raise @core.SpndError {
@@ -101,3 +101,5 @@ impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S] with publi
   self.cached_head_ptr = Some("manifest-\{m.seq}")
   self.is_writer = true
 }
+
+pub extend CachedManifestStore with ManifestStore::{publish, load}

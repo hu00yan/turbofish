@@ -103,6 +103,7 @@ pub(all) struct SlabBuilder {
 pub fn SlabBuilder::add(Self, String, Bytes, Int32) -> Unit
 pub fn SlabBuilder::build(Self, index_at_end? : Bool) -> (Bytes, @format.SlabIndex)
 pub fn SlabBuilder::new() -> Self
+pub fn SlabBuilder::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum VecStorage {
@@ -110,6 +111,9 @@ pub(all) enum VecStorage {
   VSq8
   VPq16
 }
+pub fn VecStorage::equal(Self, Self) -> Bool
+pub fn VecStorage::not_equal(Self, Self) -> Bool
+pub fn VecStorage::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

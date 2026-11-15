@@ -327,7 +327,7 @@ fn NamespaceState::get_query_ns(
   let n = match self.query_ns {
     Some(existing) => {
       for seg in existing.manifest.segments {
-        if not(seg_cache.contains(seg.id)) {
+        if !(seg_cache.contains(seg.id)) {
           let _ = (load_segment_cache(store, ns, seg.id)) catch { _ => None }
         }
       }
@@ -377,7 +377,7 @@ fn NamespaceState::update_after_write(
     Some(bs) => bs
     None => return
   }
-  let j = (@json.parse(@utf8.decode(man_bs.view()))) catch {
+  let j = (@json.parse(@utf8.decode(man_bs.exact_view()))) catch {
     _ => return
   }
   let manifest = (@format.manifest_from_json(j)) catch {
@@ -386,7 +386,7 @@ fn NamespaceState::update_after_write(
   let meta = match self.meta {
     Some(m) => { ..m, head_manifest: new_head }
     None =>
-      match (try { ns_meta(store, ns) } catch { _ => None }) {
+      match ns_meta(store, ns) {
         Some(m) => {
           let updated_m = { ..m, head_manifest: new_head }
           self.meta = Some(updated_m)
@@ -451,7 +451,7 @@ fn NamespaceState::update_after_write(
   }
   let _ = (try { @query.warm_namespace(new_ns) } catch { _ => () })
   for seg in manifest.segments {
-    if not(seg_cache.contains(seg.id)) {
+    if !(seg_cache.contains(seg.id)) {
       let _ = (load_segment_cache(store, ns, seg.id)) catch { _ => None }
     }
   }
@@ -717,7 +717,7 @@ fn[T : @store.ObjectStore] lookup_doc_full(
                         }
                         for pi in 0..<part.rows.length() {
                           if part.rows[pi] == i {
-                            vec = Array::new(capacity=part.dim)
+                            vec = Array(capacity=part.dim)
                             let off = pi * part.dim
                             for vj in 0..<part.dim {
                               vec.push(part.data[off + vj])
@@ -750,7 +750,7 @@ fn[T : @store.ObjectStore] lookup_doc_full(
                             for gi in 0..<gp.rows.length() {
                               let (si, ri) = gp.rows[gi]
                               if si == s_idx && ri == i {
-                                vec = Array::new(capacity=gp.dim)
+                                vec = Array(capacity=gp.dim)
                                 let off = gi * gp.dim
                                 for vj in 0..<gp.dim {
                                   vec.push(gp.data[off + vj])
@@ -916,7 +916,7 @@ fn split_ns_path(path : String) -> (String, String)? {
 fn[T : @store.ObjectStore] ns_meta(
   store : T,
   ns : String,
-) -> @format.NamespaceMeta? raise @core.SpndError {
+) -> @format.NamespaceMeta? {
   match active_ns.get(ns) {
     Some(state) =>
       match state.meta {
@@ -927,7 +927,7 @@ fn[T : @store.ObjectStore] ns_meta(
   }
   match store.get("\{ns}/_meta/namespace.json") {
     Some(bs) => {
-      let j = @json.parse(@utf8.decode(bs.view())) catch {
+      let j = @json.parse(@utf8.decode(bs.exact_view())) catch {
         _ => return None
       }
       let m = (try {
@@ -956,7 +956,7 @@ struct WriteReq {
 
 ///|
 fn parse_row_vector(arr : Array[Json]) -> Array[Float] raise @core.SpndError {
-  let v : Array[Float] = Array::new(capacity=arr.length())
+  let v : Array[Float] = Array(capacity=arr.length())
   for x in arr {
     match x {
       Number(d, ..) => v.push(Float::from_double(d))
@@ -973,7 +973,7 @@ fn u64_from_json(j : Json) -> UInt64 raise @core.SpndError {
       if d < 0.0 || d >= 18446744073709551616.0 {
         raise @core.Corrupt("id out of uint64 range")
       }
-      d.to_int64().to_uint64()
+      d.to_int64().reinterpret_as_uint64()
     }
     _ => raise @core.Corrupt("id must be number")
   }
@@ -988,7 +988,7 @@ fn parse_write(body : String) -> WriteReq raise @core.SpndError {
     Object(mm) => mm
     _ => raise @core.Corrupt("body must be a JSON object")
   }
-  let docs : Array[@core.Doc] = Array::new()
+  let docs : Array[@core.Doc] = Array()
   let mut has_vector = false
   let mut has_no_vector = false
   match m.get("rows") {
@@ -1040,7 +1040,7 @@ fn parse_write(body : String) -> WriteReq raise @core.SpndError {
       "rows must be homogeneous: all rows need vector or none",
     )
   }
-  let deletes : Array[UInt64] = Array::new()
+  let deletes : Array[UInt64] = Array()
   match m.get("deletes") {
     Some(Array(a)) =>
       for x in a {
@@ -1112,7 +1112,7 @@ fn[T : @store.ObjectStore] cfg_for(
         Some(m) => m
         None => "cosine"
       }
-      if not(rows_have_vector) {
+      if !(rows_have_vector) {
         raise @core.Corrupt("first write of a namespace must include vector")
       }
       {
@@ -1157,7 +1157,7 @@ fn parse_filter_json(j : Json) -> @query.Filter raise @core.SpndError {
     if arr.length() != 2 {
       raise @core.Corrupt("\{head} takes exactly one array argument")
     }
-    let children : Array[@query.Filter] = Array::new()
+    let children : Array[@query.Filter] = Array()
     match arr[1] {
       Array(cs) =>
         if cs.is_empty() {
@@ -1219,7 +1219,7 @@ fn parse_filter_json(j : Json) -> @query.Filter raise @core.SpndError {
       @query.Glob(head, pattern)
     }
     "In" | "NotIn" => {
-      let vals : Array[@query.FVal] = Array::new()
+      let vals : Array[@query.FVal] = Array()
       match arr[2] {
         Array(vs) =>
           if vs.is_empty() {
@@ -1259,11 +1259,11 @@ fn parse_filter_json(j : Json) -> @query.Filter raise @core.SpndError {
 ///|
 /// 属性投影：include/exclude 作用于 text/category/ts/public（id/score 恒返回）。
 fn attr_wanted(
-  include : Array[String]?,
+  include_attrs : Array[String]?,
   exclude : Array[String]?,
   field : String,
 ) -> Bool {
-  match include {
+  match include_attrs {
     Some(list) => {
       let mut hit = false
       for x in list {
@@ -1284,7 +1284,7 @@ fn attr_wanted(
               break
             }
           }
-          not(hit)
+          !(hit)
         }
         None => true
       }
@@ -1355,7 +1355,7 @@ async fn handle_query(
   }
   // 聚合：["Count"] 或 [{"Sum": "field"}] 或 ["Sum", "field"] 组合
   let mut aggregate_count = false
-  let sum_fields : Array[String] = Array::new()
+  let sum_fields : Array[String] = Array()
   match m.get("aggregations") {
     Some(Array(aggs)) => {
       for a in aggs {
@@ -1416,7 +1416,7 @@ async fn handle_query(
   if aggregate_count && (text is Some(_) || qv is Some(_)) {
     raise @core.Corrupt("aggregations cannot be combined with text/vector")
   }
-  let do_aggregation = aggregate_count || not(sum_fields.is_empty())
+  let do_aggregation = aggregate_count || !(sum_fields.is_empty())
   // hybrid 参数（任一给出即走 hybrid_search_opts）
   let rank_constant : Double? = match m.get("rank_constant") {
     Some(Number(d, ..)) => Some(d)
@@ -1449,9 +1449,9 @@ async fn handle_query(
     Some(_) => raise @core.Corrupt("weights must be an object {bm25, vector}")
     None => ()
   }
-  let include : Array[String]? = match m.get("include_attributes") {
+  let include_attrs : Array[String]? = match m.get("include_attributes") {
     Some(Array(a)) => {
-      let l : Array[String] = Array::new()
+      let l : Array[String] = Array()
       for x in a {
         match x {
           String(s) => l.push(s)
@@ -1465,7 +1465,7 @@ async fn handle_query(
   }
   let exclude : Array[String]? = match m.get("exclude_attributes") {
     Some(Array(a)) => {
-      let l : Array[String] = Array::new()
+      let l : Array[String] = Array()
       for x in a {
         match x {
           String(s) => l.push(s)
@@ -1477,7 +1477,7 @@ async fn handle_query(
     Some(_) => raise @core.Corrupt("exclude_attributes must be an array")
     None => None
   }
-  if include is Some(_) && exclude is Some(_) {
+  if include_attrs is Some(_) && exclude is Some(_) {
     raise @core.Corrupt(
       "include_attributes and exclude_attributes are mutually exclusive",
     )
@@ -1501,7 +1501,7 @@ async fn handle_query(
     let out : Map[String, Json] = Map([])
     out.set("count", Json::number(cnt.to_double()))
     // Sum aggregations
-    if not(sum_fields.is_empty()) {
+    if !(sum_fields.is_empty()) {
       let agg_map : Map[String, Json] = Map([])
       for field in sum_fields {
         let s = @query.sum_field(n, field, filter)
@@ -1555,22 +1555,22 @@ async fn handle_query(
   } else {
     []
   }
-  let rows_json : Array[Json] = Array::new()
+  let rows_json : Array[Json] = Array()
   for r in rows {
     let attr = lookup_doc_attrs(store, ns, n, r.id)
     let row_map : Map[String, Json] = Map([])
     row_map.set("id", Json::number(r.id.to_double()))
     row_map.set("score", Json::number(r.score))
-    if attr_wanted(include, exclude, "text") {
+    if attr_wanted(include_attrs, exclude, "text") {
       row_map.set("text", Json::string(attr.text))
     }
-    if attr_wanted(include, exclude, "category") {
+    if attr_wanted(include_attrs, exclude, "category") {
       row_map.set("category", Json::string(attr.category))
     }
-    if attr_wanted(include, exclude, "ts") {
+    if attr_wanted(include_attrs, exclude, "ts") {
       row_map.set("ts", Json::number(attr.ts.to_double()))
     }
-    if attr_wanted(include, exclude, "public") {
+    if attr_wanted(include_attrs, exclude, "public") {
       row_map.set("public", Json::boolean(attr.public))
     }
     rows_json.push(Json::object(row_map))
@@ -1688,7 +1688,7 @@ fn parse_patch(body : String) -> Array[RowPatch] raise @core.SpndError {
     Some(Array(arr)) => arr
     _ => raise @core.Corrupt("missing patches array")
   }
-  let patches : Array[RowPatch] = Array::new()
+  let patches : Array[RowPatch] = Array()
   for p in patches_j {
     let pm = match p {
       Object(obj) => obj
@@ -1740,7 +1740,7 @@ fn patch_rows_core(
     return (0, head)
   }
   let n = state.get_query_ns(store, ns)
-  let updated_docs : Array[@core.Doc] = Array::new()
+  let updated_docs : Array[@core.Doc] = Array()
   for patch in patches {
     let existing = match lookup_doc_full(store, ns, n, patch.id) {
       Some(d) => d
@@ -2339,3 +2339,5 @@ async fn main {
     )
   })
 }
+
+pub extend AnyStore with @turbofish/store.ObjectStore::{get, list, put}

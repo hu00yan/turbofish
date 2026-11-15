@@ -34,9 +34,11 @@ pub fn[S : @store.ObjectStore] open(S, String) -> Namespace[S] raise @core.SpndE
 
 pub fn[S : @store.ObjectStore] open_cached(MetadataCache[S], S, String) -> Namespace[S] raise @core.SpndError
 
-pub fn[S : @store.ObjectStore] open_cached_or_create(MetadataCache[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
+pub fn[S] open_cached_or_create(MetadataCache[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
 
-pub fn[S : @store.ObjectStore] open_from_meta(S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
+pub fn[S] open_from_meta(S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
+
+pub fn pq_adc_candidates(Array[Float], @format.PQPart, Array[Float]) -> Array[(Int32, Double)]
 
 pub fn[S : @store.ObjectStore] sum_field(Namespace[S], String, Filter?) -> Double raise @core.SpndError
 
@@ -53,7 +55,7 @@ pub fn[S : @store.ObjectStore] warm_namespace(Namespace[S]) -> Unit raise @core.
 // Errors
 
 // Types and methods
-#derive(Show)
+#derive(@debug.Debug)
 pub(all) struct BitSet {
   size : Int32
   words : Array[UInt64]
@@ -68,6 +70,7 @@ pub fn BitSet::new(Int32) -> Self
 pub fn BitSet::not_inplace(Self) -> Unit
 pub fn BitSet::or_inplace(Self, Self) -> Unit
 pub fn BitSet::set(Self, Int32) -> Unit
+pub fn BitSet::to_repr(Self) -> @debug.Repr
 pub fn BitSet::to_rows(Self) -> Array[Int32]
 pub fn BitSet::unset(Self, Int32) -> Unit
 
@@ -152,13 +155,13 @@ pub(all) struct MetadataCache[S] {
   mut misses : Int32
   mut head_ttl_ms : UInt64
 }
-pub fn[S : @store.ObjectStore] MetadataCache::get(Self[S], String) -> Namespace[S]?
-pub fn[S : @store.ObjectStore] MetadataCache::invalidate(Self[S], String) -> Unit
-pub fn[S : @store.ObjectStore] MetadataCache::new() -> Self[S]
-pub fn[S : @store.ObjectStore] MetadataCache::put(Self[S], String, Namespace[S]) -> Unit
-pub fn[S : @store.ObjectStore] MetadataCache::set_head_ttl(Self[S], UInt64) -> Unit
-pub fn[S : @store.ObjectStore] MetadataCache::touch(Self[S], String) -> Unit
-pub fn[S : @store.ObjectStore] MetadataCache::update_in_memory(Self[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
+pub fn[S] MetadataCache::get(Self[S], String) -> Namespace[S]?
+pub fn[S] MetadataCache::invalidate(Self[S], String) -> Unit
+pub fn[S] MetadataCache::new() -> Self[S]
+pub fn[S] MetadataCache::put(Self[S], String, Namespace[S]) -> Unit
+pub fn[S] MetadataCache::set_head_ttl(Self[S], UInt64) -> Unit
+pub fn[S] MetadataCache::touch(Self[S], String) -> Unit
+pub fn[S] MetadataCache::update_in_memory(Self[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
 
 pub(all) struct Namespace[S] {
   store : S
@@ -180,6 +183,7 @@ pub(all) struct QueryResult {
   id : UInt64
   score : Double
 }
+pub fn QueryResult::to_repr(Self) -> @debug.Repr
 
 pub(all) enum RowMatcher {
   MStr(Array[String], String)
@@ -210,6 +214,7 @@ pub(all) struct SegStats {
   has_pub : Bool
   pub_values : Array[Bool]
 }
+pub fn SegStats::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

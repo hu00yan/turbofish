@@ -65,6 +65,7 @@ pub const COL_FLAG_DICT : Int = 1
 pub const COL_FLAG_BITMAP : Int = 2
 
 ///|
+#derive(Debug)
 pub(all) enum ColData {
   ColU64(Array[UInt64])
   ColU32(Array[Int])
@@ -73,7 +74,7 @@ pub(all) enum ColData {
   ColStr(Array[String])
   ColBool(Array[Bool])
   ColVec(Int, Array[Float])
-} derive(Debug)
+}
 
 ///|
 fn write_col_header(
@@ -102,8 +103,8 @@ const DICT_MAX_UNIQUE : Int = 65535
 fn encode_col_str_dict(arr : Array[String]) -> Bytes? {
   let count = arr.length()
   let dict_idx : Map[String, Int] = Map([])
-  let dict : Array[String] = Array::new()
-  let codes : Array[UInt16] = Array::new(capacity=count)
+  let dict : Array[String] = Array()
+  let codes : Array[UInt16] = Array(capacity=count)
   for s in arr {
     match dict_idx.get(s) {
       Some(ix) => codes.push(ix.to_uint16())
@@ -124,15 +125,15 @@ fn encode_col_str_dict(arr : Array[String]) -> Bytes? {
   for s in dict {
     offs.write_uint_le(total.reinterpret_as_uint())
     let e = @utf8.encode(s)
-    data.write_bytes(e.view())
+    data.write_bytes(e.exact_view())
     total += e.length()
   }
   offs.write_uint_le(total.reinterpret_as_uint())
   let b = Buffer()
   write_col_header(b, DT_STR, COL_FLAG_DICT, count, total)
   b.write_uint_le(dict.length().reinterpret_as_uint())
-  b.write_bytes(offs.to_bytes().view())
-  b.write_bytes(data.to_bytes().view())
+  b.write_bytes(offs.to_bytes().exact_view())
+  b.write_bytes(data.to_bytes().exact_view())
   for c in codes {
     b.write_uint16_le(c)
   }
@@ -149,14 +150,14 @@ pub fn encode_col_str_plain(arr : Array[String]) -> Bytes {
   for s in arr {
     offs.write_uint_le(total.reinterpret_as_uint())
     let e = @utf8.encode(s)
-    datas.write_bytes(e.view())
+    datas.write_bytes(e.exact_view())
     total += e.length()
   }
   offs.write_uint_le(total.reinterpret_as_uint())
   let b = Buffer()
   write_col_header(b, DT_STR, 0, arr.length(), total)
-  b.write_bytes(offs.to_bytes().view())
-  b.write_bytes(datas.to_bytes().view())
+  b.write_bytes(offs.to_bytes().exact_view())
+  b.write_bytes(datas.to_bytes().exact_view())
   b.to_bytes()
 }
 
@@ -223,8 +224,8 @@ pub fn encode_col(cd : ColData) -> Bytes {
     ColStr(arr) =>
       // 新文件默认字典编码；distinct > 65535（u16 code 放不下）自动回退普通串列
       match encode_col_str_dict(arr) {
-        Some(bs) => b.write_bytes(bs.view())
-        None => b.write_bytes(encode_col_str_plain(arr).view())
+        Some(bs) => b.write_bytes(bs.exact_view())
+        None => b.write_bytes(encode_col_str_plain(arr).exact_view())
       }
     ColBool(arr) => {
       // 新文件一律位图：ceil(count/8) 字节，行 i = 字节 i/8 的 bit(i%8)
@@ -303,7 +304,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
       if 20 + count * 8 > bs.length() {
         raise @core.Truncated("u64 col payload")
       }
-      let arr : Array[UInt64] = Array::new(capacity=count)
+      let arr : Array[UInt64] = Array(capacity=count)
       for i in 0..<count {
         arr.push(fa_u64(fa, 20 + i * 8))
       }
@@ -313,7 +314,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
       if 20 + count * 4 > bs.length() {
         raise @core.Truncated("u32 col payload")
       }
-      let arr : Array[Int] = Array::new(capacity=count)
+      let arr : Array[Int] = Array(capacity=count)
       for i in 0..<count {
         arr.push(fa_i32(fa, 20 + i * 4))
       }
@@ -323,7 +324,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
       if 20 + count * 8 > bs.length() {
         raise @core.Truncated("i64 col payload")
       }
-      let arr : Array[Int64] = Array::new(capacity=count)
+      let arr : Array[Int64] = Array(capacity=count)
       for i in 0..<count {
         arr.push(fa_i64(fa, 20 + i * 8))
       }
@@ -333,7 +334,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
       if 20 + count * 4 > bs.length() {
         raise @core.Truncated("f32 col payload")
       }
-      let arr : Array[Float] = Array::new(capacity=count)
+      let arr : Array[Float] = Array(capacity=count)
       for i in 0..<count {
         arr.push(fa_f32(fa, 20 + i * 4))
       }
@@ -343,7 +344,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
       if (flags8 & COL_FLAG_DICT) != 0 {
         // 字典列：读 dict + codes 后展开为 ColStr（下游零改动）
         let (dict, codes) = decode_col_dict_payload(bs, count, extra)
-        let arr : Array[String] = Array::new(capacity=count)
+        let arr : Array[String] = Array(capacity=count)
         for c in codes {
           let ix = c.to_int()
           if ix >= dict.length() {
@@ -356,7 +357,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
         if 20 + (count + 1) * 4 > bs.length() {
           raise @core.Truncated("string offsets")
         }
-        let arr : Array[String] = Array::new(capacity=count)
+        let arr : Array[String] = Array(capacity=count)
         let offs_pos = 20
         let data_pos = offs_pos + (count + 1) * 4
         let mut prev = fa_i32(fa, offs_pos)
@@ -366,7 +367,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
             raise @core.Corrupt("string offsets")
           }
           arr.push(
-            @utf8.decode(bs.view(start=data_pos + prev, end=data_pos + cur)) catch {
+            @utf8.decode(bs.exact_view(start=data_pos + prev, end=data_pos + cur)) catch {
               _ => raise @core.Corrupt("invalid utf8 in string column")
             },
           )
@@ -376,7 +377,7 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
         ColStr(arr)
       }
     d if d == DT_BOOL => {
-      let arr : Array[Bool] = Array::new(capacity=count)
+      let arr : Array[Bool] = Array(capacity=count)
       if (flags8 & COL_FLAG_BITMAP) != 0 {
         if 20 + (count + 7) / 8 > bs.length() {
           raise @core.Truncated("bool bitmap col")
@@ -450,7 +451,7 @@ fn decode_col_dict_payload(
     codes_pos + count * 2 > bs.length() {
     raise @core.Corrupt("dict payload size")
   }
-  let dict : Array[String] = Array::new(capacity=dict_count)
+  let dict : Array[String] = Array(capacity=dict_count)
   for i in 0..<dict_count {
     let start = fa_i32(fa, offs_pos + i * 4)
     let end = fa_i32(fa, offs_pos + (i + 1) * 4)
@@ -458,12 +459,12 @@ fn decode_col_dict_payload(
       raise @core.Corrupt("dict offsets")
     }
     dict.push(
-      @utf8.decode(bs.view(start=data_pos + start, end=data_pos + end)) catch {
+      @utf8.decode(bs.exact_view(start=data_pos + start, end=data_pos + end)) catch {
         _ => raise @core.Corrupt("invalid utf8 in dict data")
       },
     )
   }
-  let codes : Array[UInt16] = Array::new(capacity=count)
+  let codes : Array[UInt16] = Array(capacity=count)
   for i in 0..<count {
     codes.push(fa_u16(fa, codes_pos + i * 2).to_uint16())
   }
@@ -485,18 +486,18 @@ pub fn decode_vec_col(bs : Bytes) -> (Int, Array[Float]) raise @core.SpndError {
     raise @core.Corrupt("vec header")
   }
   let n = count * dim
-  let data : Array[Float] = Array::new(capacity=n)
+  let data : Array[Float] = Array(capacity=n)
   if dtype8 == DT_SQ8 {
     let scales_pos = 16 + dim * 4
     let codes_pos = scales_pos + dim * 4
     if codes_pos + n > bs.length() {
       raise @core.Truncated("sq8 vec payload")
     }
-    let mins : Array[Float] = Array::new(capacity=dim)
+    let mins : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       mins.push(fa_f32(fa, 16 + d * 4))
     }
-    let scales : Array[Float] = Array::new(capacity=dim)
+    let scales : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       scales.push(fa_f32(fa, scales_pos + d * 4))
     }
@@ -561,7 +562,7 @@ pub fn decode_vec_payload(
   if n * item > bs.length() {
     raise @core.Truncated("vec payload")
   }
-  let data : Array[Float] = Array::new(capacity=n)
+  let data : Array[Float] = Array(capacity=n)
   for i in 0..<n {
     let pos = i * item
     if dtype == DT_F16 {
@@ -572,3 +573,5 @@ pub fn decode_vec_payload(
   }
   data
 }
+
+pub extend ColData with Debug::{to_repr}

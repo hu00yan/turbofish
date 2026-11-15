@@ -9,6 +9,8 @@ import {
 }
 
 // Values
+pub fn sample_lognormal_seq(UInt32, Int32, Double, Double) -> Array[Double]
+
 pub fn tpu_scan_bill(Int64) -> Double
 
 // Errors
@@ -38,6 +40,9 @@ pub(all) enum ChaosOp {
   OpDelete(String)
   OpHeadVersion(String)
 }
+pub fn ChaosOp::equal(Self, Self) -> Bool
+pub fn ChaosOp::not_equal(Self, Self) -> Bool
+pub fn ChaosOp::to_repr(Self) -> @debug.Repr
 pub fn ChaosOp::to_string(Self) -> String
 
 pub struct ChaosRng {
@@ -108,6 +113,9 @@ pub(all) struct ChaosTraceEvent {
   success : Bool
   result_summary : String
 }
+pub fn ChaosTraceEvent::equal(Self, Self) -> Bool
+pub fn ChaosTraceEvent::not_equal(Self, Self) -> Bool
+pub fn ChaosTraceEvent::to_repr(Self) -> @debug.Repr
 pub fn ChaosTraceEvent::to_string(Self) -> String
 
 #derive(@debug.Debug)
@@ -126,6 +134,7 @@ pub fn FaultRule::connection_reset(name? : String, key_prefix? : String, probabi
 pub fn FaultRule::latency_spike(Double, name? : String, key_prefix? : String, probability? : Double, max_triggers? : Int32) -> Self
 pub fn FaultRule::not_found_404(name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Self
 pub fn FaultRule::rate_limit_503(name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32, msg? : String) -> Self
+pub fn FaultRule::to_repr(Self) -> @debug.Repr
 pub fn FaultRule::truncated_range_get(Int32, name? : String, key_prefix? : String, probability? : Double, latency_us? : Double, max_triggers? : Int32) -> Self
 
 #derive(Eq, @debug.Debug)
@@ -137,6 +146,9 @@ pub(all) enum InjectedFault {
   TruncatedRangeGet(Int32)
   LatencySpike(Double)
 }
+pub fn InjectedFault::equal(Self, Self) -> Bool
+pub fn InjectedFault::not_equal(Self, Self) -> Bool
+pub fn InjectedFault::to_repr(Self) -> @debug.Repr
 pub fn InjectedFault::to_string(Self) -> String
 
 pub(all) struct SimConfig {
@@ -246,13 +258,19 @@ pub fn SimStore::clear_nvme(Self) -> Unit
 pub fn SimStore::clear_ranges(Self) -> Unit
 pub fn SimStore::cold(Self) -> Unit
 pub fn SimStore::cost(Self) -> SimSnapshot
+pub fn SimStore::delete(Self, String) -> Unit
 pub fn SimStore::evict_class(Self, String) -> Unit
 pub fn SimStore::evict_key(Self, String) -> Unit
 pub fn SimStore::evict_resident_classes(Self) -> Unit
+pub fn SimStore::get(Self, String) -> Bytes?
+pub fn SimStore::get_range(Self, String, Int32, Int32) -> Bytes?
 pub fn SimStore::head_version(Self, String) -> String?
 pub fn SimStore::is_resident_enabled(Self) -> Bool
+pub fn SimStore::list(Self, String) -> Array[String]
 pub fn SimStore::new(SimConfig) -> Self
 pub fn SimStore::prime_nvme(Self) -> Unit
+pub fn SimStore::put(Self, String, Bytes) -> Unit
+pub fn SimStore::put_if_match(Self, String, String?, Bytes) -> Bool
 pub fn SimStore::record_latency(Self, Double) -> Unit
 pub fn SimStore::require_latency(Self) -> Unit raise @core.SpndError
 pub fn SimStore::reset_cost(Self) -> Unit

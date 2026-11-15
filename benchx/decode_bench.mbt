@@ -17,12 +17,12 @@ const DEC_TERMS : Int = 5000
 
 ///|
 fn dec_data() -> (Bytes, Bytes, Bytes, Bytes, Bytes, Bytes, Bytes) {
-  let ids : Array[UInt64] = Array::new(capacity=DEC_N)
-  let strs : Array[String] = Array::new(capacity=DEC_N)
-  let bools : Array[Bool] = Array::new(capacity=DEC_N)
-  let vec : Array[Float] = Array::new(capacity=DEC_VEC_ROWS * DEC_DIM)
-  let part_data : Array[Float] = Array::new(capacity=DEC_VEC_ROWS * DEC_DIM)
-  let rows : Array[Int] = Array::new(capacity=DEC_VEC_ROWS)
+  let ids : Array[UInt64] = Array(capacity=DEC_N)
+  let strs : Array[String] = Array(capacity=DEC_N)
+  let bools : Array[Bool] = Array(capacity=DEC_N)
+  let vec : Array[Float] = Array(capacity=DEC_VEC_ROWS * DEC_DIM)
+  let part_data : Array[Float] = Array(capacity=DEC_VEC_ROWS * DEC_DIM)
+  let rows : Array[Int] = Array(capacity=DEC_VEC_ROWS)
   for i in 0..<DEC_N {
     ids.push((i + 1).to_uint64())
     strs.push("cat\{i % 100}")
@@ -44,10 +44,10 @@ fn dec_data() -> (Bytes, Bytes, Bytes, Bytes, Bytes, Bytes, Bytes) {
     { cid: 0, rows, dim: DEC_DIM, data: part_data },
     true,
   )
-  let lists : Array[(String, Array[@format.Posting])] = Array::new(
+  let lists : Array[(String, Array[@format.Posting])] = Array(
     capacity=DEC_TERMS + 1,
   )
-  let big : Array[@format.Posting] = Array::new(capacity=DEC_N)
+  let big : Array[@format.Posting] = Array(capacity=DEC_N)
   for i in 0..<DEC_N {
     big.push({ row: i, tf: 1 + i % 5 })
   }
@@ -66,7 +66,7 @@ pub fn run_decode_bench() -> String raise @core.SpndError {
   let dir_dec = @format.decode_fts_dir(dir)
   // "big" 排序在 "term..." 之前（b < t）
   let entry0 = dir_dec[0]
-  let lines : Array[String] = Array::new()
+  let lines : Array[String] = Array()
   lines.push("")
   lines.push(
     "[3] format decode micro-bench（20000 列值 / 200×768 向量 / 5000 term dir）",

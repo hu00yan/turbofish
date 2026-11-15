@@ -32,3 +32,5 @@ pub impl @s3store.HttpTransport for CurlTransport with fn execute(
 pub fn now_amz_date() -> String {
   "19700101T000000Z"
 }
+
+pub extend CurlTransport with @turbofish/s3store.HttpTransport::{execute}

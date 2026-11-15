@@ -5,10 +5,10 @@
 
 ///|
 fn make_docs_batch(start_id : Int, count : Int, dim : Int, prefix : String) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=count)
+  let docs : Array[@core.Doc] = Array(capacity=count)
   for i in 0..<count {
     let id_num = start_id + i
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(Float::from_int(id_num * dim + d) * 0.01)
     }
@@ -102,7 +102,7 @@ test "Compactor: 2) tombstone ratio > 20% triggers compaction and physicalizes d
   engine.publish_manifest()
 
   // 软删除 15 条（id 1..15），比例 15/50 = 30% > 20%
-  let old_ids : Array[UInt64] = Array::new(capacity=15)
+  let old_ids : Array[UInt64] = Array(capacity=15)
   for i in 1..<=15 {
     old_ids.push(i.to_uint64())
   }

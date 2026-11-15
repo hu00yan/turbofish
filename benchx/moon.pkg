@@ -4,7 +4,6 @@
 // kernel_stub.mbt 给其余后端（wasm-gc/wasm/js）提供同签名占位实现，
 // 使包在默认 target 下可编译、可测试（C 内核行标注 N/A）。
 import {
-  "moonbitlang/core/test",
   "turbofish/core",
   "turbofish/format",
   "moonbitlang/core/bench",

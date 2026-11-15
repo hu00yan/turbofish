@@ -19,12 +19,13 @@
 pub const GLOBAL_VEC_MAGIC : String = "SPNDGVP1"
 
 ///|
+#derive(Debug)
 pub(all) struct GlobalVecPart {
   cid : Int
   rows : Array[(Int, Int)] // (seg_idx, segment 内行号)
   dim : Int
   data : Array[Float]
-} derive(Debug)
+}
 
 ///|
 pub fn encode_global_part(
@@ -82,11 +83,11 @@ pub fn decode_global_part(bs : Bytes) -> GlobalVecPart raise @core.SpndError {
   if rows_end + count * dim * item > bs.length() {
     raise @core.Truncated("global vec payload")
   }
-  let rows : Array[(Int, Int)] = Array::new(capacity=count)
+  let rows : Array[(Int, Int)] = Array(capacity=count)
   for i in 0..<count {
     rows.push((fa_i32(fa, 20 + i * 8), fa_i32(fa, 24 + i * 8)))
   }
-  let data : Array[Float] = Array::new(capacity=count * dim)
+  let data : Array[Float] = Array(capacity=count * dim)
   let base = rows_end
   for i in 0..<(count * dim) {
     let pos = base + i * item
@@ -148,7 +149,7 @@ pub fn decode_global_pack_index(bs : Bytes) -> Array[(Int, Int, Int)] raise @cor
   if n < 0 || 16 + n * 12 > bs.length() {
     raise @core.Truncated("global pack header")
   }
-  let out : Array[(Int, Int, Int)] = Array::new(capacity=n)
+  let out : Array[(Int, Int, Int)] = Array(capacity=n)
   for i in 0..<n {
     let pos = 16 + i * 12
     let cid = fa_i32(fa, pos)
@@ -208,11 +209,11 @@ pub fn decode_global_part_at(
   if rows_end + count * dim * item > offset + len {
     raise @core.Truncated("global vec payload")
   }
-  let rows : Array[(Int, Int)] = Array::new(capacity=count)
+  let rows : Array[(Int, Int)] = Array(capacity=count)
   for i in 0..<count {
     rows.push((fa_i32(fa, rows_off + i * 8), fa_i32(fa, rows_off + i * 8 + 4)))
   }
-  let data : Array[Float] = Array::new(capacity=count * dim)
+  let data : Array[Float] = Array(capacity=count * dim)
   let base = rows_end
   for i in 0..<(count * dim) {
     let pos = base + i * item
@@ -224,3 +225,5 @@ pub fn decode_global_part_at(
   }
   { cid, rows, dim, data }
 }
+
+pub extend GlobalVecPart with Debug::{to_repr}

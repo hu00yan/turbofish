@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // benchx/benchx_wbtest.mbt —— 白盒测试：FFI 探针 + 数值一致性断言 + bench 数字输出。
 // 运行：

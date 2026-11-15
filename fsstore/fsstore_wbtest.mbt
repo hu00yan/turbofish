@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // FsStore 全流程测试（native target 专用，见 moon.pkg targets）。
 // 每个测试用 @core.next_id() 生成唯一 root，互不污染、无需清理。
@@ -284,7 +283,7 @@ test "BatchStore get_range_many：与逐个 get_range 逐位一致（含缺失 k
 fn[S : @store.ObjectStore] must_get(
   store : S,
   key : String,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   match store.get(key) {
     Some(v) => v
     None => abort("missing key: \{key}")

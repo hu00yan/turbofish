@@ -47,7 +47,7 @@ fn bench_p50(
   for _ in 0..<warmup {
     checksum = checksum + f()
   }
-  let ts : Array[Double] = Array::new()
+  let ts : Array[Double] = Array()
   for _ in 0..<rounds {
     let t0 = @bench.monotonic_clock_start()
     for _ in 0..<iters {
@@ -65,7 +65,7 @@ fn bench_p50(
 ///|
 /// 行主序 float 矩阵（rows 行 × dim 维），值域 [-1, 1)。
 fn gen_matrix(rng : @core.Rng, rows : Int, dim : Int) -> Array[Float] {
-  let a : Array[Float] = Array::new()
+  let a : Array[Float] = Array()
   let n = rows * dim
   for _ in 0..<n {
     a.push(Float::from_double(rng.next_f64() * 2.0 - 1.0))
@@ -218,7 +218,7 @@ pub fn run_all() -> String raise @core.SpndError {
   let blob = gen_varint_blob()
   let fa = blob.to_fixedarray()
 
-  let lines : Array[String] = Array::new()
+  let lines : Array[String] = Array()
   lines.push(
     "== benchx micro-bench（热身 3 轮 + 计时 20 轮取 p50，@bench 单调时钟；建议用 native --release）==",
   )

@@ -32,7 +32,7 @@ fn push_roaring_container(b : Buffer, high : UInt64, lows : Array[Int]) -> Unit 
   } else {
     b.write_byte(b'\x01')
     b.write_uint_le(lows.length().reinterpret_as_uint())
-    let words : Array[UInt64] = Array::new(capacity=1024)
+    let words : Array[UInt64] = Array(capacity=1024)
     for _ in 0..<1024 {
       words.push(0UL)
     }
@@ -52,14 +52,14 @@ pub fn encode_roaring(ids : Array[UInt64]) -> Bytes {
   let b = Buffer()
   b.write_string_utf8(ROAR_MAGIC)
   // 按高 48 位分组（low = id & 0xFFFF）
-  let highs : Array[UInt64] = Array::new()
-  let groups : Array[Array[Int]] = Array::new()
+  let highs : Array[UInt64] = Array()
+  let groups : Array[Array[Int]] = Array()
   for id in ids {
     let high = id >> 16
     let low = (id & 0xFFFFUL).to_int()
     if highs.is_empty() || highs[highs.length() - 1] != high {
       highs.push(high)
-      groups.push(Array::new())
+      groups.push(Array())
     }
     groups[groups.length() - 1].push(low)
   }
@@ -79,7 +79,7 @@ pub fn decode_roaring(bs : Bytes) -> Array[UInt64] raise @core.SpndError {
   if count < 0 {
     raise @core.Corrupt("roaring container_count")
   }
-  let out : Array[UInt64] = Array::new()
+  let out : Array[UInt64] = Array()
   let mut pos = 12
   for _ in 0..<count {
     if pos + 13 > bs.length() {

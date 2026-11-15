@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // s3store 测试：sha/hmac 向量、SigV4 官方向量、请求构造器断言、mock CAS 流程。
 

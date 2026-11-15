@@ -82,7 +82,7 @@ pub fn WorkerTieredCache::put(
   // 1. 先淘汰已过期的条目
   self.evict_expired(now)
   // 2. 超出内存预算时，按 LRU 淘汰最旧未访问项
-  while self.current_bytes + part_size > self.max_bytes && not(self.entries.is_empty()) {
+  while self.current_bytes + part_size > self.max_bytes && !(self.entries.is_empty()) {
     let mut victim_key : String? = None
     let mut victim_time : UInt64 = 0UL
     let mut victim_size = 0
@@ -156,7 +156,7 @@ pub struct QueryWorker[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] QueryWorker::new(
+pub fn[S] QueryWorker::new(
   id : String,
   store : S,
   cache_ttl_ms? : UInt64,

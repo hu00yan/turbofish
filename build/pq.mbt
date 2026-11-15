@@ -38,7 +38,7 @@ fn pq_m_for(dim : Int) -> Int {
 /// 整向量 L2 归一化（零向量原样保留）。
 fn pq_normalize(data : Array[Float], dim : Int) -> Array[Float] {
   let count = if dim > 0 { data.length() / dim } else { 0 }
-  let out : Array[Float] = Array::new(capacity=count * dim)
+  let out : Array[Float] = Array(capacity=count * dim)
   for i in 0..<count {
     let norm = @core.norm_f32(data, i * dim, dim)
     for d in 0..<dim {
@@ -70,7 +70,7 @@ fn pq_kmeans(
   }
   let rng = @core.Rng::new(seed)
   // 随机初始化：取 k 个不同样本（k ≤ n）
-  let idx : Array[Int] = Array::new(capacity=n)
+  let idx : Array[Int] = Array(capacity=n)
   for i in 0..<n {
     idx.push(i)
   }
@@ -81,17 +81,17 @@ fn pq_kmeans(
     idx[i] = idx[j]
     idx[j] = t
   }
-  let centers : Array[Float] = Array::new(capacity=k * dsub)
+  let centers : Array[Float] = Array(capacity=k * dsub)
   for c in 0..<k {
     for d in 0..<dsub {
       centers.push(samples[idx[c] * dsub + d])
     }
   }
-  let sums : Array[Double] = Array::new(capacity=k * dsub)
+  let sums : Array[Double] = Array(capacity=k * dsub)
   for _ in 0..<(k * dsub) {
     sums.push(0.0)
   }
-  let counts : Array[Int] = Array::new(capacity=k)
+  let counts : Array[Int] = Array(capacity=k)
   for _ in 0..<k {
     counts.push(0)
   }
@@ -161,7 +161,7 @@ pub fn train_pq(dim : Int, data : Array[Float]) -> (Array[Float], Array[UInt]) {
   let sample_n = if PQ_SAMPLE_MAX < count { PQ_SAMPLE_MAX } else { count }
   let rng = @core.Rng::new(PQ_SEED)
   // 部分 Fisher-Yates 选样本
-  let idx : Array[Int] = Array::new(capacity=count)
+  let idx : Array[Int] = Array(capacity=count)
   for i in 0..<count {
     idx.push(i)
   }
@@ -172,13 +172,13 @@ pub fn train_pq(dim : Int, data : Array[Float]) -> (Array[Float], Array[UInt]) {
     idx[i] = idx[j]
     idx[j] = t
   }
-  let codebooks : Array[Float] = Array::new(capacity=m * PQ_K * dsub)
-  let codes : Array[UInt] = Array::new(capacity=count * m)
+  let codebooks : Array[Float] = Array(capacity=m * PQ_K * dsub)
+  let codes : Array[UInt] = Array(capacity=count * m)
   for _ in 0..<(count * m) {
     codes.push(0U)
   }
   for c in 0..<m {
-    let samples : Array[Float] = Array::new(capacity=sample_n * dsub)
+    let samples : Array[Float] = Array(capacity=sample_n * dsub)
     for si in 0..<sample_n {
       let row = idx[si]
       for d in 0..<dsub {

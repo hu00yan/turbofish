@@ -15,17 +15,17 @@ pub fn next_id() -> String {
   id_counter.val = id_counter.val + 1UL
   let mut v = id_counter.val
   // 13 个 Base32 字符 = 65 bits，足够进程内单调计数
-  let digits : Array[Char] = Array::new(capacity=13)
+  let digits : Array[Char] = Array(capacity=13)
   for _ in 0..<13 {
     let d = (v & 31UL).to_int()
     digits.push(crockford[d])
     v = v >> 5
   }
-  let out : Array[Char] = Array::new(capacity=13)
+  let out : Array[Char] = Array(capacity=13)
   for i in 0..<13 {
     out.push(digits[12 - i])
   }
-  String::from_array(out.view())
+  String::from_array(out.exact_view())
 }
 
 ///|

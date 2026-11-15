@@ -5,7 +5,7 @@
 
 ///|
 #external
-type CBuf
+priv type CBuf
 
 ///|
 extern "C" fn benchx_add2(x : Int, y : Int) -> Int = "benchx_add2"
@@ -16,8 +16,6 @@ extern "C" fn benchx_buf_new(len : Int) -> CBuf = "benchx_buf_new"
 ///|
 extern "C" fn benchx_buf_free(p : CBuf) -> Unit = "benchx_buf_free"
 
-///|
-extern "C" fn benchx_buf_len(p : CBuf) -> Int = "benchx_buf_len"
 
 ///|
 extern "C" fn benchx_buf_set(p : CBuf, i : Int, v : Float) -> Unit = "benchx_buf_set"
@@ -65,7 +63,6 @@ extern "C" fn benchx_dot_f32_facc(
 /// C 内核容器：行主序 float 矩阵（数据已拷入 C 侧 malloc 内存）。
 struct CMatrix {
   ptr : CBuf
-  nrows : Int
   dim : Int
 }
 
@@ -112,7 +109,7 @@ pub fn cmat_new(rows : Array[Float], nrows : Int, dim : Int) -> CMatrix {
   for i in 0..<n {
     benchx_buf_set(p, i, rows[i])
   }
-  { ptr: p, nrows, dim }
+  { ptr: p, dim }
 }
 
 ///|

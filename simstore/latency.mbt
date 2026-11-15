@@ -118,7 +118,7 @@ pub fn SimStore::require_latency(self : SimStore) -> Unit raise @core.SpndError 
   if c.latency_ready() {
     return
   }
-  let bad : Array[String] = Array::new()
+  let bad : Array[String] = Array()
   if !(c.s3_get_ttfb_p50_us > 0.0) {
     bad.push("s3_get_ttfb_p50_us")
   }
@@ -155,14 +155,14 @@ pub fn SimStore::require_latency(self : SimStore) -> Unit raise @core.SpndError 
 
 ///|
 /// 固定种子采 n 个对数正态样本（白盒测试用，独立 rng 不影响 SimStore 的流）。
-fn sample_lognormal_seq(
+pub fn sample_lognormal_seq(
   seed : UInt,
   n : Int,
   p50 : Double,
   sigma : Double,
 ) -> Array[Double] {
   let rng = @core.Rng::new(seed)
-  let out : Array[Double] = Array::new()
+  let out : Array[Double] = Array()
   for _ in 0..<n {
     out.push(
       lognormal_from_uniforms(p50, sigma, rng.next_f64(), rng.next_f64()),

@@ -40,7 +40,7 @@ fn extra_fmt(x : Double, digits : Int) -> String {
 ///|
 /// 取 docs 前 n 条（数组拷贝）。
 fn take_docs(docs : Array[@core.Doc], n : Int) -> Array[@core.Doc] {
-  let out : Array[@core.Doc] = Array::new(capacity=n)
+  let out : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
     if i < docs.length() {
       out.push(docs[i])
@@ -309,7 +309,7 @@ fn run_extra_cache(
   for kv in kinds {
     let (label, kind) = kv
     // 冷缓存：每查询重新 open（缓存为空）
-    let cold : Array[Double] = Array::new()
+    let cold : Array[Double] = Array()
     for _ in 0..<rounds {
       let t0 = @bench.monotonic_clock_start()
       for i in 0..<nq {
@@ -322,7 +322,7 @@ fn run_extra_cache(
     // 热缓存：open 一次 + 预热一轮
     let nw = @query.open(store, ns)
     let _ = run_one_cost_query(kind, nw, 0, bm25_qs, vec_qvs)
-    let warm : Array[Double] = Array::new()
+    let warm : Array[Double] = Array()
     for _ in 0..<rounds {
       let t0 = @bench.monotonic_clock_start()
       for i in 0..<nq {
@@ -381,7 +381,7 @@ fn extra_ivf_measure(
   let n = @query.open(store, ns)
   let _ = @query.vec_search(n, qvs[0], 10, 8, None)
   let rounds = 20
-  let ts : Array[Double] = Array::new()
+  let ts : Array[Double] = Array()
   for _ in 0..<rounds {
     let t0 = @bench.monotonic_clock_start()
     for qv in qvs {

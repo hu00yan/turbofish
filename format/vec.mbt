@@ -27,10 +27,11 @@ pub const CEN_MAGIC : String = "SPNDCEN1"
 pub const PART_MAGIC : String = "SPNDPRT1"
 
 ///|
+#derive(Debug)
 pub(all) struct Centroids {
   dim : Int
   data : Array[Float] // k*dim 行主序
-} derive(Debug)
+}
 
 ///|
 pub fn Centroids::k(self : Centroids) -> Int {
@@ -56,7 +57,7 @@ pub fn decode_centroids(bs : Bytes) -> Centroids raise @core.SpndError {
   @core.check_magic(bs, CEN_MAGIC)
   let k = @core.read_u32_le(bs, 8).reinterpret_as_int()
   let dim = @core.read_u16_le(bs, 12).to_int()
-  let data : Array[Float] = Array::new(capacity=k * dim)
+  let data : Array[Float] = Array(capacity=k * dim)
   for i in 0..<(k * dim) {
     data.push(@core.read_f32_le(bs, 16 + i * 4))
   }
@@ -64,12 +65,13 @@ pub fn decode_centroids(bs : Bytes) -> Centroids raise @core.SpndError {
 }
 
 ///|
+#derive(Debug)
 pub(all) struct VecPart {
   cid : Int
   rows : Array[Int] // segment 内行号
   dim : Int
   data : Array[Float] // rows.length * dim
-} derive(Debug)
+}
 
 ///|
 pub fn encode_part(p : VecPart, use_f16 : Bool) -> Bytes {
@@ -114,23 +116,23 @@ pub fn decode_part(bs : Bytes) -> VecPart raise @core.SpndError {
   if vec_base > bs.length() {
     raise @core.Truncated("part rows")
   }
-  let rows : Array[Int] = Array::new(capacity=count)
+  let rows : Array[Int] = Array(capacity=count)
   for i in 0..<count {
     rows.push(fa_i32(fa, 20 + i * 4))
   }
   let n = count * dim
-  let data : Array[Float] = Array::new(capacity=n)
+  let data : Array[Float] = Array(capacity=n)
   if dtype8 == DT_SQ8 {
     let scales_pos = vec_base + dim * 4
     let codes_pos = scales_pos + dim * 4
     if codes_pos + n > bs.length() {
       raise @core.Truncated("sq8 part payload")
     }
-    let mins : Array[Float] = Array::new(capacity=dim)
+    let mins : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       mins.push(fa_f32(fa, vec_base + d * 4))
     }
-    let scales : Array[Float] = Array::new(capacity=dim)
+    let scales : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       scales.push(fa_f32(fa, scales_pos + d * 4))
     }
@@ -156,3 +158,6 @@ pub fn decode_part(bs : Bytes) -> VecPart raise @core.SpndError {
   }
   { cid, rows, dim, data }
 }
+
+pub extend Centroids with Debug::{to_repr}
+pub extend VecPart with Debug::{to_repr}

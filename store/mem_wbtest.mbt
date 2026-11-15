@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // MemStore 行为测试：CAS、成本记账、缓存模型、范围读。
 

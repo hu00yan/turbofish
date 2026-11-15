@@ -14,5 +14,4 @@ import {
   "turbofish/format",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/json",
-  "moonbitlang/core/test",
 }

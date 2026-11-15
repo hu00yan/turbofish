@@ -1,3 +1,4 @@
+#cfg(any(target="native", target="llvm"))
 import {
   "moonbitlang/async",
   "moonbitlang/async/http",

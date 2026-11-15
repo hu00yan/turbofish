@@ -343,3 +343,6 @@ test "S3CasCatalog: CAS conflict detection on expected_head" {
   let ns = cat.get_namespace("cas_ns").unwrap()
   assert_eq(ns.head_manifest, "m2")
 }
+
+extend MemRdbCatalog with MetadataCatalog::{acquire_lease, create_namespace, get_lineage, get_namespace, get_unreferenced_segments, list_active_segment_ids, mark_segment_referenced, record_branch_origin, register_snapshot, release_lease, renew_lease, resolve_snapshot, update_head_manifest}
+extend S3CasCatalog with MetadataCatalog::{acquire_lease, create_namespace, get_lineage, get_namespace, get_unreferenced_segments, list_active_segment_ids, mark_segment_referenced, record_branch_origin, register_snapshot, resolve_snapshot, update_head_manifest}

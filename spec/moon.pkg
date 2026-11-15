@@ -1,5 +1,3 @@
 import {
-  "turbofish/core",
   "turbofish/format",
-  "moonbitlang/core/test",
 }

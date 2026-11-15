@@ -14,10 +14,10 @@ fn is_cjk(c : Int) -> Bool {
 
 ///|
 pub fn tokenize_into(text : String, sink : (String) -> Unit) -> Unit {
-  let chars : Array[Char] = Array::new()
+  let chars : Array[Char] = Array()
   let flush = () => {
     if chars.length() > 0 {
-      let mut term = String::from_array(chars.view()).to_lower()
+      let mut term = String::from_array(chars.exact_view()).to_lower()
       // SPNDDIR1 的 term_len 是 u8；超长 ASCII token 截到 255 字节，
       // 构建与查询走同一分词器，避免 dir 长度回绕（review P2-2）。
       if term.length() > 255 {
@@ -43,7 +43,7 @@ pub fn tokenize_into(text : String, sink : (String) -> Unit) -> Unit {
 
 ///|
 pub fn tokenize(text : String) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   tokenize_into(text, fn(t) { out.push(t) })
   out
 }

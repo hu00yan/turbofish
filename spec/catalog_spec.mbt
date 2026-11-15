@@ -696,3 +696,24 @@ pub fn verify_safety3_lease_fencing(catalog : SpecCatalog) -> Bool {
   }
   true
 }
+
+pub extend LeaseToken with Debug::{to_repr}
+pub extend LeaseToken with Eq::{not_equal, equal}
+pub extend FencingError with Debug::{to_repr}
+pub extend FencingError with Eq::{not_equal, equal}
+pub extend CommitError with Debug::{to_repr}
+pub extend CommitError with Eq::{not_equal, equal}
+pub extend CommitOutcome with Debug::{to_repr}
+pub extend CommitOutcome with Eq::{not_equal, equal}
+pub extend SpecStoreObject with Debug::{to_repr}
+pub extend SpecStoreObject with Eq::{not_equal, equal}
+pub extend SpecObjectStore with Debug::{to_repr}
+pub extend SpecManifest with Debug::{to_repr}
+pub extend SpecManifest with Eq::{not_equal, equal}
+pub extend SpecBranch with Debug::{to_repr}
+pub extend SpecBranch with Eq::{not_equal, equal}
+pub extend SpecSnapshot with Debug::{to_repr}
+pub extend SpecSnapshot with Eq::{not_equal, equal}
+pub extend SpecCatalog with Debug::{to_repr}
+pub extend CrashStage with Debug::{to_repr}
+pub extend CrashStage with Eq::{not_equal, equal}

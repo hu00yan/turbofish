@@ -12,7 +12,7 @@ pub struct ObjPartStore[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ObjPartStore::new(
+pub fn[S] ObjPartStore::new(
   store : S,
   ns : String
 ) -> ObjPartStore[S] {
@@ -60,7 +60,7 @@ pub struct ObjManifestStore[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ObjManifestStore::new(
+pub fn[S] ObjManifestStore::new(
   store : S,
   ns : String
 ) -> ObjManifestStore[S] {
@@ -84,7 +84,7 @@ pub fn[S] ObjManifestStore::manifest_key(
 fn manifest_to_json(m : Manifest) -> Json {
   let root : Map[String, Json] = Map([])
   root.set("seq", Json::number(m.seq.to_double()))
-  let parts_arr : Array[Json] = Array::new(capacity=m.parts.length())
+  let parts_arr : Array[Json] = Array(capacity=m.parts.length())
   for p in m.parts {
     let pm : Map[String, Json] = Map([])
     pm.set("part_id", Json::string(p.part_id))
@@ -97,7 +97,7 @@ fn manifest_to_json(m : Manifest) -> Json {
     parts_arr.push(Json::object(pm))
   }
   root.set("parts", Json::array(parts_arr))
-  let tombstones_arr : Array[Json] = Array::new(capacity=m.tombstones.length())
+  let tombstones_arr : Array[Json] = Array(capacity=m.tombstones.length())
   for t in m.tombstones {
     tombstones_arr.push(Json::number(t.to_double()))
   }
@@ -115,7 +115,7 @@ fn manifest_from_json(j : Json) -> Manifest raise @core.SpndError {
     Some(Number(n, ..)) => n.to_uint64()
     _ => 0UL
   }
-  let parts : Array[PartMeta] = Array::new()
+  let parts : Array[PartMeta] = Array()
   match root.get("parts") {
     Some(Array(arr)) =>
       for item in arr {
@@ -164,7 +164,7 @@ fn manifest_from_json(j : Json) -> Manifest raise @core.SpndError {
       }
     _ => ()
   }
-  let tombstones : Array[UInt64] = Array::new()
+  let tombstones : Array[UInt64] = Array()
   match root.get("tombstones") {
     Some(Array(arr)) =>
       for item in arr {
@@ -184,7 +184,7 @@ impl[S : @store.ObjectStore] ManifestStore for ObjManifestStore[S] with load(
 ) -> Manifest raise @core.SpndError {
   let head_ptr = match self.store.get(self.head_ptr_key()) {
     Some(bs) =>
-      @utf8.decode(bs.view()) catch {
+      @utf8.decode(bs.exact_view()) catch {
         _ => raise @core.Corrupt("invalid head_manifest pointer utf8")
       }
     None => return Manifest::new()
@@ -195,7 +195,7 @@ impl[S : @store.ObjectStore] ManifestStore for ObjManifestStore[S] with load(
   let mkey = "\{self.ns}/_manifest/\{head_ptr}.json"
   match self.store.get(mkey) {
     Some(bs) => {
-      let s = @utf8.decode(bs.view()) catch {
+      let s = @utf8.decode(bs.exact_view()) catch {
         _ => raise @core.Corrupt("manifest utf8 error")
       }
       let j = @json.parse(s) catch {

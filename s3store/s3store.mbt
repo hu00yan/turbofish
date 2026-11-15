@@ -25,12 +25,13 @@ pub(open) trait HttpTransport {
 
 ///|
 /// 被记录下来的请求（测试断言用）
+#derive(Debug)
 pub(all) struct RecordedRequest {
   http_method : String
   url : String
   headers : Array[(String, String)]
   body : Bytes
-} derive(Debug)
+}
 
 ///|
 /// 大小写不敏感地取响应头
@@ -66,8 +67,8 @@ pub fn MockS3Transport::new(bucket : String) -> MockS3Transport {
     objects: Map([]),
     etags: Map([]),
     tokens: Map([]),
-    requests: Array::new(),
-    preset: Array::new(),
+    requests: Array(),
+    preset: Array(),
     preset_pos: 0,
     next_etag: 0,
     next_token: 0,
@@ -206,7 +207,7 @@ pub fn url_decode(s : String) -> String {
     b.write_byte(c)
     i += 1
   }
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => s
   }
 }
@@ -366,7 +367,7 @@ fn MockS3Transport::mock_list(
     None => 1000
   }
   // 全部 key 升序
-  let keys : Array[String] = Array::new()
+  let keys : Array[String] = Array()
   for kv in self.objects.iter() {
     if kv.0.has_prefix(prefix) {
       keys.push(kv.0)
@@ -638,7 +639,7 @@ pub fn[T] S3Store::object_path(self : S3Store[T], key : String) -> String {
     b.write_string_utf8("/")
     b.write_string_utf8(uri_encode(seg.to_owned(), true))
   }
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => "/"
   }
 }
@@ -968,7 +969,7 @@ pub fn[T : HttpTransport] S3Store::list_page(
   } else {
     page_size
   }
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   let mut token : String? = None
   let mut rounds = 0
   while rounds < 100000 {
@@ -979,7 +980,7 @@ pub fn[T : HttpTransport] S3Store::list_page(
     if st != 200 {
       break
     }
-    let xml = @utf8.decode(body.view()) catch { _ => break }
+    let xml = @utf8.decode(body.exact_view()) catch { _ => break }
     for k in xml_all_texts(xml, "Key") {
       out.push(k)
     }
@@ -1044,7 +1045,7 @@ fn xml_first_text(xml : String, tag : String) -> String? {
 ///|
 /// 全部 <tag>...</tag> 的文本（按出现顺序）
 fn xml_all_texts(xml : String, tag : String) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   let open = "<\{tag}>"
   let close = "</\{tag}>"
   let mut pos = 0
@@ -1067,3 +1068,8 @@ fn xml_all_texts(xml : String, tag : String) -> Array[String] {
   }
   out
 }
+
+pub extend RecordedRequest with Debug::{to_repr}
+pub extend MockS3Transport with HttpTransport::{execute}
+pub extend MemLeaseCoordinator with LeaseCoordinator::{release, acquire}
+pub extend S3Store with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete}

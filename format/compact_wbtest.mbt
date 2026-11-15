@@ -3,9 +3,9 @@
 
 ///|
 fn sample_docs(n : Int, dim : Int) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(Float::from_int(i * dim + d) * 0.1)
     }
@@ -77,17 +77,17 @@ test "compact part range get simulation" {
   let total_len = part_bytes.length()
 
   // 模拟 S3 Range GET 1: 读取末尾 16 字节获取 trailer
-  let trailer_slice = part_bytes.view(
+  let trailer_slice = part_bytes.exact_view(
     start=total_len - COMPACT_TRAILER_LEN,
     end=total_len,
-  ).to_bytes()
+  ).to_owned()
   let (footer_off, footer_len) = decode_compact_part_trailer(trailer_slice)
 
   // 模拟 S3 Range GET 2: 读取 footer 切片
-  let footer_slice = part_bytes.view(
+  let footer_slice = part_bytes.exact_view(
     start=footer_off,
     end=footer_off + footer_len,
-  ).to_bytes()
+  ).to_owned()
   let footer = decode_compact_part_footer(footer_slice, 0, footer_len)
 
   // 模拟 S3 Range GET 3: 仅读取 col:id 列
@@ -95,10 +95,10 @@ test "compact part range get simulation" {
     Some(s) => s
     None => fail("missing col:id")
   }
-  let id_slice = part_bytes.view(
+  let id_slice = part_bytes.exact_view(
     start=id_sec.offset,
     end=id_sec.offset + id_sec.length,
-  ).to_bytes()
+  ).to_owned()
   let id_col = decode_col(id_slice)
   match id_col {
     ColU64(ids) => {
@@ -114,10 +114,10 @@ test "compact part range get simulation" {
     Some(s) => s
     None => fail("missing fts:dir")
   }
-  let fts_dir_slice = part_bytes.view(
+  let fts_dir_slice = part_bytes.exact_view(
     start=fts_dir_sec.offset,
     end=fts_dir_sec.offset + fts_dir_sec.length,
-  ).to_bytes()
+  ).to_owned()
   let entries = decode_fts_dir(fts_dir_slice)
   assert_eq(entries.length() > 0, true)
 }

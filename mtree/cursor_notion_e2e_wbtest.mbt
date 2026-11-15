@@ -7,9 +7,9 @@
 
 ///|
 fn make_e2e_10k_docs(count : Int, dim : Int) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=count)
+  let docs : Array[@core.Doc] = Array(capacity=count)
   for i in 1..<=count {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(Float::from_int((i * 17 + d * 31) % 1000) * 0.001)
     }
@@ -76,19 +76,18 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
   // 阶段 2：模拟 Cursor/Notion 工作负载进行 50 轮连续小批量突变（每轮编辑 10 篇文档）
   // =========================================================================
   let mut compactions_triggered = 0
-  let mut total_delta_bytes_written = 0
 
   for step in 0..<50 {
     let edit_start_id = step * 10 + 1
-    let old_ids : Array[UInt64] = Array::new(capacity=10)
-    let updated_docs : Array[@core.Doc] = Array::new(capacity=10)
+    let old_ids : Array[UInt64] = Array(capacity=10)
+    let updated_docs : Array[@core.Doc] = Array(capacity=10)
 
     for i in 0..<10 {
       let id_num = edit_start_id + i
       let id_u64 = id_num.to_uint64()
       old_ids.push(id_u64)
 
-      let v : Array[Float] = Array::new(capacity=dim)
+      let v : Array[Float] = Array(capacity=dim)
       for d in 0..<dim {
         v.push(Float::from_int((id_num * 97 + step * 13 + d) % 1000) * 0.001)
       }
@@ -123,7 +122,6 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
     }
     // 10 行 Delta Part 大小仅数 KB，与基线（>200KB）形成鲜明对照（写放大严格有界）
     assert_eq(delta_bytes.length() < 10000, true)
-    total_delta_bytes_written += delta_bytes.length()
 
     // 唤醒 Compactor 检查
     let now_ms = (step + 1).to_int64() * 1000L
@@ -246,12 +244,12 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
 
   // 3. 向量相似度检索一致性验证：
   // 构造查询向量 Q，分别在 live_docs 与 ground_truth 上计算精确 Cosine 相似度取 Top-5
-  let qv : Array[Float] = Array::new(capacity=dim)
-  for di in 0..<dim {
+  let qv : Array[Float] = Array(capacity=dim)
+  for _ in 0..<dim {
     qv.push(0.5)
   }
 
-  let live_scores : Array[(UInt64, Double)] = Array::new(capacity=live_docs.length())
+  let live_scores : Array[(UInt64, Double)] = Array(capacity=live_docs.length())
   for d in live_docs {
     let dist = @core.cosine_dist_f32(qv, 0, d.vector, 0, dim)
     live_scores.push((d.id, 1.0 - dist))
@@ -260,7 +258,7 @@ test "E2E: Cursor/Notion workload (10k docs base -> 50 successive edits of 10 do
     if b.1 < a.1 { -1 } else if b.1 > a.1 { 1 } else { 0 }
   })
 
-  let gt_scores : Array[(UInt64, Double)] = Array::new(capacity=ground_truth.size())
+  let gt_scores : Array[(UInt64, Double)] = Array(capacity=ground_truth.length())
   for _, d in ground_truth {
     let dist = @core.cosine_dist_f32(qv, 0, d.vector, 0, dim)
     gt_scores.push((d.id, 1.0 - dist))

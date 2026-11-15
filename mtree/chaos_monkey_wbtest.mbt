@@ -5,9 +5,9 @@
 // 暴露潜在死锁、状态死循环、内存泄漏、文档复活（Resurrection Anomaly）与数据损坏。
 
 fn make_chaos_docs(ids : Array[UInt64], dim : Int, text_prefix : String) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=ids.length())
+  let docs : Array[@core.Doc] = Array(capacity=ids.length())
   for id in ids {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(Float::from_int(((id.to_int() * 17 + d * 3) % 200)) * 0.005)
     }
@@ -112,7 +112,7 @@ test "Chaos 3: Pure deletion bursts should not leak or ignore thresholds" {
   )
 
   // 连续灌入 150 个纯删除墓碑，不传入任何新文档
-  let tombstones : Array[UInt64] = Array::new(capacity=150)
+  let tombstones : Array[UInt64] = Array(capacity=150)
   for i in 1..=150 {
     tombstones.push(i.to_uint64())
   }

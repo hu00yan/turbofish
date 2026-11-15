@@ -9,13 +9,14 @@
 // 3) 读写分离无锁：查询路径仅读取当前快照与不可变 part，合并过程全在后台运行，查询零阻塞。
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct CompactionResult {
   merged_parts_count : Int
   output_part_id : String
   output_row_count : Int
   tombstones_purged : Int
   new_seq : UInt64
-} derive(Debug, Eq)
+}
 
 ///|
 pub struct Compactor[S] {
@@ -27,7 +28,7 @@ pub struct Compactor[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] Compactor::new(
+pub fn[S] Compactor::new(
   engine : MergeTreeEngine[S],
   policy : TieredMergePolicy,
   config : CompactionTriggerConfig,
@@ -124,7 +125,7 @@ pub fn[S : @store.ObjectStore] Compactor::compact_step(
     }
   }
 
-  let merged_docs : Array[@core.Doc] = Array::new(capacity=doc_map.size())
+  let merged_docs : Array[@core.Doc] = Array(capacity=doc_map.length())
   for _, d in doc_map {
     merged_docs.push(d)
   }
@@ -172,7 +173,7 @@ pub fn[S : @store.ObjectStore] Compactor::compact_step(
 
   while retries < 10 {
     // 构造新 parts 列表：保留未参与合并的 parts（如合并期间并发写入的新 L0 delta），加入新的 base part
-    let remaining_parts : Array[PartMeta] = Array::new()
+    let remaining_parts : Array[PartMeta] = Array()
     if new_base_meta.row_count > 0 {
       remaining_parts.push(new_base_meta)
     }
@@ -183,7 +184,7 @@ pub fn[S : @store.ObjectStore] Compactor::compact_step(
     }
 
     // 物理化清除已随合并抹除的 tombstones
-    let remaining_tombstones : Array[UInt64] = Array::new()
+    let remaining_tombstones : Array[UInt64] = Array()
     for t in current_manifest.tombstones {
       let mut is_purged = false
       for p in manifest.parts {
@@ -228,3 +229,6 @@ pub fn[S : @store.ObjectStore] Compactor::compact_step(
 
   raise @core.CommitConflict("compactor CAS retry exceeded max attempts")
 }
+
+pub extend CompactionResult with Debug::{to_repr}
+pub extend CompactionResult with Eq::{not_equal, equal}

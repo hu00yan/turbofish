@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // WriteBackBuffer 与 CachedManifestStore 白盒测试：
 // 1. 验证 50 轮连续 10 行微编辑在 WriteBackBuffer 攒批写回下的削减效果（从 150 次 PUT 削减到 15 次，削减 90%）；
@@ -9,10 +8,10 @@ using @test {assert_eq}
 
 ///|
 fn make_wb_test_docs(start : Int, count : Int, dim : Int) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=count)
+  let docs : Array[@core.Doc] = Array(capacity=count)
   for i in 0..<count {
     let id_num = start + i
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(Float::from_int((id_num * 13 + d * 7) % 500) * 0.002)
     }
@@ -55,14 +54,14 @@ test "WriteBackBuffer: 50 successive 10-row edits slashed from 150 PUTs to 15 PU
   // 3. 执行 50 轮连续微突变（每轮 10 行，共 500 次行修改）
   for step in 0..<50 {
     let edit_start = step * 10 + 1
-    let old_ids : Array[UInt64] = Array::new(capacity=10)
-    let updated_docs : Array[@core.Doc] = Array::new(capacity=10)
+    let old_ids : Array[UInt64] = Array(capacity=10)
+    let updated_docs : Array[@core.Doc] = Array(capacity=10)
 
     for i in 0..<10 {
       let id_num = edit_start + i
       let id_u64 = id_num.to_uint64()
       old_ids.push(id_u64)
-      let v : Array[Float] = Array::new(capacity=dim)
+      let v : Array[Float] = Array(capacity=dim)
       for d in 0..<dim {
         v.push(Float::from_int((id_num * 31 + step * 19 + d) % 500) * 0.002)
       }
@@ -169,3 +168,5 @@ test "Multi-Cloud HeadCoordinators (Native CAS and Lease fallback)" {
   }
   assert_eq(val3, "manifest-3")
 }
+
+extend LeaseCoordinator with HeadCoordinator::{commit_head, read_head}

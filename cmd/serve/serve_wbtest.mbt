@@ -13,7 +13,7 @@ test "cmd/serve: AnyStore with SimStore pluggability" {
   @store.ObjectStore::put(store, "test/key1", @utf8.encode("value1"))
   let read_val = @store.ObjectStore::get(store, "test/key1")
   assert_eq(read_val is Some(_), true)
-  assert_eq(@utf8.decode(read_val.unwrap().view()) catch { _ => "" }, "value1")
+  assert_eq(@utf8.decode(read_val.unwrap().exact_view()) catch { _ => "" }, "value1")
 
   // 验证 CAS put_if_match
   let cas_ok = @store.ObjectStore::put_if_match(

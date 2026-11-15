@@ -1,7 +1,6 @@
 import {
   "turbofish/core",
   "turbofish/build",
-  "turbofish/store",
   "turbofish/query",
   "turbofish/s3store",
   "turbofish/s3http",

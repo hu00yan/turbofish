@@ -161,8 +161,8 @@ test "unroll8 dot and l2sq various dims" {
   let test_dims = [0, 1, 2, 7, 8, 9, 15, 16, 25, 64, 128]
   let rng = Rng::new(12345U)
   for dim in test_dims {
-    let a : Array[Float] = Array::new(capacity=dim + 4)
-    let b : Array[Float] = Array::new(capacity=dim + 4)
+    let a : Array[Float] = Array(capacity=dim + 4)
+    let b : Array[Float] = Array(capacity=dim + 4)
     // 前置 padding 模拟 offset > 0
     for _ in 0..<2 {
       a.push(0.0)

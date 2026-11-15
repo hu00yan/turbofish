@@ -1,5 +1,4 @@
 import {
-  "moonbitlang/core/test",
   "turbofish/core",
   "turbofish/store",
   "moonbitlang/core/math",

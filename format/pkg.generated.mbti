@@ -224,6 +224,7 @@ pub(all) struct Centroids {
   data : Array[Float]
 }
 pub fn Centroids::k(Self) -> Int32
+pub fn Centroids::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) enum ColData {
@@ -235,13 +236,17 @@ pub(all) enum ColData {
   ColBool(Array[Bool])
   ColVec(Int32, Array[Float])
 }
+pub fn ColData::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct CompactFooter {
   sections : Array[CompactSection]
 }
+pub fn CompactFooter::equal(Self, Self) -> Bool
 pub fn CompactFooter::get(Self, String) -> CompactSection?
 pub fn CompactFooter::has(Self, String) -> Bool
+pub fn CompactFooter::not_equal(Self, Self) -> Bool
+pub fn CompactFooter::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct CompactSection {
@@ -250,6 +255,9 @@ pub(all) struct CompactSection {
   length : Int32
   extra : Int32
 }
+pub fn CompactSection::equal(Self, Self) -> Bool
+pub fn CompactSection::not_equal(Self, Self) -> Bool
+pub fn CompactSection::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct FtsBuilt {
@@ -258,6 +266,7 @@ pub(all) struct FtsBuilt {
   entries : Array[FtsDirEntry]
   doc_count : Int32
 }
+pub fn FtsBuilt::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct FtsDirEntry {
@@ -266,12 +275,14 @@ pub(all) struct FtsDirEntry {
   size : Int32
   df : Int32
 }
+pub fn FtsDirEntry::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct GlobalGen {
   base : String
   deltas : Array[String]
 }
+pub fn GlobalGen::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct GlobalVecPart {
@@ -280,6 +291,7 @@ pub(all) struct GlobalVecPart {
   dim : Int32
   data : Array[Float]
 }
+pub fn GlobalVecPart::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct ManifestData {
@@ -295,6 +307,7 @@ pub(all) struct ManifestData {
   avg_doc_len : Double
 }
 pub fn ManifestData::to_json(Self) -> @json.Json
+pub fn ManifestData::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct NamespaceMeta {
@@ -310,6 +323,7 @@ pub(all) struct NamespaceMeta {
   fts_tokenizer : String?
 }
 pub fn NamespaceMeta::to_json(Self) -> @json.Json
+pub fn NamespaceMeta::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct PQPart {
@@ -320,19 +334,24 @@ pub(all) struct PQPart {
   codebooks : Array[Float]
   codes : Array[UInt32]
 }
+pub fn PQPart::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct Posting {
   row : Int32
   tf : Int32
 }
+pub fn Posting::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum SegmentFormat {
   LegacyMultiFile
   SlabV2
 }
+pub fn SegmentFormat::equal(Self, Self) -> Bool
 pub fn SegmentFormat::from_string(String) -> Self?
+pub fn SegmentFormat::not_equal(Self, Self) -> Bool
+pub fn SegmentFormat::to_repr(Self) -> @debug.Repr
 pub fn SegmentFormat::to_string(Self) -> String
 
 #derive(@debug.Debug)
@@ -344,6 +363,7 @@ pub(all) struct SegmentMeta {
   doc_len_sum : Int32
   size_bytes : Int32
 }
+pub fn SegmentMeta::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum SlabComponent {
@@ -361,8 +381,11 @@ pub(all) enum SlabComponent {
   Meta
   Custom(String)
 }
+pub fn SlabComponent::equal(Self, Self) -> Bool
 pub fn SlabComponent::from_name(String) -> Self
+pub fn SlabComponent::not_equal(Self, Self) -> Bool
 pub fn SlabComponent::to_name(Self) -> String
+pub fn SlabComponent::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct SlabComponentPayload {
@@ -371,6 +394,7 @@ pub(all) struct SlabComponentPayload {
   row_count : Int32
 }
 pub fn SlabComponentPayload::new(String, Bytes, Int32) -> Self
+pub fn SlabComponentPayload::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SlabEntry {
@@ -379,16 +403,22 @@ pub(all) struct SlabEntry {
   length : Int64
   row_count : Int32
 }
+pub fn SlabEntry::equal(Self, Self) -> Bool
+pub fn SlabEntry::not_equal(Self, Self) -> Bool
+pub fn SlabEntry::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SlabIndex {
   entries : Array[SlabEntry]
 }
+pub fn SlabIndex::equal(Self, Self) -> Bool
 pub fn SlabIndex::get(Self, String) -> SlabEntry?
 pub fn SlabIndex::get_component(Self, SlabComponent) -> SlabEntry?
 pub fn SlabIndex::get_slice(Self, Bytes, String) -> Bytes?
 pub fn SlabIndex::has(Self, String) -> Bool
 pub fn SlabIndex::new() -> Self
+pub fn SlabIndex::not_equal(Self, Self) -> Bool
+pub fn SlabIndex::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct VecPart {
@@ -397,6 +427,7 @@ pub(all) struct VecPart {
   dim : Int32
   data : Array[Float]
 }
+pub fn VecPart::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

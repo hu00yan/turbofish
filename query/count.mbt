@@ -90,7 +90,7 @@ pub fn[S : @store.ObjectStore] matching_ids(
   filter : Filter,
 ) -> Array[UInt64] raise @core.SpndError {
   let p = eval_pushdown_filter(n, filter)
-  let out : Array[UInt64] = Array::new(capacity=p.total_matched)
+  let out : Array[UInt64] = Array(capacity=p.total_matched)
   for id in p.allowed_ids {
     out.push(id)
   }

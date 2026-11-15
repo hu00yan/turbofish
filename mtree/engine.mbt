@@ -119,7 +119,7 @@ pub fn[S : @store.ObjectStore] MergeTreeEngine::mutate_rows(
   for d in updated_docs {
     updated_ids.add(d.id)
   }
-  let to_delete : Array[UInt64] = Array::new()
+  let to_delete : Array[UInt64] = Array()
   for id in old_ids {
     if !updated_ids.contains(id) {
       to_delete.push(id)
@@ -229,7 +229,7 @@ pub fn[S : @store.ObjectStore] MergeTreeEngine::read_live_docs(
   self : MergeTreeEngine[S]
 ) -> Array[@core.Doc] raise @core.SpndError {
   let roar_mask = self.manifest.tombstone_mask()
-  let live : Array[@core.Doc] = Array::new()
+  let live : Array[@core.Doc] = Array()
   let seen_ids : Set[UInt64] = Set([])
 
   // 从最新的 Part 到最旧的 Part 遍历（最新 L0 优先）

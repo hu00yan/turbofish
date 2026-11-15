@@ -20,7 +20,7 @@ test "roaring empty and sparse roundtrip" {
 test "roaring dense container uses bitmap and roundtrips" {
   // 一个高 32 位容器里放 5000 个 low 值（触发 bitmap container）
   let n = 5000
-  let ids : Array[UInt64] = Array::new(capacity=n)
+  let ids : Array[UInt64] = Array(capacity=n)
   for i in 0..<n {
     ids.push((i * 3).to_uint64())
   }
@@ -59,7 +59,7 @@ test "roaring_contains membership checks" {
 
   // Dense container (bitmap)
   let n = 5000
-  let dense_ids : Array[UInt64] = Array::new(capacity=n)
+  let dense_ids : Array[UInt64] = Array(capacity=n)
   for i in 0..<n {
     dense_ids.push((i * 3).to_uint64())
   }

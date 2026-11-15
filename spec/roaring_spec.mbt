@@ -149,3 +149,6 @@ pub fn verify_roaring_roundtrip(ids : Array[UInt64]) -> Bool {
   }
   true
 }
+
+pub extend ContainerKind with Debug::{to_repr}
+pub extend ContainerKind with Eq::{not_equal, equal}

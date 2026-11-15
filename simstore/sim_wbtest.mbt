@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // SimStore 白盒测试：
 // 计费数学精确、延迟确定性、采样分布、三档行为、LRU 逐出、get_range、CAS、存储费。

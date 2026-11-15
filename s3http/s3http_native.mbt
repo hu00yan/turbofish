@@ -1,19 +1,19 @@
 // 真实 HTTP transport（native，libcurl FFI）。
 //
 // S3Store 只依赖 `HttpTransport` trait；本文件把 execute 映射到 libcurl：
-// - method/url/headers 以 NUL 结尾 C 字符串传入；
+// - http_method/url/headers 以 NUL 结尾 C 字符串传入；
 // - headers 用 "\n" 分隔的 "Key: Value" 列表；
 // - body 用 FixedArray[Byte] 传入；
 // - C 侧返回 opaque result，MoonBit 读取 status/headers/body 后释放。
 
 ///|
 #external
-type S3HttpResult
+priv type S3HttpResult
 
 ///|
-#borrow(method, url, headers, body)
+#borrow(http_method, url, headers, body)
 extern "C" fn s3http_perform(
-  method : Bytes,
+  http_method : Bytes,
   url : Bytes,
   headers : Bytes,
   body : FixedArray[Byte],
@@ -60,7 +60,7 @@ pub fn now_amz_date() -> String {
   if n <= 0 {
     return "19700101T000000Z"
   }
-  @utf8.decode(Bytes::from_array(buf.view(start=0, end=n)).view()) catch {
+  @utf8.decode(Bytes::from_array(buf.exact_view(start=0, end=n)).exact_view()) catch {
     _ => "19700101T000000Z"
   }
 }
@@ -146,13 +146,13 @@ pub impl @s3store.HttpTransport for CurlTransport with fn execute(
   )
   let _ = if hn > 0 { s3http_read_headers(res, hbuf, hn) } else { 0 }
   let hstr = if hn > 0 {
-    @utf8.decode(Bytes::from_array(hbuf.view()).view()) catch {
+    @utf8.decode(Bytes::from_array(hbuf.exact_view()).exact_view()) catch {
       _ => ""
     }
   } else {
     ""
   }
-  let hs : Array[(String, String)] = Array::new()
+  let hs : Array[(String, String)] = Array()
   for line in hstr.split("\n") {
     let l = line.to_owned()
     if l.length() > 0 {
@@ -172,7 +172,9 @@ pub impl @s3store.HttpTransport for CurlTransport with fn execute(
     b'\x00',
   )
   let _ = if bn > 0 { s3http_read_body(res, bbuf, bn) } else { 0 }
-  let out = Bytes::from_array(bbuf.view())
+  let out = Bytes::from_array(bbuf.exact_view())
   s3http_free(res)
   (status, hs, out)
 }
+
+pub extend CurlTransport with @s3store.HttpTransport::{execute}

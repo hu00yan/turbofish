@@ -4,12 +4,13 @@
 // 3) 绝不在 S3 上死循环 LIST/HEAD。
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct CompactionTriggerConfig {
   l0_threshold : Int // 默认 4
   tombstone_ratio_threshold : Double // 默认 0.20 (20%)
   idle_fallback_ms : Int64 // 默认 30000 毫秒
   max_merge_parts : Int // 单次合并最大分段数
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn CompactionTriggerConfig::default() -> CompactionTriggerConfig {
@@ -64,9 +65,10 @@ pub fn should_trigger_compaction(
 
 ///|
 /// 基于大小分层与条件唤醒的 MergePolicy 实现。
+#derive(Debug, Eq)
 pub(all) struct TieredMergePolicy {
   config : CompactionTriggerConfig
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn TieredMergePolicy::new(
@@ -80,8 +82,8 @@ pub impl MergePolicy for TieredMergePolicy with pick(
   self : TieredMergePolicy,
   parts : Array[PartMeta],
 ) -> Array[String]? {
-  let l0_parts : Array[PartMeta] = Array::new()
-  let base_parts : Array[PartMeta] = Array::new()
+  let l0_parts : Array[PartMeta] = Array()
+  let base_parts : Array[PartMeta] = Array()
   let mut tombstone_triggered = false
 
   for p in parts {
@@ -101,7 +103,7 @@ pub impl MergePolicy for TieredMergePolicy with pick(
   let l0_triggered = l0_parts.length() >= self.config.l0_threshold
 
   // 收集待合并的 part_id
-  let picked : Array[String] = Array::new()
+  let picked : Array[String] = Array()
 
   // 如果满足触发条件，或者只要存在待折叠的 L0 增量段，则打包基线与 delta
   if l0_triggered || tombstone_triggered || l0_parts.length() > 0 {
@@ -122,3 +124,9 @@ pub impl MergePolicy for TieredMergePolicy with pick(
     Some(picked)
   }
 }
+
+pub extend CompactionTriggerConfig with Debug::{to_repr}
+pub extend CompactionTriggerConfig with Eq::{not_equal, equal}
+pub extend TieredMergePolicy with Debug::{to_repr}
+pub extend TieredMergePolicy with Eq::{not_equal, equal}
+pub extend TieredMergePolicy with MergePolicy::{pick}

@@ -307,7 +307,7 @@ test "with_budget: scope isolation and assertion" {
   let bstore = BudgetStore::new(mem, Budget::unlimited())
 
   // 作用域 1：在 point_read 预算下仅执行 1 次读
-  let res = with_budget(bstore, Budget::point_read(), fn() {
+  let res = with_budget(bstore, Budget::point_read(), () => {
     let v = bstore.get("k")
     assert_eq(v, Some(b"val"))
     123
@@ -321,7 +321,7 @@ test "with_budget: scope isolation and assertion" {
   // 作用域 2：执行 2 次读超预算
   let mut caught = false
   try {
-    with_budget(bstore, Budget::point_read(), fn() {
+    with_budget(bstore, Budget::point_read(), () => {
       let _ = bstore.get("k")
       let _ = bstore.get("k")
       ()
@@ -340,7 +340,7 @@ test "run_with_budget: wrap and execute" {
   let mem = MemStore::new()
   mem.put("k", b"val")
 
-  let out = run_with_budget(mem, Budget::point_read(), fn(bs) {
+  let out = run_with_budget(mem, Budget::point_read(), (bs) => {
     let v = bs.get("k")
     assert_eq(v, Some(b"val"))
     "success"

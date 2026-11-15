@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // ============================================================================
 // 【暂不可编译】build 包完整白盒测试（6 个测试块）。
@@ -109,7 +108,7 @@ impl @store.ObjectStore for WbStore with fn get_range(
         Some(Bytes::make(0, b'\x00'))
       } else {
         let b = Buffer()
-        b.write_bytesview(value.view(start=lo, end=hi))
+        b.write_bytesview(value.exact_view(start=lo, end=hi))
         Some(b.to_bytes())
       }
     }
@@ -122,7 +121,7 @@ impl @store.ObjectStore for WbStore with fn list(
   self : WbStore,
   prefix : String,
 ) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for kv in self.data.iter() {
     if kv.0.has_prefix(prefix) {
       out.push(kv.0)
@@ -161,7 +160,7 @@ fn mkdocs(
   let words = [
     "alpha", "beta", "gamma", "delta", "search", "engine", "向量", "检索",
   ]
-  let docs : Array[@core.Doc] = Array::new()
+  let docs : Array[@core.Doc] = Array()
   for i in 0..<n {
     let mut text = ""
     let ntok = 5 + (rng.next_u32() % 6U).reinterpret_as_int()
@@ -169,7 +168,7 @@ fn mkdocs(
       let w = words[(rng.next_u32() % words.length().reinterpret_as_uint()).reinterpret_as_int()]
       text = text + w + " "
     }
-    let vec : Array[Float] = Array::new(capacity=dim)
+    let vec : Array[Float] = Array(capacity=dim)
     for _ in 0..<dim {
       vec.push(Float::from_double(rng.next_range(-1.0, 1.0)))
     }
@@ -222,7 +221,7 @@ fn[S : @store.ObjectStore] seg_partitions(
     Some(Array(a)) => a
     _ => raise @core.Corrupt("seg meta partitions missing")
   }
-  let out : Array[Int] = Array::new()
+  let out : Array[Int] = Array()
   for pj in arr {
     match pj {
       Number(d, ..) => out.push(d.to_int())
@@ -387,7 +386,7 @@ test "ingest small batch: objects complete and columns roundtrip" {
   }
   let vec_keys = store.list("\{p0}/vec/")
   assert_eq(vec_keys.length(), part_ids.length())
-  let seen_rows : Array[Int] = Array::new()
+  let seen_rows : Array[Int] = Array()
   for cid in part_ids {
     let part = @format.decode_part(must_get(store, "\{p0}/vec/part-\{cid}.bin"))
     assert_eq(part.cid, cid)
@@ -490,7 +489,7 @@ test "second ingest appends and reuses centroids" {
   }
   // f32 分区精确对齐，行号并集 = 0..4
   let part_ids = seg_partitions(store, pl)
-  let seen_rows : Array[Int] = Array::new()
+  let seen_rows : Array[Int] = Array()
   for cid in part_ids {
     let part = @format.decode_part(must_get(store, "\{pl}/vec/part-\{cid}.bin"))
     for j in 0..<part.rows.length() {
@@ -926,7 +925,7 @@ test "PQ reconstruction is close to normalized data" {
   let dim = 16
   let n = 200
   let rng = @core.Rng::new(5U)
-  let data : Array[Float] = Array::new(capacity=n * dim)
+  let data : Array[Float] = Array(capacity=n * dim)
   for i in 0..<n {
     let c = i % 2
     for _ in 0..<dim {
@@ -962,7 +961,7 @@ test "PQ16 ADC ranking matches brute force on separable clusters" {
   let n = 400
   let rng = @core.Rng::new(11U)
   // 4 簇：中心为 one-hot 块
-  let data : Array[Float] = Array::new(capacity=n * dim)
+  let data : Array[Float] = Array(capacity=n * dim)
   for i in 0..<n {
     let c = i % 4
     for d in 0..<dim {
@@ -972,25 +971,25 @@ test "PQ16 ADC ranking matches brute force on separable clusters" {
   }
   let (codebooks, codes) = train_pq(dim, data)
   let m = pq_m_for(dim)
-  let rows : Array[Int] = Array::new(capacity=n)
+  let rows : Array[Int] = Array(capacity=n)
   for i in 0..<n {
     rows.push(i)
   }
   let part = @format.encode_pq_part(rows, dim, m, codebooks, codes)
   let pq = @format.decode_pq_part(part)
   // ADC 打分（与 query 包 pq_adc_candidates 同公式）
-  let qv : Array[Float] = Array::new(capacity=dim)
+  let qv : Array[Float] = Array(capacity=dim)
   for d in 0..<dim {
     qv.push(
       Float::from_double(data[d].to_double() + rng.next_range(-0.01, 0.01)),
     )
   }
   let qn = @core.norm_f32(qv, 0, dim)
-  let qnorm : Array[Float] = Array::new(capacity=dim)
+  let qnorm : Array[Float] = Array(capacity=dim)
   for v in qv {
     qnorm.push(Float::from_double(v.to_double() / qn))
   }
-  let lut : Array[Double] = Array::new(capacity=m * 256)
+  let lut : Array[Double] = Array(capacity=m * 256)
   for c in 0..<m {
     for j in 0..<256 {
       let mut dist = 0.0
@@ -1002,7 +1001,7 @@ test "PQ16 ADC ranking matches brute force on separable clusters" {
       lut.push(dist)
     }
   }
-  let adc : Array[(Double, Int)] = Array::new(capacity=n)
+  let adc : Array[(Double, Int)] = Array(capacity=n)
   for i in 0..<n {
     let mut dist = 0.0
     for c in 0..<m {
@@ -1011,7 +1010,7 @@ test "PQ16 ADC ranking matches brute force on separable clusters" {
     adc.push((1.0 - dist / 2.0, i))
   }
   adc.sort_by(fn(a, b) { b.0.compare(a.0) })
-  let brute : Array[(Double, Int)] = Array::new(capacity=n)
+  let brute : Array[(Double, Int)] = Array(capacity=n)
   for i in 0..<n {
     brute.push((1.0 - @core.cosine_dist_f32(qv, 0, data, i * dim, dim), i))
   }
@@ -1035,11 +1034,11 @@ test "PQ16 ADC on 768-dim random clusters" {
   let n = 400
   let rng = @core.Rng::new(21U)
   let inv = 1.0 / dim.to_double().sqrt()
-  let centers : Array[Float] = Array::new(capacity=8 * dim)
+  let centers : Array[Float] = Array(capacity=8 * dim)
   for _ in 0..<(8 * dim) {
     centers.push(Float::from_double(rng.next_range(-1.0, 1.0) * inv))
   }
-  let data : Array[Float] = Array::new(capacity=n * dim)
+  let data : Array[Float] = Array(capacity=n * dim)
   for i in 0..<n {
     let c = i % 8
     for d in 0..<dim {
@@ -1052,7 +1051,7 @@ test "PQ16 ADC on 768-dim random clusters" {
   }
   let (codebooks, codes) = train_pq(dim, data)
   let m = pq_m_for(dim)
-  let rows : Array[Int] = Array::new(capacity=n)
+  let rows : Array[Int] = Array(capacity=n)
   for i in 0..<n {
     rows.push(i)
   }
@@ -1060,7 +1059,7 @@ test "PQ16 ADC on 768-dim random clusters" {
     @format.encode_pq_part(rows, dim, m, codebooks, codes),
   )
   // 查询 = doc 11 + 噪声
-  let qv : Array[Float] = Array::new(capacity=dim)
+  let qv : Array[Float] = Array(capacity=dim)
   for d in 0..<dim {
     qv.push(
       Float::from_double(
@@ -1069,11 +1068,11 @@ test "PQ16 ADC on 768-dim random clusters" {
     )
   }
   let qn = @core.norm_f32(qv, 0, dim)
-  let qnorm : Array[Float] = Array::new(capacity=dim)
+  let qnorm : Array[Float] = Array(capacity=dim)
   for v in qv {
     qnorm.push(Float::from_double(v.to_double() / qn))
   }
-  let lut : Array[Double] = Array::new(capacity=m * 256)
+  let lut : Array[Double] = Array(capacity=m * 256)
   for c in 0..<m {
     for j in 0..<256 {
       let mut dist = 0.0
@@ -1085,7 +1084,7 @@ test "PQ16 ADC on 768-dim random clusters" {
       lut.push(dist)
     }
   }
-  let adc : Array[(Double, Int)] = Array::new(capacity=n)
+  let adc : Array[(Double, Int)] = Array(capacity=n)
   for i in 0..<n {
     let mut dist = 0.0
     for c in 0..<m {
@@ -1094,7 +1093,7 @@ test "PQ16 ADC on 768-dim random clusters" {
     adc.push((1.0 - dist / 2.0, i))
   }
   adc.sort_by(fn(a, b) { b.0.compare(a.0) })
-  let brute : Array[(Double, Int)] = Array::new(capacity=n)
+  let brute : Array[(Double, Int)] = Array(capacity=n)
   for i in 0..<n {
     brute.push((1.0 - @core.cosine_dist_f32(qv, 0, data, i * dim, dim), i))
   }
@@ -1678,7 +1677,7 @@ impl @store.ObjectStore for ForkStore with fn list(
   let all = self.inner.list(prefix)
   if prefix.has_suffix("/_heads/") && self.head_lists == 0 {
     self.head_lists += 1
-    let out : Array[String] = Array::new()
+    let out : Array[String] = Array()
     for key in all {
       if !key.has_suffix("/manifest-0002") {
         out.push(key)
@@ -1827,7 +1826,7 @@ fn[S : @store.ObjectStore] global_gen_keys(
   ns : String,
   ver : String,
 ) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for k in store.list("\{ns}/vec/global/\{ver}/") {
     out.push(k)
   }
@@ -1846,7 +1845,7 @@ fn meta_of_kind_base(m : Map[String, Json]) -> (String, String, Array[String]) {
     Some(String(s)) => s
     _ => ""
   }
-  let seg_ids : Array[String] = Array::new()
+  let seg_ids : Array[String] = Array()
   match m.get("seg_ids") {
     Some(Array(a)) =>
       for x in a {
@@ -2054,15 +2053,15 @@ fn[S : @store.ObjectStore] flat_global_vectors(
 ) -> (Int, Array[Array[Float]?], Array[Int]) raise {
   let gm = read_global_meta(store, ns, ver)
   let cids = global_meta_cids(gm)
-  let seg_off : Array[Int] = Array::new(capacity=manifest.segments.length())
-  let counts : Array[Int] = Array::new(capacity=manifest.segments.length())
+  let seg_off : Array[Int] = Array(capacity=manifest.segments.length())
+  let counts : Array[Int] = Array(capacity=manifest.segments.length())
   let mut off = 0
   for s in manifest.segments {
     seg_off.push(off)
     counts.push(0)
     off += s.row_count
   }
-  let vecs : Array[Array[Float]?] = Array::new(capacity=off)
+  let vecs : Array[Array[Float]?] = Array(capacity=off)
   for _ in 0..<off {
     vecs.push(None)
   }
@@ -2080,7 +2079,7 @@ fn[S : @store.ObjectStore] flat_global_vectors(
       let (si, row) = gp.rows[i]
       assert_eq(si >= 0 && si < manifest.segments.length(), true)
       assert_eq(row >= 0 && row < manifest.segments[si].row_count, true)
-      let v : Array[Float] = Array::new(capacity=gp.dim)
+      let v : Array[Float] = Array(capacity=gp.dim)
       for d in 0..<gp.dim {
         v.push(gp.data[i * gp.dim + d])
       }
@@ -2170,7 +2169,7 @@ test "S2b ingest after ingest_delta keeps delta rows in new base" {
     assert_eq(counts[si], m3.segments[si].row_count)
   }
   // 逐行同向校验：(si,row) 顺序 = d1 ++ d2 ++ d3 的拼接顺序。
-  let src : Array[Array[Float]] = Array::new()
+  let src : Array[Array[Float]] = Array()
   for d in d1 {
     src.push(d.vector)
   }
@@ -2180,7 +2179,7 @@ test "S2b ingest after ingest_delta keeps delta rows in new base" {
   for d in d3 {
     src.push(d.vector)
   }
-  let seg_off : Array[Int] = Array::new(capacity=m3.segments.length())
+  let seg_off : Array[Int] = Array(capacity=m3.segments.length())
   let mut off = 0
   for s in m3.segments {
     seg_off.push(off)
@@ -2257,7 +2256,7 @@ test "S2b compact reads global delta chain and folds it into one base" {
   assert_eq(dim, 8)
   assert_eq(counts[0], 412)
   // 逐行同向校验：d1 ++ d2（compact 按段顺序拼接）
-  let src : Array[Array[Float]] = Array::new()
+  let src : Array[Array[Float]] = Array()
   for d in d1 {
     src.push(d.vector)
   }
@@ -2324,7 +2323,7 @@ test "S3 ingest_delta auto compacts global chain at third delta" {
   }
   assert_eq(g2.base, base)
   assert_eq(g2.deltas.length(), 2)
-  let old_versions : Array[String] = Array::new()
+  let old_versions : Array[String] = Array()
   old_versions.push(base)
   for d in g2.deltas {
     old_versions.push(d)
@@ -2472,3 +2471,7 @@ test "S2b delete_docs preserves global delta chain" {
   assert_eq(after_gen.deltas, before_gen.deltas)
   assert_eq(after.deleted.length() >= 2, true)
 }
+
+
+
+extend WbStore with @turbofish/store.ObjectStore::{delete, get, get_range, head_version, list, put, put_if_match}

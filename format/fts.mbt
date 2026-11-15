@@ -24,26 +24,29 @@ pub const DIR_MAGIC : String = "SPNDDIR1"
 pub const POS_MAGIC : String = "SPNDPOS1"
 
 ///|
+#derive(Debug)
 pub(all) struct Posting {
   row : Int
   tf : Int
-} derive(Debug)
+}
 
 ///|
+#derive(Debug)
 pub(all) struct FtsDirEntry {
   term : String
   offset : Int
   size : Int
   df : Int
-} derive(Debug)
+}
 
 ///|
+#derive(Debug)
 pub(all) struct FtsBuilt {
   dir : Bytes
   postings : Bytes
   entries : Array[FtsDirEntry]
   doc_count : Int
-} derive(Debug)
+}
 
 ///|
 /// term 的规范序：UTF-8 字节序 == 码位序。encode 与查询二分必须用同一比较器
@@ -68,7 +71,7 @@ pub fn encode_fts(lists : Array[(String, Array[Posting])]) -> FtsBuilt {
   let sorted = lists.copy()
   sorted.sort_by(fn(a, b) { term_compare(a.0, b.0) })
   let payload = Buffer()
-  let entries : Array[FtsDirEntry] = Array::new()
+  let entries : Array[FtsDirEntry] = Array()
   let dir_meta = Buffer()
   for kv in sorted {
     let (term, posts) = kv
@@ -82,7 +85,7 @@ pub fn encode_fts(lists : Array[(String, Array[Posting])]) -> FtsBuilt {
     let size = payload.length() - start
     let tb = @utf8.encode(term)
     dir_meta.write_byte(tb.length().to_byte())
-    dir_meta.write_bytes(tb.view())
+    dir_meta.write_bytes(tb.exact_view())
     dir_meta.write_uint_le(start.reinterpret_as_uint())
     dir_meta.write_uint_le(size.reinterpret_as_uint())
     dir_meta.write_uint_le(posts.length().reinterpret_as_uint())
@@ -94,13 +97,13 @@ pub fn encode_fts(lists : Array[(String, Array[Posting])]) -> FtsBuilt {
   dir.write_uint_le(sorted.length().reinterpret_as_uint())
   dir.write_uint_le(payload.length().reinterpret_as_uint())
   dir.write_uint_le(0U) // doc_count 由 build 侧回填，MVP 由 meta.json 承载
-  dir.write_bytes(dir_meta.to_bytes().view())
+  dir.write_bytes(dir_meta.to_bytes().exact_view())
   // POS 头 16B
   let pos = Buffer()
   pos.write_string_utf8(POS_MAGIC)
   pos.write_uint_le(payload.length().reinterpret_as_uint())
   pos.write_uint_le(0U)
-  pos.write_bytes(payload.to_bytes().view())
+  pos.write_bytes(payload.to_bytes().exact_view())
   { dir: dir.to_bytes(), postings: pos.to_bytes(), entries, doc_count: 0 }
 }
 
@@ -112,7 +115,7 @@ pub fn decode_fts_dir(bs : Bytes) -> Array[FtsDirEntry] raise @core.SpndError {
   if term_count < 0 {
     raise @core.Corrupt("fts dir term_count")
   }
-  let out : Array[FtsDirEntry] = Array::new(capacity=term_count)
+  let out : Array[FtsDirEntry] = Array(capacity=term_count)
   let mut pos = 20
   for _ in 0..<term_count {
     if pos >= bs.length() {
@@ -123,7 +126,7 @@ pub fn decode_fts_dir(bs : Bytes) -> Array[FtsDirEntry] raise @core.SpndError {
     if pos + tlen + 12 > bs.length() {
       raise @core.Truncated("dir entry")
     }
-    let term = @utf8.decode(bs.view(start=pos, end=pos + tlen)) catch {
+    let term = @utf8.decode(bs.exact_view(start=pos, end=pos + tlen)) catch {
       _ => raise @core.Corrupt("invalid utf8 in fts dir")
     }
     pos += tlen
@@ -150,7 +153,7 @@ pub fn read_postings(
     raise @core.Truncated("postings range")
   }
   let fa = blob.to_fixedarray()
-  let out : Array[Posting] = Array::new(capacity=entry.df)
+  let out : Array[Posting] = Array(capacity=entry.df)
   let mut prev = -1
   let mut pos = base
   while pos < end {
@@ -162,3 +165,7 @@ pub fn read_postings(
   }
   out
 }
+
+pub extend Posting with Debug::{to_repr}
+pub extend FtsDirEntry with Debug::{to_repr}
+pub extend FtsBuilt with Debug::{to_repr}

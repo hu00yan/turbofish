@@ -7,7 +7,6 @@
 // stale_ok=false rethrow、invalidate 后 miss、max_entries 逐出与 pinned 保留。
 
 ///|
-using @test {assert_eq}
 
 ///|
 /// wbtest 辅助：trait 方法跨包不能直接点调用，走泛型分发。

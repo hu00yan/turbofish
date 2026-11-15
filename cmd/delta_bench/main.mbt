@@ -195,9 +195,9 @@ fn make_docs(n : Int, dim : Int) -> Array[@core.Doc] {
     "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "index", "search",
     "vector", "object", "storage", "latency",
   ]
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for _ in 0..<dim {
       v.push(Float::from_double(rng.next_range(-1.0, 1.0)))
     }
@@ -229,7 +229,7 @@ fn batch_slice(
   start : Int,
   n : Int,
 ) -> Array[@core.Doc] {
-  let out : Array[@core.Doc] = Array::new(capacity=n)
+  let out : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
     out.push(all[start + i])
   }
@@ -265,7 +265,7 @@ fn read_head_manifest(
   let key = "\{ns}/_manifest/\{head}.json"
   match store.get(key) {
     Some(bs) => {
-      let s = @utf8.decode(bs.view()) catch {
+      let s = @utf8.decode(bs.exact_view()) catch {
         _ => raise @core.Corrupt("manifest is not utf8: \{key}")
       }
       let j = @json.parse(s) catch {
@@ -296,7 +296,7 @@ fn run_strategy(
 ) -> Array[BatchStat] raise @core.SpndError {
   let store = CountingStore::new(4242U)
   let cfg = make_cfg(ns)
-  let stats : Array[BatchStat] = Array::new(capacity=batches)
+  let stats : Array[BatchStat] = Array(capacity=batches)
   for b in 0..<batches {
     let docs = batch_slice(all_docs, b * docs_per_batch, docs_per_batch)
     store.reset_writes()
@@ -373,7 +373,7 @@ fn sum_puts(stats : Array[BatchStat]) -> Int {
 
 ///|
 fn compaction_batches(stats : Array[BatchStat]) -> String {
-  let hits : Array[String] = Array::new()
+  let hits : Array[String] = Array()
   for s in stats {
     if s.compacted {
       hits.push(s.batch.to_string())
@@ -472,3 +472,6 @@ fn main {
     _ => println("delta_bench failed (SpndError; see build/query logs for details)")
   }
 }
+
+
+extend CountingStore with @turbofish/store.ObjectStore::{get, list}

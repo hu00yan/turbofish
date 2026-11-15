@@ -26,6 +26,7 @@ pub const PQ_MAGIC : String = "SPNDPQP1"
 
 ///|
 /// PQ16 分区。codebooks 长 m×256×dsub（行主序），codes 长 count×m（u8 中心号）。
+#derive(Debug)
 pub(all) struct PQPart {
   rows : Array[Int] // segment 内行号
   dim : Int
@@ -33,7 +34,7 @@ pub(all) struct PQPart {
   dsub : Int
   codebooks : Array[Float]
   codes : Array[UInt]
-} derive(Debug)
+}
 
 ///|
 /// SQ8 code = clamp(round((v-min)×inv_scale), 0, 255)；inv_scale==0 时恒 0。
@@ -65,8 +66,8 @@ pub fn sq8_params_of(
 /// count = data.length / dim。
 fn sq8_params(dim : Int, data : Array[Float]) -> (Array[Float], Array[Float]) {
   let count = if dim > 0 { data.length() / dim } else { 0 }
-  let mins : Array[Float] = Array::new(capacity=dim)
-  let scales : Array[Float] = Array::new(capacity=dim)
+  let mins : Array[Float] = Array(capacity=dim)
+  let scales : Array[Float] = Array(capacity=dim)
   for d in 0..<dim {
     let mut lo = if count > 0 { data[d] } else { 0.0 }
     let mut hi = lo
@@ -187,15 +188,15 @@ pub fn decode_part_sq8_raw(
   if codes_pos > bs.length() || codes_pos + count * dim > bs.length() {
     raise @core.Truncated("sq8 payload")
   }
-  let mins : Array[Float] = Array::new(capacity=dim)
+  let mins : Array[Float] = Array(capacity=dim)
   for d in 0..<dim {
     mins.push(@core.read_f32_le(bs, vec_base + d * 4))
   }
-  let scales : Array[Float] = Array::new(capacity=dim)
+  let scales : Array[Float] = Array(capacity=dim)
   for d in 0..<dim {
     scales.push(@core.read_f32_le(bs, scales_pos + d * 4))
   }
-  let codes : Array[UInt] = Array::new(capacity=count * dim)
+  let codes : Array[UInt] = Array(capacity=count * dim)
   for i in 0..<(count * dim) {
     let byte = match bs.get(codes_pos + i) {
       Some(x) => x
@@ -275,18 +276,18 @@ pub fn decode_pq_part(bs : Bytes) -> PQPart raise @core.SpndError {
   if codes_pos64 + codes_len64 > bs.length().to_int64() {
     raise @core.Truncated("pq payload")
   }
-  let rows : Array[Int] = Array::new(capacity=count)
+  let rows : Array[Int] = Array(capacity=count)
   for i in 0..<count {
     rows.push(@core.read_u32_le(bs, 20 + i * 4).reinterpret_as_int())
   }
   let cb_base = rows_end64.to_int()
   let cb_len = cb_len64.to_int()
-  let codebooks : Array[Float] = Array::new(capacity=cb_len)
+  let codebooks : Array[Float] = Array(capacity=cb_len)
   for i in 0..<cb_len {
     codebooks.push(@core.read_f32_le(bs, cb_base + i * 4))
   }
   let codes_pos = codes_pos64.to_int()
-  let codes : Array[UInt] = Array::new(capacity=count * m)
+  let codes : Array[UInt] = Array(capacity=count * m)
   for i in 0..<(count * m) {
     let byte = match bs.get(codes_pos + i) {
       Some(x) => x
@@ -349,7 +350,7 @@ pub fn decode_pq_codebook(
   if 16 + n * 4 > bs.length() {
     raise @core.Truncated("pq codebook payload")
   }
-  let cbs : Array[Float] = Array::new(capacity=n)
+  let cbs : Array[Float] = Array(capacity=n)
   for i in 0..<n {
     cbs.push(fa_f32(fa, 16 + i * 4))
   }
@@ -415,13 +416,15 @@ pub fn decode_pq_part_shared(bs : Bytes) -> PQPart raise @core.SpndError {
   if codes_end > bs.length() {
     raise @core.Truncated("pq shared part payload")
   }
-  let rows : Array[Int] = Array::new(capacity=count)
+  let rows : Array[Int] = Array(capacity=count)
   for i in 0..<count {
     rows.push(fa_i32(fa, 20 + i * 4))
   }
-  let codes : Array[UInt] = Array::new(capacity=count * m)
+  let codes : Array[UInt] = Array(capacity=count * m)
   for i in 0..<(count * m) {
     codes.push(fa[rows_end + i].to_int().reinterpret_as_uint())
   }
   { rows, dim, m, dsub, codebooks: [], codes }
 }
+
+pub extend PQPart with Debug::{to_repr}

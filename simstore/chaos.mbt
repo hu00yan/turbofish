@@ -1064,3 +1064,11 @@ pub fn[S : @store.ObjectStore] ChaosStore::retry_cas(
   }
   false
 }
+
+pub extend InjectedFault with Eq::{not_equal, equal}
+pub extend InjectedFault with Debug::{to_repr}
+pub extend ChaosOp with Eq::{not_equal, equal}
+pub extend ChaosOp with Debug::{to_repr}
+pub extend ChaosTraceEvent with Eq::{not_equal, equal}
+pub extend ChaosTraceEvent with Debug::{to_repr}
+pub extend FaultRule with Debug::{to_repr}

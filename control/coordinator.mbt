@@ -25,7 +25,7 @@ pub struct Coordinator[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] Coordinator::new(
+pub fn[S] Coordinator::new(
   store : S,
   worker_count? : Int,
   worker_cache_ttl_ms? : UInt64,
@@ -103,7 +103,7 @@ pub fn[S] Coordinator::get_tenant(
 
 ///|
 /// 选择一个 Worker（租户一致性哈希或轮询）。
-pub fn[S : @store.ObjectStore] Coordinator::select_worker(
+pub fn[S] Coordinator::select_worker(
   self : Coordinator[S],
   tenant_id : String,
 ) -> QueryWorker[S] {

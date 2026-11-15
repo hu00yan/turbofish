@@ -39,9 +39,6 @@
 ///|
 struct Chunk {
   id : UInt64
-  rel : String
-  start : Int
-  end : Int
   ext : String
   mtime : Int64
   text : String
@@ -117,7 +114,7 @@ fn cstr(s : String) -> Bytes {
 /// Buffer 内容按 UTF-8 解码为 String（Buffer::to_string 走 Show，
 /// 不做 UTF-8 解码，repo 内一律用 to_bytes + @utf8.decode）。
 fn buf_to_str(b : Buffer) -> String {
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => ""
   }
 }
@@ -169,7 +166,7 @@ fn embed(text : String, dim : Int) -> Array[Float] {
     s = s + counts[i] * counts[i]
   }
   let norm = s.sqrt()
-  let v : Array[Float] = Array::new(capacity=dim)
+  let v : Array[Float] = Array(capacity=dim)
   for i in 0..<dim {
     let x = if norm > 0.0 {
       counts[i] / norm
@@ -223,7 +220,7 @@ fn first_line_snippet(text : String, max_chars : Int) -> String {
 
 ///|
 fn split_lines(s : String) -> Array[String] {
-  let lines : Array[String] = Array::new()
+  let lines : Array[String] = Array()
   let b = Buffer()
   for ch in s.iter() {
     if ch == '\n' {
@@ -344,7 +341,7 @@ fn collect_root(
   }
   let buf : FixedArray[Byte] = FixedArray::make(need, b'\x00')
   let _ = idxfs_walk(cstr(root), buf, need)
-  let walk_str = @utf8.decode(Bytes::from_array(buf.view()).view()) catch {
+  let walk_str = @utf8.decode(Bytes::from_array(buf.exact_view()).exact_view()) catch {
     _ => ""
   }
   let rel_prefix = base_name(root) + "/"
@@ -397,9 +394,6 @@ fn collect_root(
         let id = fnv1a64("\{rel}:\{start_line}")
         chunks.push({
           id,
-          rel,
-          start: start_line,
-          end: hi,
           ext,
           mtime,
           text,
@@ -422,8 +416,8 @@ fn read_file(path : String, size : Int) -> String? {
   if n <= 0 {
     return None
   }
-  let bs = Bytes::from_array(buf.view(start=0, end=n))
-  let s = @utf8.decode(bs.view()) catch {
+  let bs = Bytes::from_array(buf.exact_view(start=0, end=n))
+  let s = @utf8.decode(bs.exact_view()) catch {
     _ => ""
   }
   if s == "" {
@@ -438,27 +432,21 @@ fn read_file(path : String, size : Int) -> String? {
 /// 计数 HTTP transport：委托 CurlTransport，transport 层计数 GET/PUT/字节。
 struct CountingTransport {
   inner : @s3http.CurlTransport
-  mut reqs : Int
   mut gets : Int
   mut puts : Int
-  mut bytes : Int
   mut put_bytes : Int
-  mut head_reqs : Int
 }
 
 ///|
 fn CountingTransport::new(inner : @s3http.CurlTransport) -> CountingTransport {
-  { inner, reqs: 0, gets: 0, puts: 0, bytes: 0, put_bytes: 0, head_reqs: 0 }
+  { inner, gets: 0, puts: 0, put_bytes: 0 }
 }
 
 ///|
 fn CountingTransport::reset(self : CountingTransport) -> Unit {
-  self.reqs = 0
   self.gets = 0
   self.puts = 0
-  self.bytes = 0
   self.put_bytes = 0
-  self.head_reqs = 0
 }
 
 ///|
@@ -469,19 +457,13 @@ pub impl @s3store.HttpTransport for CountingTransport with fn execute(
   headers : Array[(String, String)],
   body : Bytes,
 ) -> (Int, Array[(String, String)], Bytes) {
-  self.reqs += 1
-  if url.find("_heads") is Some(_) {
-    self.head_reqs += 1
-  }
   if http_method == "GET" {
     self.gets += 1
   } else if http_method == "PUT" {
     self.puts += 1
     self.put_bytes += body.length()
   }
-  let (st, hs, b) = self.inner.execute(http_method, url, headers, body)
-  self.bytes += b.length()
-  (st, hs, b)
+  self.inner.execute(http_method, url, headers, body)
 }
 
 ///|
@@ -575,12 +557,12 @@ fn run_query(
   locs : Map[UInt64, String],
   snips : Map[UInt64, String],
 ) -> Unit raise @core.SpndError {
-  let bm_ts : Array[Double] = Array::new()
-  let bm_gets : Array[Int] = Array::new()
-  let mut bm_top : Array[@query.QueryResult] = Array::new()
-  let vec_ts : Array[Double] = Array::new()
-  let vec_gets : Array[Int] = Array::new()
-  let mut vec_top : Array[@query.QueryResult] = Array::new()
+  let bm_ts : Array[Double] = Array()
+  let bm_gets : Array[Int] = Array()
+  let mut bm_top : Array[@query.QueryResult] = Array()
+  let vec_ts : Array[Double] = Array()
+  let vec_gets : Array[Int] = Array()
+  let mut vec_top : Array[@query.QueryResult] = Array()
   for r in 0..<runs {
     transport.reset()
     let t0 = now_us()
@@ -686,13 +668,13 @@ fn run() -> Unit raise @core.SpndError {
     }
   }
   // ---- 收集语料 ----
-  let chunks : Array[Chunk] = Array::new()
-  let locs : Map[UInt64, String] = Map::new()
-  let snips : Map[UInt64, String] = Map::new()
+  let chunks : Array[Chunk] = Array()
+  let locs : Map[UInt64, String] = Map([])
+  let snips : Map[UInt64, String] = Map([])
   if !skip_build {
     // IDX_ROOT 支持 colon 分隔多根（如 rust-miniss:turbofish:moonbit-core），
     // rel 路径带上根目录 basename，避免跨 repo 撞 id。
-    let roots : Array[String] = Array::new()
+    let roots : Array[String] = Array()
     for piece in root.split(":") {
       let mut t = trim_str(piece.to_owned())
       while t.has_suffix("/") {
@@ -732,7 +714,7 @@ fn run() -> Unit raise @core.SpndError {
     let mut put_bytes_total = 0
     while built < chunks.length() {
       let hi = imin(built + batch_size, chunks.length())
-      let batch : Array[@core.Doc] = Array::new(capacity=hi - built)
+      let batch : Array[@core.Doc] = Array(capacity=hi - built)
       for i in built..<hi {
         batch.push(chunk_to_doc(chunks[i], dim))
       }
@@ -791,7 +773,7 @@ fn run() -> Unit raise @core.SpndError {
   // ---- 查询验证 ----
   let queries : Array[String] = match @env.get_env_var("IDX_QUERIES") {
     Some(s) => {
-      let qs : Array[String] = Array::new()
+      let qs : Array[String] = Array()
       for piece in s.split(";") {
         let t = trim_str(piece.to_owned())
         if t != "" {

@@ -1,5 +1,9 @@
 import {
   "turbofish/s3store",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
   "moonbitlang/core/encoding/utf8",
 }
 

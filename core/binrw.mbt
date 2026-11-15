@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // 二进制小端读写原语。所有 seekpond/v1 数值字段均为 little-endian。
 // 注意：MoonBit 的 String::to_bytes 是 UTF-16LE 且已废弃；任何字符串 → 字节

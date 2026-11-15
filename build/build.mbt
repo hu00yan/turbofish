@@ -6,11 +6,13 @@
 /// 向量存储方式：VF16 由 use_f16 决定 f16/f32，
 /// VSq8 用 SQ8 量化向量列 + 分区，VPq16 分区用 PQ16（向量列仍存 f16/f32
 /// 供精排/暴力对照）。
+#derive(Debug, Eq)
 pub(all) enum VecStorage {
   VF16
   VSq8
   VPq16
-} derive(Debug, Eq)
+}
+
 
 ///|
 /// 构建配置。所有可选编码开关默认关闭，保持与旧数据兼容。
@@ -264,8 +266,8 @@ fn[S : @store.ObjectStore] build_ingest_base(
     }
   }
   // 切段写入（segment_rows<=0 时兜底为单段）
-  let new_segs : Array[@format.SegmentMeta] = Array::new()
-  let new_ranges : Array[(Int, Int)] = Array::new()
+  let new_segs : Array[@format.SegmentMeta] = Array()
+  let new_ranges : Array[(Int, Int)] = Array()
   let step = if cfg.segment_rows > 0 {
     cfg.segment_rows
   } else if docs.length() > 0 {
@@ -285,7 +287,7 @@ fn[S : @store.ObjectStore] build_ingest_base(
     start = end
   }
   // 新 manifest：旧 live segments + 新 segments，deleted 沿用
-  let segs : Array[@format.SegmentMeta] = Array::new()
+  let segs : Array[@format.SegmentMeta] = Array()
   let mut total_rows = 0
   let mut total_doclen = 0
   let deleted_arr : Array[UInt64] = match old_manifest {
@@ -297,7 +299,7 @@ fn[S : @store.ObjectStore] build_ingest_base(
       }
       m.deleted
     }
-    None => Array::new()
+    None => Array()
   }
   for s in new_segs {
     segs.push(s)
@@ -443,7 +445,7 @@ pub fn[S : @store.ObjectStore] ingest_delta_opts(
     None => None
   }
   let mut base = ""
-  let deltas : Array[String] = Array::new()
+  let deltas : Array[String] = Array()
   let mut full_base = false
   match old_gen {
     Some(g) =>
@@ -546,7 +548,7 @@ pub fn[S : @store.ObjectStore] delete_docs(
   }
   let old = load_manifest(store, cfg.ns, meta.head_manifest)
   // 合并去重：排序后跳过相邻重复（不依赖 Set/Hash）
-  let all : Array[UInt64] = Array::new()
+  let all : Array[UInt64] = Array()
   for d in old.deleted {
     all.push(d)
   }
@@ -554,7 +556,7 @@ pub fn[S : @store.ObjectStore] delete_docs(
     all.push(d)
   }
   all.sort_by(fn(a, b) { a.compare(b) })
-  let dels : Array[UInt64] = Array::new()
+  let dels : Array[UInt64] = Array()
   for i in 0..<all.length() {
     let d = all[i]
     if i == 0 || dels[dels.length() - 1] != d {
@@ -591,3 +593,6 @@ pub fn[S : @store.ObjectStore] delete_docs(
   store.put(manifest_key(cfg.ns, manifest.id), json_bytes(manifest.to_json()))
   publish_head(store, cfg.ns, old.id, manifest.id)
 }
+
+pub extend VecStorage with Debug::{to_repr}
+pub extend VecStorage with Eq::{not_equal, equal}

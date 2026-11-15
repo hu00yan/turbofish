@@ -50,7 +50,9 @@ pub struct MemLeaseCoordinator {
   leases : Map[String, (String, Int64)]
   now_ms : () -> Int64
 }
+pub fn MemLeaseCoordinator::acquire(Self, String, String, Int64) -> Bool
 pub fn MemLeaseCoordinator::new(now_ms? : () -> Int64) -> Self
+pub fn MemLeaseCoordinator::release(Self, String, String) -> Bool
 pub impl LeaseCoordinator for MemLeaseCoordinator
 
 pub struct MockS3Transport {
@@ -66,6 +68,7 @@ pub struct MockS3Transport {
   mut conditional_writes_supported : Bool
 }
 pub fn MockS3Transport::enqueue(Self, Int32, Array[(String, String)], Bytes) -> Unit
+pub fn MockS3Transport::execute(Self, String, String, Array[(String, String)], Bytes) -> (Int32, Array[(String, String)], Bytes)
 pub fn MockS3Transport::new(String) -> Self
 pub fn MockS3Transport::seed(Self, String, Bytes) -> Unit
 pub fn MockS3Transport::set_conditional_writes_supported(Self, Bool) -> Unit
@@ -78,12 +81,14 @@ pub(all) struct RecordedRequest {
   headers : Array[(String, String)]
   body : Bytes
 }
+pub fn RecordedRequest::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct S3Credentials {
   access_key : String
   secret_key : String
 }
+pub fn S3Credentials::to_repr(Self) -> @debug.Repr
 
 pub struct S3Store[T] {
   scheme : String
@@ -105,11 +110,17 @@ pub fn[T] S3Store::build_list_objects_v2(Self[T], String, Int32, String?) -> Sig
 pub fn[T] S3Store::build_put_object(Self[T], String, Bytes, String?, String?) -> SignedRequest
 pub fn[T] S3Store::conditional_writes_supported(Self[T]) -> Bool
 pub fn[T : HttpTransport] S3Store::create_bucket(Self[T]) -> Bool
+pub fn[T : HttpTransport] S3Store::delete(Self[T], String) -> Unit
+pub fn[T : HttpTransport] S3Store::get(Self[T], String) -> Bytes?
+pub fn[T : HttpTransport] S3Store::get_range(Self[T], String, Int32, Int32) -> Bytes?
 pub fn[T : HttpTransport] S3Store::get_versioned_manifest(Self[T], String, String) -> Bytes?
 pub fn[T : HttpTransport] S3Store::head_version(Self[T], String) -> String?
+pub fn[T : HttpTransport] S3Store::list(Self[T], String) -> Array[String]
 pub fn[T : HttpTransport] S3Store::list_page(Self[T], String, Int32) -> Array[String]
 pub fn[T] S3Store::new(String, String, String, S3Credentials, T, () -> String) -> Self[T] raise @core.SpndError
 pub fn[T] S3Store::object_path(Self[T], String) -> String
+pub fn[T : HttpTransport] S3Store::put(Self[T], String, Bytes) -> Unit
+pub fn[T : HttpTransport] S3Store::put_if_match(Self[T], String, String?, Bytes) -> Bool
 pub fn[T : HttpTransport] S3Store::read_head_pointer(Self[T], String) -> String?
 pub fn[T : HttpTransport] S3Store::resolve_head(Self[T], String, fallback? : String) -> String
 pub fn[T] S3Store::set_conditional_writes_supported(Self[T], Bool) -> Unit
@@ -125,6 +136,7 @@ pub(all) struct SignedRequest {
   headers : Array[(String, String)]
   body : Bytes
 }
+pub fn SignedRequest::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

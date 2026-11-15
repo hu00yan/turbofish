@@ -90,9 +90,9 @@ fn check_segment(seg : StringView) -> Unit raise @core.SpndError {
 
 ///|
 /// trait 方法内部用的校验：非法 key 视为程序员错误，直接 abort。
-fn FsStore::checked(self : FsStore, key : String) -> String {
+fn FsStore::checked(_self : FsStore, key : String) -> String {
   FsStore::check_key(key) catch {
-    _ => @abort.abort("fsstore: invalid key")
+    _ => abort("fsstore: invalid key")
   }
 }
 
@@ -226,7 +226,7 @@ fn FsStore::read_version(self : FsStore, key : String) -> Int? {
   let bs = fs_read_all(self.ver_path(key))
   match bs {
     Some(content) => {
-      let s = @utf8.decode(content.view()) catch { _ => return None }
+      let s = @utf8.decode(content.exact_view()) catch { _ => return None }
       parse_version(s)
     }
     None => None
@@ -261,7 +261,7 @@ fn FsStore::bump_version(self : FsStore, key : String) -> Unit {
   }
   let ok = fs_write_atomic(self.ver_path(key), @utf8.encode("v\{cur + 1}"))
   if !ok {
-    @abort.abort("fsstore: cannot write version sidecar")
+    abort("fsstore: cannot write version sidecar")
   }
 }
 
@@ -280,16 +280,16 @@ pub fn FsStore::head_version(self : FsStore, key : String) -> String? {
 ///|
 /// 读索引；文件缺失返回空数组；损坏 abort（索引是唯一 list 来源，坏了宁可响）。
 fn FsStore::load_index(self : FsStore) -> Array[(String, Int)] {
-  let out : Array[(String, Int)] = Array::new()
+  let out : Array[(String, Int)] = Array()
   let content = match fs_read_all(self.index_path()) {
     Some(bs) => bs
     None => return out
   }
-  let text = @utf8.decode(content.view()) catch {
-    _ => @abort.abort("fsstore: index not utf8")
+  let text = @utf8.decode(content.exact_view()) catch {
+    _ => abort("fsstore: index not utf8")
   }
   let j = @json.parse(text) catch {
-    _ => @abort.abort("fsstore: index not json")
+    _ => abort("fsstore: index not json")
   }
   match j {
     Json::Array(items) =>
@@ -298,7 +298,7 @@ fn FsStore::load_index(self : FsStore) -> Array[(String, Int)] {
           Json::Object(m) => {
             let k = match m.get("key") {
               Some(Json::String(s)) => s
-              _ => @abort.abort("fsstore: index entry missing key")
+              _ => abort("fsstore: index entry missing key")
             }
             let sz = match m.get("size") {
               Some(Json::Number(d, ..)) => d.to_int()
@@ -306,17 +306,17 @@ fn FsStore::load_index(self : FsStore) -> Array[(String, Int)] {
             }
             out.push((k, sz))
           }
-          _ => @abort.abort("fsstore: index entry not object")
+          _ => abort("fsstore: index entry not object")
         }
       }
-    _ => @abort.abort("fsstore: index root not array")
+    _ => abort("fsstore: index root not array")
   }
   out
 }
 
 ///|
 fn FsStore::save_index_map(self : FsStore, m : Map[String, Int]) -> Unit {
-  let items : Array[Json] = Array::new(capacity=m.size())
+  let items : Array[Json] = Array(capacity=m.length())
   for k, sz in m {
     let entry : Map[String, Json] = Map([])
     entry.set("key", Json::string(k))
@@ -326,7 +326,7 @@ fn FsStore::save_index_map(self : FsStore, m : Map[String, Int]) -> Unit {
   let text = Json::array(items).stringify()
   let ok = fs_write_atomic(self.index_path(), @utf8.encode(text))
   if !ok {
-    @abort.abort("fsstore: cannot write index")
+    abort("fsstore: cannot write index")
   }
 }
 
@@ -369,7 +369,7 @@ fn FsStore::index_remove(self : FsStore, key : String) -> Unit {
 fn FsStore::put_raw(self : FsStore, key : String, value : Bytes) -> Unit {
   fs_mkdir_p(self.root, dir_of(key))
   if !fs_write_atomic(self.data_path(key), value) {
-    @abort.abort("fsstore: write failed")
+    abort("fsstore: write failed")
   }
   self.bump_version(key)
   self.index_update(key, value.length())
@@ -461,7 +461,7 @@ pub impl @store.ObjectStore for FsStore with fn list(
   prefix : String,
 ) -> Array[String] {
   let m = self.get_index_map()
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for k, _ in m {
     if k.has_prefix(prefix) {
       out.push(k)
@@ -499,7 +499,7 @@ pub impl @store.BatchStore for FsStore with fn get_many(
   self : FsStore,
   keys : Array[String],
 ) -> Array[Bytes?] {
-  let out : Array[Bytes?] = Array::new()
+  let out : Array[Bytes?] = Array()
   for k in keys {
     out.push(self.get(k))
   }
@@ -512,9 +512,12 @@ pub impl @store.BatchStore for FsStore with fn get_range_many(
   self : FsStore,
   ranges : Array[(String, Int, Int)],
 ) -> Array[Bytes?] {
-  let out : Array[Bytes?] = Array::new()
+  let out : Array[Bytes?] = Array()
   for r in ranges {
     out.push(self.get_range(r.0, r.1, r.2))
   }
   out
 }
+
+pub extend FsStore with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete}
+pub extend FsStore with @turbofish/store.BatchStore::{get_many, get_range_many}

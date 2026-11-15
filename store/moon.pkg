@@ -1,5 +1,4 @@
 import {
-  "moonbitlang/core/test",
   "moonbitlang/core/encoding/utf8",
   "turbofish/core",
 }

@@ -34,7 +34,7 @@ let vocab_zh : Array[String] = [
 /// zipf(r) = (r+1)^-0.7 的累计分布。
 fn build_zipf_cum() -> Array[Double] {
   let total = vocab_en.length() + vocab_zh.length()
-  let cum : Array[Double] = Array::new(capacity=total)
+  let cum : Array[Double] = Array(capacity=total)
   let mut acc = 0.0
   for r in 0..<total {
     acc = acc + 1.0 / @math.pow((r + 1).to_double(), 0.7)
@@ -97,18 +97,18 @@ fn gen_text(rng : @core.Rng, cum : Array[Double], target : Int) -> String {
 fn gen_docs(rng : @core.Rng, cum : Array[Double]) -> Array[@core.Doc] {
   let dim = 768
   let n_clusters = 8
-  let centers : Array[Float] = Array::new(capacity=n_clusters * dim)
+  let centers : Array[Float] = Array(capacity=n_clusters * dim)
   for _c in 0..<n_clusters {
     for _d in 0..<dim {
       centers.push(Float::from_double(rng.next_range(-1.0, 1.0)))
     }
   }
-  let docs : Array[@core.Doc] = Array::new(capacity=10000)
+  let docs : Array[@core.Doc] = Array(capacity=10000)
   for i in 0..<10000 {
     let target = 30 + (rng.next_f64() * 51.0).to_int()
     let text = gen_text(rng, cum, target)
     let base = i % n_clusters * dim
-    let vec : Array[Float] = Array::new(capacity=dim)
+    let vec : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       vec.push(
         Float::from_double(
@@ -135,7 +135,7 @@ fn gen_bm25_queries(
   cum : Array[Double],
   count : Int,
 ) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for i in 0..<count {
     let t1 = sample_term(rng, cum)
     if i % 3 == 2 {
@@ -155,11 +155,11 @@ fn gen_vec_queries(
   docs : Array[@core.Doc],
   count : Int,
 ) -> Array[Array[Float]] {
-  let out : Array[Array[Float]] = Array::new()
+  let out : Array[Array[Float]] = Array()
   for i in 0..<count {
     let di = (i * 337 + 11) % docs.length()
     let base = docs[di].vector
-    let v : Array[Float] = Array::new(capacity=base.length())
+    let v : Array[Float] = Array(capacity=base.length())
     for x in base {
       v.push(Float::from_double(x.to_double() + rng.next_range(-0.01, 0.01)))
     }

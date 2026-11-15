@@ -29,17 +29,19 @@ pub const COMPACT_TRAILER_MAGIC : String = "CPT1"
 pub const COMPACT_TRAILER_LEN : Int = 16
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct CompactSection {
   name : String
   offset : Int
   length : Int
   extra : Int
-} derive(Debug, Eq)
+}
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct CompactFooter {
   sections : Array[CompactSection]
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn CompactFooter::get(self : CompactFooter, name : String) -> CompactSection? {
@@ -113,7 +115,7 @@ pub fn decode_compact_part_footer(
   if count < 0 {
     raise @core.Corrupt("negative compact footer section count")
   }
-  let sections : Array[CompactSection] = Array::new(capacity=count)
+  let sections : Array[CompactSection] = Array(capacity=count)
   let mut pos = footer_offset + 12
   let end_pos = footer_offset + footer_len
   for _ in 0..<count {
@@ -125,8 +127,8 @@ pub fn decode_compact_part_footer(
     if pos + name_len + 20 > end_pos {
       raise @core.Truncated("compact footer section entry")
     }
-    let name_bytes = bs.view(start=pos, end=pos + name_len).to_bytes()
-    let name = @utf8.decode(name_bytes.view()) catch {
+    let name_bytes = bs.exact_view(start=pos, end=pos + name_len).to_owned()
+    let name = @utf8.decode(name_bytes.exact_view()) catch {
       _ => raise @core.Corrupt("compact footer section name is not valid utf-8")
     }
     pos += name_len
@@ -157,7 +159,7 @@ pub fn read_compact_section(
     sec.offset + sec.length > part_bytes.length() {
     raise @core.Truncated("compact section range out of bounds: \{sec.name}")
   }
-  part_bytes.view(start=sec.offset, end=sec.offset + sec.length).to_bytes()
+  part_bytes.exact_view(start=sec.offset, end=sec.offset + sec.length).to_owned()
 }
 
 ///|
@@ -169,12 +171,12 @@ pub fn encode_compact_part(
   centroids : Centroids?
 ) -> (Bytes, CompactFooter) {
   let n = docs.length()
-  let ids : Array[UInt64] = Array::new(capacity=n)
-  let texts : Array[String] = Array::new(capacity=n)
-  let cats : Array[String] = Array::new(capacity=n)
-  let tss : Array[Int64] = Array::new(capacity=n)
-  let pubs : Array[Bool] = Array::new(capacity=n)
-  let vecs : Array[Float] = Array::new(capacity=n * dim)
+  let ids : Array[UInt64] = Array(capacity=n)
+  let texts : Array[String] = Array(capacity=n)
+  let cats : Array[String] = Array(capacity=n)
+  let tss : Array[Int64] = Array(capacity=n)
+  let pubs : Array[Bool] = Array(capacity=n)
+  let vecs : Array[Float] = Array(capacity=n * dim)
 
   for d in docs {
     ids.push(d.id)
@@ -197,7 +199,7 @@ pub fn encode_compact_part(
 
   // 2. 编码全文倒排
   let term_map : Map[String, Array[Posting]] = Map([])
-  let doc_lens : Array[Int] = Array::new(capacity=n)
+  let doc_lens : Array[Int] = Array(capacity=n)
   for i in 0..<n {
     let tokens = @core.tokenize(texts[i])
     doc_lens.push(tokens.length())
@@ -213,7 +215,7 @@ pub fn encode_compact_part(
       let list = match term_map.get(term) {
         Some(a) => a
         None => {
-          let a : Array[Posting] = Array::new()
+          let a : Array[Posting] = Array()
           term_map.set(term, a)
           a
         }
@@ -222,7 +224,7 @@ pub fn encode_compact_part(
     }
   }
 
-  let term_lists : Array[(String, Array[Posting])] = Array::new()
+  let term_lists : Array[(String, Array[Posting])] = Array()
   for kv in term_map {
     term_lists.push(kv)
   }
@@ -230,7 +232,7 @@ pub fn encode_compact_part(
   let doc_len_bytes = encode_col(ColU32(doc_lens))
 
   // 3. 编码 IVF 向量分区（如果提供了中心）
-  let vec_part_bytes : Array[(String, Bytes)] = Array::new()
+  let vec_part_bytes : Array[(String, Bytes)] = Array()
   match centroids {
     Some(cen) =>
       if cen.k() > 0 && n > 0 {
@@ -249,7 +251,7 @@ pub fn encode_compact_part(
           let rows = match part_rows.get(best_c) {
             Some(a) => a
             None => {
-              let a : Array[Int] = Array::new()
+              let a : Array[Int] = Array()
               part_rows.set(best_c, a)
               a
             }
@@ -258,7 +260,7 @@ pub fn encode_compact_part(
           let pdata = match part_vecs.get(best_c) {
             Some(a) => a
             None => {
-              let a : Array[Float] = Array::new()
+              let a : Array[Float] = Array()
               part_vecs.set(best_c, a)
               a
             }
@@ -283,11 +285,11 @@ pub fn encode_compact_part(
 
   // 4. 将各 section 紧凑写入 Buffer 并记录 offset/length
   let b = Buffer()
-  let sections : Array[CompactSection] = Array::new()
+  let sections : Array[CompactSection] = Array()
 
   let append_sec = fn(name : String, data : Bytes, extra : Int) {
     let offset = b.length()
-    b.write_bytes(data.view())
+    b.write_bytes(data.exact_view())
     let length = data.length()
     sections.push({ name, offset, length, extra })
   }
@@ -314,7 +316,7 @@ pub fn encode_compact_part(
   for sec in sections {
     let nb = @utf8.encode(sec.name)
     b.write_uint16_le(nb.length().to_uint16())
-    b.write_bytes(nb.view())
+    b.write_bytes(nb.exact_view())
     b.write_uint64_le(sec.offset.to_uint64())
     b.write_uint64_le(sec.length.to_uint64())
     b.write_uint_le(sec.extra.reinterpret_as_uint())
@@ -375,9 +377,9 @@ pub fn decode_compact_part_docs(
     raise @core.Corrupt("compact part column length mismatch")
   }
 
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(flat_vecs[i * dim + d])
     }
@@ -392,3 +394,8 @@ pub fn decode_compact_part_docs(
   }
   docs
 }
+
+pub extend CompactSection with Debug::{to_repr}
+pub extend CompactSection with Eq::{not_equal, equal}
+pub extend CompactFooter with Debug::{to_repr}
+pub extend CompactFooter with Eq::{not_equal, equal}

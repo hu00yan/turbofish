@@ -24,7 +24,7 @@ pub impl BatchStore for MemStore with fn get_many(
   self : MemStore,
   keys : Array[String],
 ) -> Array[Bytes?] {
-  let out : Array[Bytes?] = Array::new()
+  let out : Array[Bytes?] = Array()
   for k in keys {
     out.push(self.get(k))
   }
@@ -37,9 +37,11 @@ pub impl BatchStore for MemStore with fn get_range_many(
   self : MemStore,
   ranges : Array[(String, Int, Int)],
 ) -> Array[Bytes?] {
-  let out : Array[Bytes?] = Array::new()
+  let out : Array[Bytes?] = Array()
   for r in ranges {
     out.push(self.get_range(r.0, r.1, r.2))
   }
   out
 }
+
+pub extend MemStore with BatchStore::{get_many, get_range_many}

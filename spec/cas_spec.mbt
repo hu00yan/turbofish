@@ -98,3 +98,8 @@ pub fn verify_cas_monotonicity(
   }
   true
 }
+
+pub extend CasState with Debug::{to_repr}
+pub extend CasState with Eq::{not_equal, equal}
+pub extend CasOutcome with Debug::{to_repr}
+pub extend CasOutcome with Eq::{not_equal, equal}

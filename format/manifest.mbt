@@ -2,6 +2,7 @@
 // u64 id 经 Double 往返在 2^53 内无损（MVP 约束）。
 
 ///|
+#derive(Debug)
 pub(all) struct SegmentMeta {
   id : String
   row_count : Int
@@ -9,7 +10,7 @@ pub(all) struct SegmentMeta {
   max_id : UInt64
   doc_len_sum : Int
   size_bytes : Int
-} derive(Debug)
+}
 
 ///|
 /// 全局 IVF（`vec/global/*`）的代际链：`base` 是包含**全部基线段**向量的代，
@@ -19,12 +20,14 @@ pub(all) struct SegmentMeta {
 ///
 /// 不变式：base 与 deltas 中的每个代都是 self-contained 的 part 集合，
 /// 只加不删；compact 会把整条链压成一个新的 base（`global_gen` 复位）。
+#derive(Debug)
 pub(all) struct GlobalGen {
   base : String
   deltas : Array[String]
-} derive(Debug)
+}
 
 ///|
+#derive(Debug)
 pub(all) struct ManifestData {
   id : String
   parent : String?
@@ -38,9 +41,10 @@ pub(all) struct ManifestData {
   centroid_version : String
   num_docs : Int
   avg_doc_len : Double
-} derive(Debug)
+}
 
 ///|
+#derive(Debug)
 pub(all) struct NamespaceMeta {
   format : String
   ns_name : String
@@ -53,7 +57,7 @@ pub(all) struct NamespaceMeta {
   b : Double
   /// 全文分词器（"smartcn"/"kuromoji"/"nori"；None = 默认 word，旧数据兼容）。
   fts_tokenizer : String?
-} derive(Debug)
+}
 
 ///|
 fn jobj(j : Json) -> Map[String, Json] raise @core.SpndError {
@@ -118,7 +122,7 @@ fn jopt_str_at(m : Map[String, Json], key : String) -> String? {
 fn global_gen_to_json(g : GlobalGen) -> Json {
   let gm : Map[String, Json] = Map([])
   gm.set("base", Json::string(g.base))
-  let ds : Array[Json] = Array::new(capacity=g.deltas.length())
+  let ds : Array[Json] = Array(capacity=g.deltas.length())
   for d in g.deltas {
     ds.push(Json::string(d))
   }
@@ -138,7 +142,7 @@ fn jopt_global_gen_at(m : Map[String, Json], key : String) -> GlobalGen? {
     Some(g) =>
       match jopt_str_at(g, "base") {
         Some(base) => {
-          let deltas : Array[String] = Array::new()
+          let deltas : Array[String] = Array()
           match g.get("deltas") {
             Some(Array(a)) =>
               for x in a {
@@ -159,7 +163,7 @@ fn jopt_global_gen_at(m : Map[String, Json], key : String) -> GlobalGen? {
 
 ///|
 pub fn ManifestData::to_json(self : ManifestData) -> Json {
-  let segs : Array[Json] = Array::new()
+  let segs : Array[Json] = Array()
   for s in self.segments {
     let sm : Map[String, Json] = Map([])
     sm.set("id", Json::string(s.id))
@@ -170,7 +174,7 @@ pub fn ManifestData::to_json(self : ManifestData) -> Json {
     sm.set("size_bytes", Json::number(s.size_bytes.to_double()))
     segs.push(Json::object(sm))
   }
-  let dels : Array[Json] = Array::new()
+  let dels : Array[Json] = Array()
   for d in self.deleted {
     dels.push(Json::number(d.to_double()))
   }
@@ -214,7 +218,7 @@ pub fn ManifestData::to_json(self : ManifestData) -> Json {
 pub fn manifest_from_json(j : Json) -> ManifestData raise @core.SpndError {
   let m = jobj(j)
   let segs_json = jarr(jfield(m, "segments"))
-  let segs : Array[SegmentMeta] = Array::new()
+  let segs : Array[SegmentMeta] = Array()
   for sj in segs_json {
     let sm = jobj(sj)
     segs.push({
@@ -226,7 +230,7 @@ pub fn manifest_from_json(j : Json) -> ManifestData raise @core.SpndError {
       size_bytes: jnum_at(sm, "size_bytes").to_int(),
     })
   }
-  let dels : Array[UInt64] = Array::new()
+  let dels : Array[UInt64] = Array()
   for dj in jarr(jfield(m, "deleted")) {
     dels.push(jnum(dj).to_uint64())
   }
@@ -309,3 +313,8 @@ pub fn demo_schema_json() -> Bytes {
     ),
   )
 }
+
+pub extend SegmentMeta with Debug::{to_repr}
+pub extend GlobalGen with Debug::{to_repr}
+pub extend ManifestData with Debug::{to_repr}
+pub extend NamespaceMeta with Debug::{to_repr}

@@ -56,9 +56,9 @@ fn[S : @store.ObjectStore] compact_load_docs(
     vec.length() != n * dim {
     raise @core.Corrupt("compact: column length mismatch in \{seg_id}")
   }
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(vec[i * dim + d])
     }
@@ -132,7 +132,7 @@ pub fn[S : @store.ObjectStore] compact(
           let arr = match global_vecs.get(si) {
             Some(a) => a
             None => {
-              let a : Array[Float] = Array::new(
+              let a : Array[Float] = Array(
                 capacity=old.segments[si].row_count * gdim,
               )
               global_vecs.set(si, a)
@@ -142,7 +142,7 @@ pub fn[S : @store.ObjectStore] compact(
           let flags = match seen.get(si) {
             Some(f) => f
             None => {
-              let f : Array[Bool] = Array::new(
+              let f : Array[Bool] = Array(
                 capacity=old.segments[si].row_count,
               )
               for _ in 0..<old.segments[si].row_count {
@@ -197,12 +197,12 @@ pub fn[S : @store.ObjectStore] compact(
       }
     }
   }
-  let live : Array[@core.Doc] = Array::new()
+  let live : Array[@core.Doc] = Array()
   for si in 0..<old.segments.length() {
     let seg = old.segments[si]
     let pre : Array[Float]? = if has_global {
       if seg.row_count == 0 {
-        Some(Array::new())
+        Some(Array())
       } else {
         match global_vecs.get(si) {
           Some(a) => Some(a)

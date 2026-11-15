@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // format 包新编码（字典列/位图 bool/SQ8/PQ16/blockmax）白盒测试。
 // 覆盖：roundtrip、字节级布局断言、旧格式（flags=0）向后兼容、阈值回退、
@@ -81,7 +80,7 @@ test "dict string col byte layout" {
 ///|
 test "dict col falls back to plain when distinct > 65535" {
   // 65536 个唯一词：u16 code 放不下 → flags=0 普通串列
-  let arr : Array[String] = Array::new(capacity=65536)
+  let arr : Array[String] = Array(capacity=65536)
   for i in 0..<65536 {
     arr.push("w\{i}")
   }
@@ -100,7 +99,7 @@ test "dict col falls back to plain when distinct > 65535" {
     _ => fail("wrong type")
   }
   // 边界内 65535 个唯一词：仍走字典（flags bit0=1）
-  let arr2 : Array[String] = Array::new(capacity=65535)
+  let arr2 : Array[String] = Array(capacity=65535)
   for i in 0..<65535 {
     arr2.push("u\{i}")
   }
@@ -164,7 +163,7 @@ test "bool bitmap col roundtrip and byte layout" {
     _ => fail("wrong type")
   }
   // 17 位（3 字节，尾字节部分使用）
-  let v17 : Array[Bool] = Array::new(capacity=17)
+  let v17 : Array[Bool] = Array(capacity=17)
   for i in 0..<17 {
     v17.push(i % 3 == 0)
   }
@@ -185,13 +184,13 @@ test "decode_col backward compat with flags=0 old format" {
   for s in strs {
     offs.write_uint_le(total.reinterpret_as_uint())
     let e = @utf8.encode(s)
-    datas.write_bytes(e.view())
+    datas.write_bytes(e.exact_view())
     total += e.length()
   }
   offs.write_uint_le(total.reinterpret_as_uint())
   write_col_header(b, DT_STR, 0, strs.length(), total)
-  b.write_bytes(offs.to_bytes().view())
-  b.write_bytes(datas.to_bytes().view())
+  b.write_bytes(offs.to_bytes().exact_view())
+  b.write_bytes(datas.to_bytes().exact_view())
   match decode_col(b.to_bytes()) {
     ColStr(arr) => assert_eq(arr, strs)
     _ => fail("wrong type")
@@ -315,7 +314,7 @@ test "pq16 part exact roundtrip and byte layout" {
   let dsub = 2
   let dim = m * dsub
   let rows = [7, 42, 9]
-  let codebooks : Array[Float] = Array::new(capacity=m * 256 * dsub)
+  let codebooks : Array[Float] = Array(capacity=m * 256 * dsub)
   for c in 0..<m {
     for j in 0..<256 {
       for l in 0..<dsub {

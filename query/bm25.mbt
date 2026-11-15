@@ -149,7 +149,7 @@ fn[S : @store.ObjectStore] load_matcher(
         Gt(field, v) => load_cmp_matcher(n, cs, seg_id, field, CMP_GT, v)
         Gte(field, v) => load_cmp_matcher(n, cs, seg_id, field, CMP_GTE, v)
         And(children) => {
-          let ms : Array[RowMatcher] = Array::new(
+          let ms : Array[RowMatcher] = Array(
             capacity=children.length(),
           )
           for c in children {
@@ -158,7 +158,7 @@ fn[S : @store.ObjectStore] load_matcher(
           MAnd(ms)
         }
         Or(children) => {
-          let ms : Array[RowMatcher] = Array::new(
+          let ms : Array[RowMatcher] = Array(
             capacity=children.length(),
           )
           for c in children {
@@ -324,7 +324,7 @@ fn[S : @store.ObjectStore] load_in_matcher(
   match head {
     B(_) => {
       // bool In：最多两个不同值，展开为 Or(Eq..)（复用位图/普通列等值路径）
-      let ms : Array[RowMatcher] = Array::new(capacity=vals.length())
+      let ms : Array[RowMatcher] = Array(capacity=vals.length())
       for v in vals {
         match v {
           B(b) => ms.push(load_eq_matcher(n, cs, seg_id, field, B(b)))
@@ -625,7 +625,7 @@ fn matcher_at(m : RowMatcher, row : Int) -> Bool {
 fn decode_posting_slice(
   bs : Bytes,
 ) -> Array[@format.Posting] raise @core.SpndError {
-  let out : Array[@format.Posting] = Array::new()
+  let out : Array[@format.Posting] = Array()
   let fa = bs.to_fixedarray()
   let mut prev = -1
   let mut pos = 0
@@ -757,7 +757,7 @@ fn[S : @store.ObjectStore] bm25_segment_wand(
   k : Int,
   matcher : RowMatcher?,
 ) -> Array[(Int, Double)] raise @core.SpndError {
-  let iters : Array[WandIter] = Array::new()
+  let iters : Array[WandIter] = Array()
   for m in matched {
     let (di, e) = m
     let slice = match
@@ -777,7 +777,7 @@ fn[S : @store.ObjectStore] bm25_segment_wand(
       continue
     }
     let blocks = if di < blk.length() { blk[di] } else { [] }
-    let block_ubs : Array[Double] = Array::new(capacity=blocks.length())
+    let block_ubs : Array[Double] = Array(capacity=blocks.length())
     let mut ub_global = 0.0
     for x in blocks {
       let u = bm25_score(x.0, e.df, row_count, x.1, avgdl, k1, b)
@@ -819,11 +819,11 @@ fn[S : @store.ObjectStore] bm25_segment_wand(
   if iters.is_empty() {
     return []
   }
-  let top : Array[(Int, Double)] = Array::new()
+  let top : Array[(Int, Double)] = Array()
   let mut theta = 0.0
   while iters.length() > 0 {
     // 移除耗尽迭代器
-    let alive : Array[WandIter] = Array::new()
+    let alive : Array[WandIter] = Array()
     for it in iters {
       if it.row != WAND_END {
         alive.push(it)
@@ -946,7 +946,7 @@ fn[S : @store.ObjectStore] bm25_segment(
   }
   let entries = seg_dir(n, cs, seg.id)
   // 先解析全部命中 term；无命中则不再读 doc_len / postings
-  let matched : Array[(Int, @format.FtsDirEntry)] = Array::new()
+  let matched : Array[(Int, @format.FtsDirEntry)] = Array()
   for t in terms {
     match find_entry_idx(entries, t) {
       Some(i) => matched.push((i, entries[i]))
@@ -1022,7 +1022,7 @@ fn[S : @store.ObjectStore] bm25_segment(
       scores.set(p.row, cur + s)
     }
   }
-  let arr : Array[(Int, Double)] = Array::new()
+  let arr : Array[(Int, Double)] = Array()
   for kv in scores.iter() {
     arr.push((kv.0, kv.1))
   }
@@ -1056,7 +1056,7 @@ fn[S : @store.ObjectStore] bm25_search_impl(
     return []
   }
   let tomb = tombstones_of(n)
-  let cands : Array[(Int, Int, Double)] = Array::new()
+  let cands : Array[(Int, Int, Double)] = Array()
   for si in 0..<n.manifest.segments.length() {
     for
       c in bm25_segment(

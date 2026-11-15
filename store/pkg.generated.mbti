@@ -102,8 +102,10 @@ pub(all) struct BudgetTracker {
   violations : Array[String]
 }
 pub fn BudgetTracker::clone(Self) -> Self
+pub fn BudgetTracker::equal(Self, Self) -> Bool
 pub fn BudgetTracker::has_violations(Self) -> Bool
 pub fn BudgetTracker::new() -> Self
+pub fn BudgetTracker::not_equal(Self, Self) -> Bool
 pub fn BudgetTracker::record_delete(Self) -> Unit
 pub fn BudgetTracker::record_get(Self, Int32) -> Unit
 pub fn BudgetTracker::record_head(Self) -> Unit
@@ -112,6 +114,7 @@ pub fn BudgetTracker::record_put(Self, Int32) -> Unit
 pub fn BudgetTracker::record_read_bytes(Self, Int32) -> Unit
 pub fn BudgetTracker::record_violation(Self, String) -> Unit
 pub fn BudgetTracker::reset(Self) -> Unit
+pub fn BudgetTracker::to_repr(Self) -> @debug.Repr
 pub fn BudgetTracker::to_string(Self) -> String
 pub fn BudgetTracker::total_bytes(Self) -> Int64
 pub fn BudgetTracker::total_requests(Self) -> Int32
@@ -132,6 +135,7 @@ pub struct CostSnapshot {
   classes : Array[(String, Int32, Int32)]
 }
 pub fn CostSnapshot::show_table(Self) -> String
+pub fn CostSnapshot::to_repr(Self) -> @debug.Repr
 pub fn CostSnapshot::total_read_bytes(Self) -> Int32
 pub fn CostSnapshot::total_requests(Self) -> Int32
 
@@ -146,11 +150,14 @@ pub(all) struct IoBudget {
   max_bytes_written : Int64
 }
 pub fn IoBudget::check(Self, BudgetTracker) -> Array[String]
+pub fn IoBudget::equal(Self, Self) -> Bool
 pub fn IoBudget::head_probe() -> Self
 pub fn IoBudget::is_exceeded(Self, BudgetTracker) -> Bool
 pub fn IoBudget::new(max_gets? : Int32, max_puts? : Int32, max_lists? : Int32, max_deletes? : Int32, max_head_gets? : Int32, max_bytes_read? : Int64, max_bytes_written? : Int64) -> Self
+pub fn IoBudget::not_equal(Self, Self) -> Bool
 pub fn IoBudget::point_read() -> Self
 pub fn IoBudget::single_slab_read() -> Self
+pub fn IoBudget::to_repr(Self) -> @debug.Repr
 pub fn IoBudget::to_string(Self) -> String
 pub fn IoBudget::unlimited() -> Self
 pub fn IoBudget::with_max_bytes_read(Self, Int64) -> Self
@@ -185,9 +192,17 @@ pub struct MemStore {
 }
 pub fn MemStore::cold(Self) -> Unit
 pub fn MemStore::cost(Self) -> CostSnapshot
+pub fn MemStore::delete(Self, String) -> Unit
+pub fn MemStore::get(Self, String) -> Bytes?
+pub fn MemStore::get_many(Self, Array[String]) -> Array[Bytes?]
+pub fn MemStore::get_range(Self, String, Int32, Int32) -> Bytes?
+pub fn MemStore::get_range_many(Self, Array[(String, Int32, Int32)]) -> Array[Bytes?]
 pub fn MemStore::head_version(Self, String) -> String?
+pub fn MemStore::list(Self, String) -> Array[String]
 pub fn MemStore::new() -> Self
 pub fn MemStore::object_count(Self) -> Int32
+pub fn MemStore::put(Self, String, Bytes) -> Unit
+pub fn MemStore::put_if_match(Self, String, String?, Bytes) -> Bool
 pub fn MemStore::reset_cost(Self) -> Unit
 pub fn MemStore::total_object_bytes(Self) -> Int32
 pub impl BatchStore for MemStore

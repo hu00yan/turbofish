@@ -26,7 +26,7 @@ fn gate(cond : Bool, msg : String) -> Unit raise @core.SpndError {
 
 ///|
 fn ids_of_results(results : Array[@query.QueryResult]) -> Array[UInt64] {
-  let out : Array[UInt64] = Array::new()
+  let out : Array[UInt64] = Array()
   for r in results {
     out.push(r.id)
   }
@@ -94,7 +94,7 @@ fn bm25_bruteforce(
   k : Int,
   keep : (UInt64) -> Bool,
 ) -> Array[UInt64] raise @core.SpndError {
-  let terms : Array[String] = Array::new()
+  let terms : Array[String] = Array()
   let seen : Set[String] = Set([])
   for t in @core.tokenize(query) {
     if !seen.contains(t) {
@@ -109,7 +109,7 @@ fn bm25_bruteforce(
   for d in man.deleted {
     tomb.add(d)
   }
-  let merged : Array[(Int, Int, Double)] = Array::new()
+  let merged : Array[(Int, Int, Double)] = Array()
   for si in 0..<man.segments.length() {
     let seg = man.segments[si]
     let base = "\{ns}/_segments/\{seg.id}"
@@ -145,13 +145,13 @@ fn bm25_bruteforce(
     }
     let n_docs = seg.row_count
     let n_terms = terms.length()
-    let tfs : Array[Array[Int]] = Array::new(capacity=n_docs)
-    let dfs : Array[Int] = Array::new(capacity=n_terms)
+    let tfs : Array[Array[Int]] = Array(capacity=n_docs)
+    let dfs : Array[Int] = Array(capacity=n_terms)
     for _t in terms {
       dfs.push(0)
     }
     for row in 0..<n_docs {
-      let counts : Array[Int] = Array::new(capacity=n_terms)
+      let counts : Array[Int] = Array(capacity=n_terms)
       for _t in terms {
         counts.push(0)
       }
@@ -169,7 +169,7 @@ fn bm25_bruteforce(
       }
       tfs.push(counts)
     }
-    let seg_cands : Array[(Int, Double)] = Array::new()
+    let seg_cands : Array[(Int, Double)] = Array()
     for row in 0..<n_docs {
       let dl = match dls.get(row) {
         Some(x) => x
@@ -211,7 +211,7 @@ fn bm25_bruteforce(
     }
   }
   let id_cols : Map[Int, Array[UInt64]] = Map([])
-  let scored : Array[(UInt64, Double)] = Array::new()
+  let scored : Array[(UInt64, Double)] = Array()
   for c in merged {
     let (si, row, score) = c
     let ids = match id_cols.get(si) {
@@ -244,7 +244,7 @@ fn bm25_bruteforce(
   if scored.length() > k {
     scored.truncate(k)
   }
-  let out : Array[UInt64] = Array::new()
+  let out : Array[UInt64] = Array()
   for c in scored {
     out.push(c.0)
   }
@@ -266,7 +266,7 @@ fn vec_bruteforce(
   for d in man.deleted {
     tomb.add(d)
   }
-  let cands : Array[(UInt64, Double)] = Array::new()
+  let cands : Array[(UInt64, Double)] = Array()
   for si in 0..<man.segments.length() {
     let seg = man.segments[si]
     let base = "\{ns}/_segments/\{seg.id}"
@@ -302,7 +302,7 @@ fn vec_bruteforce(
     }
   }
   cands.sort_by(fn(a, b) { b.1.compare(a.1) })
-  let out : Array[UInt64] = Array::new()
+  let out : Array[UInt64] = Array()
   for c in cands {
     if out.length() >= k {
       break
@@ -434,7 +434,7 @@ fn run_gates(
       let d = docs[id.to_int()]
       d.category == "cat1" || d.ts > docs[500].ts
     },
-    fn(id) { not(docs[id.to_int()].public) },
+    fn(id) { !(docs[id.to_int()].public) },
     fn(id) {
       let t = docs[id.to_int()].ts
       t == t_in[0] || t == t_in[1] || t == t_in[2]
@@ -464,7 +464,7 @@ fn run_gates(
       let keep = match ti {
         0 => d.category == "cat3" && d.ts >= t0
         1 => d.category == "cat1" || d.ts > docs[500].ts
-        2 => not(d.public)
+        2 => !(d.public)
         3 => d.ts == t_in[0] || d.ts == t_in[1] || d.ts == t_in[2]
         _ => d.ts < docs[200].ts
       }
@@ -495,7 +495,7 @@ fn run_gates(
     let qv = vec_qvs[i]
     // 暴力参考：整读每段 rows/vector.bin（与检索同精度 f16），l2sq 升序 top-10
     let man_e = ne.manifest
-    let cands : Array[(UInt64, Double)] = Array::new()
+    let cands : Array[(UInt64, Double)] = Array()
     for si in 0..<man_e.segments.length() {
       let seg = man_e.segments[si]
       let base = "bench_euclid/_segments/\{seg.id}"
@@ -529,7 +529,7 @@ fn run_gates(
       }
     }
     cands.sort_by(fn(a, b) { a.1.compare(b.1) })
-    let want_ids : Array[UInt64] = Array::new()
+    let want_ids : Array[UInt64] = Array()
     for c in cands {
       if want_ids.length() >= 10 {
         break
@@ -584,7 +584,7 @@ fn run_gates(
     del_set.add(pad)
     pad = pad + 1UL
   }
-  let del_ids : Array[UInt64] = Array::new()
+  let del_ids : Array[UInt64] = Array()
   for id in del_set {
     del_ids.push(id)
   }
@@ -683,8 +683,8 @@ fn measure_type(
   // 冷
   store.cold()
   store.reset_cost()
-  let cr : Array[Int] = Array::new()
-  let cb : Array[Int] = Array::new()
+  let cr : Array[Int] = Array()
+  let cb : Array[Int] = Array()
   let mut prev_r = 0
   let mut prev_b = 0
   for i in 0..<20 {
@@ -700,8 +700,8 @@ fn measure_type(
   // 热
   let n_hot = @query.open(store, ns)
   store.reset_cost()
-  let hr : Array[Int] = Array::new()
-  let hb : Array[Int] = Array::new()
+  let hr : Array[Int] = Array()
+  let hb : Array[Int] = Array()
   prev_r = 0
   prev_b = 0
   for i in 0..<20 {
@@ -746,7 +746,7 @@ fn perf_one(
   vec_qvs : Array[Array[Float]],
   rounds : Int,
 ) -> Array[Double] raise @core.SpndError {
-  let ts : Array[Double] = Array::new()
+  let ts : Array[Double] = Array()
   for _ in 0..<rounds {
     let t0 = @bench.monotonic_clock_start()
     for i in 0..<20 {

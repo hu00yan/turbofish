@@ -50,14 +50,14 @@ fn err_msg(e : @core.SpndError) -> String {
 fn mkdocs(n : Int, dim : Int) -> Array[@core.Doc] {
   let rng = @core.Rng::new(7U)
   let words = ["alpha", "beta", "gamma", "delta", "向量", "检索"]
-  let docs : Array[@core.Doc] = Array::new(capacity=n)
+  let docs : Array[@core.Doc] = Array(capacity=n)
   for i in 0..<n {
     let mut text = ""
     for _ in 0..<6 {
       let w = words[(rng.next_u32() % words.length().reinterpret_as_uint()).reinterpret_as_int()]
       text = text + w + " "
     }
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for _ in 0..<dim {
       v.push(Float::from_double(rng.next_range(-1.0, 1.0)))
     }
@@ -135,25 +135,19 @@ fn OpCounts::class_b(self : OpCounts) -> Int {
 /// R2 Class A/B 计费口径的操作分类（cum_* 累计，reset 不清零）。
 struct CountingTransport {
   inner : @s3http.CurlTransport
-  mut reqs : Int
   mut gets : Int
-  mut puts : Int
-  mut bytes : Int
   mut head_reqs : Int
   cum : OpCounts
 }
 
 ///|
 fn CountingTransport::new(inner : @s3http.CurlTransport) -> CountingTransport {
-  { inner, reqs: 0, gets: 0, puts: 0, bytes: 0, head_reqs: 0, cum: OpCounts::new() }
+  { inner, gets: 0, head_reqs: 0, cum: OpCounts::new() }
 }
 
 ///|
 fn CountingTransport::reset(self : CountingTransport) -> Unit {
-  self.reqs = 0
   self.gets = 0
-  self.puts = 0
-  self.bytes = 0
   self.head_reqs = 0
 }
 
@@ -177,15 +171,12 @@ pub impl @s3store.HttpTransport for CountingTransport with fn execute(
   headers : Array[(String, String)],
   body : Bytes,
 ) -> (Int, Array[(String, String)], Bytes) {
-  self.reqs += 1
   match url.find("_heads") {
     Some(_) => self.head_reqs += 1
     None => ()
   }
   if http_method == "GET" {
     self.gets += 1
-  } else if http_method == "PUT" {
-    self.puts += 1
   }
   // R2 计费分类（cumulative）
   if http_method == "PUT" {
@@ -203,9 +194,7 @@ pub impl @s3store.HttpTransport for CountingTransport with fn execute(
       None => self.cum.gets += 1
     }
   }
-  let (st, hs, b) = self.inner.execute(http_method, url, headers, body)
-  self.bytes += b.length()
-  (st, hs, b)
+  self.inner.execute(http_method, url, headers, body)
 }
 
 ///|
@@ -309,10 +298,10 @@ fn run_case(
   let n0 = open_one()
   let _ = @query.bm25_search(n0, "alpha", 5, None)
   let _ = @query.vec_search(n0, docs[0].vector, 5, 4, None)
-  let bm_ts : Array[Double] = Array::new()
-  let bm_req : Array[Int] = Array::new()
-  let vec_ts : Array[Double] = Array::new()
-  let vec_req : Array[Int] = Array::new()
+  let bm_ts : Array[Double] = Array()
+  let bm_req : Array[Int] = Array()
+  let vec_ts : Array[Double] = Array()
+  let vec_req : Array[Int] = Array()
   for _ in 0..<5 {
     transport.reset()
     let t0 = @bench.monotonic_clock_start()
@@ -386,7 +375,7 @@ fn run() -> Unit raise @core.SpndError {
   }
   println("  get_range: \{part.length()} bytes")
   println("  list: \{store.list("\{ns}/").length()} keys")
-  let ts : Array[Double] = Array::new()
+  let ts : Array[Double] = Array()
   for _ in 0..<20 {
     let t0 = @bench.monotonic_clock_start()
     let _ = store.get(k)

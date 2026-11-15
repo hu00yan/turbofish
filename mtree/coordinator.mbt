@@ -28,21 +28,21 @@ pub struct NativeCasCoordinator[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] NativeCasCoordinator::new(
+pub fn[S] NativeCasCoordinator::new(
   store : S
 ) -> NativeCasCoordinator[S] {
   { store, ver_counter: 0, last_etag: None }
 }
 
 ///|
-impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with read_head(
+pub impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with read_head(
   self,
   ns : String
 ) -> (String, String)? raise @core.SpndError {
   let key = @store.head_pointer_key(ns)
   match self.store.get(key) {
     Some(bs) => {
-      let val = @utf8.decode(bs.view()) catch {
+      let val = @utf8.decode(bs.exact_view()) catch {
         _ => raise @core.Corrupt("invalid head pointer utf8 in coordinator")
       }
       let etag = match self.store.head_version(key) {
@@ -57,7 +57,7 @@ impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with re
 }
 
 ///|
-impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with commit_head(
+pub impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S] with commit_head(
   self,
   ns : String,
   expected_ver : String?,
@@ -81,7 +81,7 @@ pub struct LeaseCoordinator[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] LeaseCoordinator::new(
+pub fn[S] LeaseCoordinator::new(
   store : S
 ) -> LeaseCoordinator[S] {
   { store, current_holder: "" }
@@ -104,7 +104,7 @@ impl[S : @store.ObjectStore] HeadCoordinator for LeaseCoordinator[S] with read_h
   let key = @store.head_pointer_key(ns)
   match self.store.get(key) {
     Some(bs) => {
-      let val = @utf8.decode(bs.view()) catch {
+      let val = @utf8.decode(bs.exact_view()) catch {
         _ => raise @core.Corrupt("invalid head pointer utf8 in lease coordinator")
       }
       Some((val, val))
@@ -121,7 +121,7 @@ impl[S : @store.ObjectStore] HeadCoordinator for LeaseCoordinator[S] with commit
   new_val : String
 ) -> Bool raise @core.SpndError {
   // 1. 检查预期版本
-  let current = match self.read_head(ns) {
+  let current = match HeadCoordinator::read_head(self, ns) {
     Some((val, _)) => Some(val)
     None => None
   }
@@ -144,3 +144,9 @@ impl[S : @store.ObjectStore] HeadCoordinator for LeaseCoordinator[S] with commit
   self.store.put(head_k, @utf8.encode(new_val))
   true
 }
+
+
+
+
+
+pub extend NativeCasCoordinator with HeadCoordinator::{commit_head, read_head}

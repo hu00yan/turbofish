@@ -71,7 +71,7 @@ pub struct ControlPlane[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ControlPlane::new(
+pub fn[S] ControlPlane::new(
   store : S,
   cfg : CtrlConfig,
 ) -> ControlPlane[S] {
@@ -206,7 +206,7 @@ pub fn[S : @store.ObjectStore] ControlPlane::acquire(
 ///|
 /// 释放一个 pin：pins--（不为负），并弹出一个 pinned id（栈空 no-op）。
 /// pin 归零时，若条目已被 invalidate 标记（checked_ms=0）则删除整个 entry。
-pub fn[S : @store.ObjectStore] ControlPlane::release(
+pub fn[S] ControlPlane::release(
   self : ControlPlane[S],
   ns : String,
 ) -> Unit {
@@ -230,7 +230,7 @@ pub fn[S : @store.ObjectStore] ControlPlane::release(
 /// 主动失效：pins=0 时直接删 entry；仍有 pin 时**保留旧快照**（已持 pin 的
 /// 调用方查询不受影响），只把 `checked_ms` 置 0，让下一次 acquire 重新加载。
 /// pin 归零后由 release 删掉这个已被标记的 entry。
-pub fn[S : @store.ObjectStore] ControlPlane::invalidate(
+pub fn[S] ControlPlane::invalidate(
   self : ControlPlane[S],
   ns : String,
 ) -> Unit {
@@ -248,7 +248,7 @@ pub fn[S : @store.ObjectStore] ControlPlane::invalidate(
 ///|
 /// 权威控制面主动更新快照：用于写入、补丁、Compaction 完成后直接替换快照，
 /// 无需查询路径向 S3 轮询或 re-open。
-pub fn[S : @store.ObjectStore] ControlPlane::update_snapshot(
+pub fn[S] ControlPlane::update_snapshot(
   self : ControlPlane[S],
   ns : String,
   snap : @query.Namespace[S],
@@ -287,7 +287,7 @@ pub fn[S] ControlPlane::get_snapshot(
 
 ///|
 /// (hits, misses, reloads, stales, evictions)。
-pub fn[S : @store.ObjectStore] ControlPlane::stats(
+pub fn[S] ControlPlane::stats(
   self : ControlPlane[S],
 ) -> (Int, Int, Int, Int, Int) {
   (self.hits, self.misses, self.reloads, self.stales, self.evictions)
@@ -296,7 +296,7 @@ pub fn[S : @store.ObjectStore] ControlPlane::stats(
 ///|
 /// (probes, probe_hits)：TTL 过期后的轻量探测次数 / 免全量 re-open 的次数。
 /// 单独成对，保持 stats() 既有 5 元组签名不破坏现有调用点。
-pub fn[S : @store.ObjectStore] ControlPlane::probe_stats(
+pub fn[S] ControlPlane::probe_stats(
   self : ControlPlane[S],
 ) -> (Int, Int) {
   (self.probes, self.probe_hits)
@@ -305,7 +305,7 @@ pub fn[S : @store.ObjectStore] ControlPlane::probe_stats(
 ///|
 /// 最近一次 pin 到的 manifest id（`pinned_ids` 栈顶）；无 pin 时返回 None。
 /// 注意：reload 之后栈里仍保留旧代的 id，栈顶始终是「最新一次 pin」。
-pub fn[S : @store.ObjectStore] ControlPlane::pinned_manifest(
+pub fn[S] ControlPlane::pinned_manifest(
   self : ControlPlane[S],
   ns : String,
 ) -> String? {
@@ -338,7 +338,7 @@ pub fn[S] ControlPlane::pinned_manifests(
 ///|
 /// 容量控制：超限时逐出 pins=0 且 last_used 最小的条目。
 /// 若所有条目都被 pin，则不逐出，只记一次 eviction 压力事件。
-fn[S : @store.ObjectStore] ControlPlane::enforce_limit(
+fn[S] ControlPlane::enforce_limit(
   self : ControlPlane[S],
 ) -> Unit {
   while self.entries.length() > self.cfg.max_entries {

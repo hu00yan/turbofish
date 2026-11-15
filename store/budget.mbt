@@ -969,3 +969,8 @@ pub fn[S : ObjectStore] BudgetStore::head_version_checked(
   }
   res
 }
+
+pub extend IoBudget with Debug::{to_repr}
+pub extend IoBudget with Eq::{not_equal, equal}
+pub extend BudgetTracker with Debug::{to_repr}
+pub extend BudgetTracker with Eq::{not_equal, equal}

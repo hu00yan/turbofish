@@ -134,7 +134,7 @@ pub fn bytes_to_hex(data : Bytes) -> String {
     let v = if i % 2 == 0 { (b >> 4) & 0xF } else { b & 0xF }
     hex_digit(v)
   })
-  String::from_array(chars.view())
+  String::from_array(chars.exact_view())
 }
 
 ///|

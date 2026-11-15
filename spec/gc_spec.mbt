@@ -530,3 +530,7 @@ pub fn run_randomized_state_machine_model_checker(
     all_invariants_held: true,
   }
 }
+
+pub extend SpecRng with Debug::{to_repr}
+pub extend ModelCheckerStats with Debug::{to_repr}
+pub extend ModelCheckerStats with Eq::{not_equal, equal}

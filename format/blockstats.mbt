@@ -47,7 +47,7 @@ pub fn decode_blockstats(
   if 20 + block_count * 16 > bs.length() {
     raise @core.Truncated("blockstats payload")
   }
-  let out : Array[(Int64, Int64)] = Array::new(capacity=block_count)
+  let out : Array[(Int64, Int64)] = Array(capacity=block_count)
   for i in 0..<block_count {
     out.push((fa_i64(fa, 20 + i * 16), fa_i64(fa, 28 + i * 16)))
   }

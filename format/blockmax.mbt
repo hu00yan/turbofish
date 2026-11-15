@@ -45,7 +45,7 @@ pub fn decode_blockmax(
   if term_count < 0 {
     raise @core.Corrupt("blockmax term_count")
   }
-  let out : Array[Array[(Int, Int)]] = Array::new(capacity=term_count)
+  let out : Array[Array[(Int, Int)]] = Array(capacity=term_count)
   let mut pos = 20
   for _ in 0..<term_count {
     let block_count = @core.read_u32_le(bs, pos).reinterpret_as_int()
@@ -53,7 +53,7 @@ pub fn decode_blockmax(
     if block_count < 0 || pos + block_count * 8 > bs.length() {
       raise @core.Corrupt("blockmax block_count")
     }
-    let blocks : Array[(Int, Int)] = Array::new(capacity=block_count)
+    let blocks : Array[(Int, Int)] = Array(capacity=block_count)
     for _ in 0..<block_count {
       let max_tf = @core.read_u32_le(bs, pos).reinterpret_as_int()
       let min_dl = @core.read_u32_le(bs, pos + 4).reinterpret_as_int()

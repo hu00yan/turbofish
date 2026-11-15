@@ -52,7 +52,7 @@ pub fn[S : ObjectStore] read_head_pointer(store : S, ns : String) -> String? {
     Some(bs) =>
       // `try {..} catch`（而非 `try?`）：跨编译器版本可移植。
       (try {
-        Some(@utf8.decode(bs.view()))
+        Some(@utf8.decode(bs.exact_view()))
       } catch {
         _ => None
       })
@@ -81,7 +81,7 @@ pub fn[S : ObjectStore] read_head_state(
 ) -> (String, Array[String]) {
   let prefix = head_prefix(ns)
   let mut max = ""
-  let newer : Array[String] = Array::new()
+  let newer : Array[String] = Array()
   for key in store.list(prefix) {
     if key.has_prefix(prefix) {
       let id = key[prefix.length():].to_owned()

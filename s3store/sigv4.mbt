@@ -14,19 +14,21 @@
 
 ///|
 /// AWS 凭据（只从构造参数传入，本包不含任何字面量凭据）
+#derive(Debug)
 pub(all) struct S3Credentials {
   access_key : String
   secret_key : String
-} derive(Debug)
+}
 
 ///|
 /// 签名完成的请求（可直接交给 HttpTransport）
+#derive(Debug)
 pub(all) struct SignedRequest {
   http_method : String
   url : String
   headers : Array[(String, String)]
   body : Bytes
-} derive(Debug)
+}
 
 ///|
 /// RFC 3986 百分号编码，大写 hex。unreserved = A-Za-z0-9 - . _ ~ 保留；
@@ -51,7 +53,7 @@ pub fn uri_encode(s : String, encode_slash : Bool) -> String {
       b.write_char_utf8(hex_digit_upper(v & 0xF))
     }
   }
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => ""
   }
 }
@@ -100,7 +102,7 @@ fn trim_spaces(s : String) -> String {
 ///|
 /// canonical query string：键值都 RFC3986 编码后按字节序排序（先键后值），"a=1&b=2"
 pub fn canonical_query(query : Array[(String, String)]) -> String {
-  let enc : Array[(String, String)] = Array::new()
+  let enc : Array[(String, String)] = Array()
   for kv in query {
     enc.push((uri_encode(kv.0, true), uri_encode(kv.1, true)))
   }
@@ -121,7 +123,7 @@ pub fn canonical_query(query : Array[(String, String)]) -> String {
     b.write_string_utf8("=")
     b.write_string_utf8(enc[i].1)
   }
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => ""
   }
 }
@@ -133,7 +135,7 @@ pub fn canonical_query(query : Array[(String, String)]) -> String {
 pub fn canonical_header_block(
   headers : Array[(String, String)],
 ) -> (String, String) {
-  let norm : Array[(String, String)] = Array::new()
+  let norm : Array[(String, String)] = Array()
   for h in headers {
     norm.push((h.0.to_lower(), trim_spaces(h.1)))
   }
@@ -150,8 +152,8 @@ pub fn canonical_header_block(
     }
     names.write_string_utf8(norm[i].0)
   }
-  let b = @utf8.decode(block.to_bytes().view()) catch { _ => "" }
-  let n = @utf8.decode(names.to_bytes().view()) catch { _ => "" }
+  let b = @utf8.decode(block.to_bytes().exact_view()) catch { _ => "" }
+  let n = @utf8.decode(names.to_bytes().exact_view()) catch { _ => "" }
   (b, n)
 }
 
@@ -177,7 +179,7 @@ pub fn sigv4_canonical_request(
   b.write_string_utf8(names)
   b.write_string_utf8("\n")
   b.write_string_utf8(payload_hash)
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => ""
   }
 }
@@ -196,7 +198,7 @@ pub fn sigv4_string_to_sign(
   b.write_string_utf8(scope)
   b.write_string_utf8("\n")
   b.write_string_utf8(sha256_hex(@utf8.encode(canonical_request)))
-  @utf8.decode(b.to_bytes().view()) catch {
+  @utf8.decode(b.to_bytes().exact_view()) catch {
     _ => ""
   }
 }
@@ -237,7 +239,7 @@ pub fn sigv4_sign_request(
 ) -> SignedRequest {
   let payload_hash = sha256_hex(payload)
   let date_stamp = amz_date[:8].to_owned()
-  let headers : Array[(String, String)] = Array::new()
+  let headers : Array[(String, String)] = Array()
   headers.push(("host", host))
   headers.push(("x-amz-date", amz_date))
   for h in extra_headers {
@@ -253,7 +255,7 @@ pub fn sigv4_sign_request(
   let signature = bytes_to_hex(hmac_sha256(key, @utf8.encode(sts)))
   let (_, signed_names) = canonical_header_block(headers)
   let authorization = "AWS4-HMAC-SHA256 Credential=\{creds.access_key}/\{scope}, SignedHeaders=\{signed_names}, Signature=\{signature}"
-  let out_headers : Array[(String, String)] = Array::new()
+  let out_headers : Array[(String, String)] = Array()
   for h in headers {
     out_headers.push(h)
   }
@@ -269,10 +271,13 @@ pub fn sigv4_sign_request(
   }
   {
     http_method,
-    url: @utf8.decode(url.to_bytes().view()) catch {
+    url: @utf8.decode(url.to_bytes().exact_view()) catch {
       _ => ""
     },
     headers: out_headers,
     body: payload,
   }
 }
+
+pub extend S3Credentials with Debug::{to_repr}
+pub extend SignedRequest with Debug::{to_repr}

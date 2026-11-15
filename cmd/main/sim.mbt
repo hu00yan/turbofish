@@ -133,10 +133,10 @@ fn sim_measure(
   // ---- cold-data(warm-meta)：cold() 清 NVMe 与已读区间（内存常驻档不动）→ 每查询 open+search
   store_sim.cold()
   store_sim.reset_cost()
-  let clat : Array[Double] = Array::new()
-  let cbill : Array[Double] = Array::new()
-  let cgets : Array[Int] = Array::new()
-  let cbytes : Array[Int] = Array::new()
+  let clat : Array[Double] = Array()
+  let cbill : Array[Double] = Array()
+  let cgets : Array[Int] = Array()
+  let cbytes : Array[Int] = Array()
   let mut prev_lat = 0.0
   let mut prev_bill = 0.0
   let mut prev_gets = 0
@@ -162,10 +162,10 @@ fn sim_measure(
   store_sim.admit_all()
   let nw = @query.open(store_sim, ns)
   store_sim.reset_cost()
-  let wlat : Array[Double] = Array::new()
-  let wbill : Array[Double] = Array::new()
-  let wgetc : Array[Int] = Array::new()
-  let wbytes : Array[Int] = Array::new()
+  let wlat : Array[Double] = Array()
+  let wbill : Array[Double] = Array()
+  let wgetc : Array[Int] = Array()
+  let wbytes : Array[Int] = Array()
   prev_lat = 0.0
   prev_bill = 0.0
   prev_gets = 0
@@ -257,7 +257,7 @@ fn run_sim(
   println(
     "== SimStore 场景表（延迟 = 模拟器虚拟时钟累计；计费 = 真正打到 S3 的请求）==",
   )
-  let measures : Array[SimMeasure] = Array::new()
+  let measures : Array[SimMeasure] = Array()
   let kinds : Array[CostKind] = [KindBm25, KindVec, KindHybrid]
   for kind in kinds {
     let (m_cold, m_warm) = sim_measure(
@@ -278,7 +278,7 @@ fn run_sim(
   println(
     "  compact 后 segments=\{n_after.manifest.segments.length()} num_docs=\{n_after.manifest.num_docs}（before \{docs_before}）",
   )
-  let measures2 : Array[SimMeasure] = Array::new()
+  let measures2 : Array[SimMeasure] = Array()
   for kind in kinds {
     let (m_cold, m_warm) = sim_measure(
       store_sim, ns, kind, bm25_cost_qs, vec_cost_qvs, "compact ",

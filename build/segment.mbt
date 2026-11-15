@@ -44,7 +44,7 @@ fn json_bytes(j : Json) -> Bytes {
 ///|
 /// Bytes → Json；编码/解析失败统一转 Corrupt。
 fn bytes_to_json(bs : Bytes, what : String) -> Json raise @core.SpndError {
-  let s = @utf8.decode(bs.view()) catch {
+  let s = @utf8.decode(bs.exact_view()) catch {
     _ => raise @core.Corrupt("\{what} is not valid utf8")
   }
   @json.parse(s) catch {
@@ -280,14 +280,14 @@ fn build_stats_json(
   }
   let sorted = cats.copy()
   sorted.sort()
-  let uniq : Array[String] = Array::new()
+  let uniq : Array[String] = Array()
   for i in 0..<sorted.length() {
     if i == 0 || sorted[i] != sorted[i - 1] {
       uniq.push(sorted[i])
     }
   }
   if uniq.length() <= 256 {
-    let vals : Array[Json] = Array::new(capacity=uniq.length())
+    let vals : Array[Json] = Array(capacity=uniq.length())
     for v in uniq {
       vals.push(Json::string(v))
     }
@@ -304,7 +304,7 @@ fn build_stats_json(
       has_false = true
     }
   }
-  let pvals : Array[Json] = Array::new()
+  let pvals : Array[Json] = Array()
   if has_false {
     pvals.push(Json::boolean(false))
   }
@@ -320,7 +320,7 @@ fn build_stats_json(
 ///|
 /// 256 行块级 ts min/max（rows/blockstats.bin）。
 fn build_blockstats(tss : Array[Int64], block_size : Int) -> Bytes {
-  let blocks : Array[(Int64, Int64)] = Array::new()
+  let blocks : Array[(Int64, Int64)] = Array()
   let mut i = 0
   while i < tss.length() {
     let end = if i + block_size < tss.length() {
@@ -353,13 +353,13 @@ fn build_blockmax(
   doc_len : Array[Int],
   block_size : Int,
 ) -> Bytes {
-  let per : Array[Array[(Int, Int)]] = Array::new(capacity=entries.length())
+  let per : Array[Array[(Int, Int)]] = Array(capacity=entries.length())
   for e in entries {
     let posts = match term_map.get(e.term) {
       Some(a) => a
       None => []
     }
-    let blocks : Array[(Int, Int)] = Array::new()
+    let blocks : Array[(Int, Int)] = Array()
     let mut i = 0
     while i < posts.length() {
       let end = if i + block_size < posts.length() {
@@ -415,13 +415,13 @@ fn[S : @store.ObjectStore] write_segment(
   let segp = "\{cfg.ns}/_segments/\{seg_id}"
   let dim = docs[start].vector.length()
   let use_global = cfg.global_vec_parts && cfg.vec_storage == VF16
-  let ids : Array[UInt64] = Array::new(capacity=n)
-  let texts : Array[String] = Array::new(capacity=n)
-  let cats : Array[String] = Array::new(capacity=n)
-  let tss : Array[Int64] = Array::new(capacity=n)
-  let pubs : Array[Bool] = Array::new(capacity=n)
-  let flat : Array[Float] = Array::new(capacity=n * dim)
-  let doc_len : Array[Int] = Array::new(capacity=n)
+  let ids : Array[UInt64] = Array(capacity=n)
+  let texts : Array[String] = Array(capacity=n)
+  let cats : Array[String] = Array(capacity=n)
+  let tss : Array[Int64] = Array(capacity=n)
+  let pubs : Array[Bool] = Array(capacity=n)
+  let flat : Array[Float] = Array(capacity=n * dim)
+  let doc_len : Array[Int] = Array(capacity=n)
   let term_map : Map[String, Array[@format.Posting]] = Map([])
   let mut min_id = docs[start].id
   let mut max_id = docs[start].id
@@ -459,7 +459,7 @@ fn[S : @store.ObjectStore] write_segment(
       match term_map.get(kv.0) {
         Some(arr) => arr.push(posting)
         None => {
-          let arr : Array[@format.Posting] = Array::new()
+          let arr : Array[@format.Posting] = Array()
           arr.push(posting)
           term_map.set(kv.0, arr)
         }
@@ -494,7 +494,7 @@ fn[S : @store.ObjectStore] write_segment(
   }
   store.put("\{segp}/rows/public.bin", bs_pub)
   size_bytes += bs_pub.length()
-  let partitions : Array[Json] = Array::new()
+  let partitions : Array[Json] = Array()
   // 全局 IVF 模式：向量只存一份（global part），不写 rows/vector.bin
   if !use_global {
     // 向量列 + 分区（按 vec_storage 选择编码）
@@ -510,7 +510,7 @@ fn[S : @store.ObjectStore] write_segment(
     size_bytes += bs_vec.length()
   }
   // fts/*
-  let lists : Array[(String, Array[@format.Posting])] = Array::new()
+  let lists : Array[(String, Array[@format.Posting])] = Array()
   for kv in term_map.iter() {
     lists.push((kv.0, kv.1))
   }
@@ -518,9 +518,9 @@ fn[S : @store.ObjectStore] write_segment(
   // dir 头 [16..20) doc_count 回填为段行数（encode_fts 写 0，MVP 由 meta.json
   // 承载行数，这里顺手回填让 dir 自描述）
   let dir_b = Buffer()
-  dir_b.write_bytesview(built.dir.view(start=0, end=16))
+  dir_b.write_bytesview(built.dir.exact_view(start=0, end=16))
   dir_b.write_uint_le(n.reinterpret_as_uint())
-  dir_b.write_bytesview(built.dir.view(start=20, end=built.dir.length()))
+  dir_b.write_bytesview(built.dir.exact_view(start=20, end=built.dir.length()))
   let bs_dir = dir_b.to_bytes()
   store.put("\{segp}/fts/dir.bin", bs_dir)
   size_bytes += bs_dir.length()
@@ -544,9 +544,9 @@ fn[S : @store.ObjectStore] write_segment(
     // vec/part-{cid}.bin：cosine 最近中心分配
     let k = cent.k()
     let adim = if cent.dim > 0 { cent.dim } else { dim }
-    let part_rows : Array[Array[Int]] = Array::new(capacity=k)
+    let part_rows : Array[Array[Int]] = Array(capacity=k)
     for _ in 0..<k {
-      part_rows.push(Array::new())
+      part_rows.push(Array())
     }
     if k > 0 {
       for r in 0..<n {
@@ -586,7 +586,7 @@ fn[S : @store.ObjectStore] write_segment(
       if rows.length() == 0 {
         continue
       }
-      let data : Array[Float] = Array::new(capacity=rows.length() * dim)
+      let data : Array[Float] = Array(capacity=rows.length() * dim)
       for r in rows {
         for d in 0..<dim {
           data.push(enc_flat[r * dim + d])
@@ -601,7 +601,7 @@ fn[S : @store.ObjectStore] write_segment(
             sq8_scales,
           )
         VPq16 => {
-          let part_codes : Array[UInt] = Array::new(
+          let part_codes : Array[UInt] = Array(
             capacity=rows.length() * pq_m,
           )
           for r in rows {
@@ -625,7 +625,7 @@ fn[S : @store.ObjectStore] write_segment(
   mj.set("max_id", Json::number(max_id.to_double()))
   mj.set("partitions", Json::array(partitions))
   if cfg.write_fts_bloom {
-    let terms : Array[String] = Array::new()
+    let terms : Array[String] = Array()
     for kv in term_map.iter() {
       terms.push(kv.0)
     }

@@ -24,7 +24,7 @@ pub struct WriteBackBuffer[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] WriteBackBuffer::new(
+pub fn[S] WriteBackBuffer::new(
   engine : MergeTreeEngine[S],
   flush_rows_threshold~ : Int = 100,
   flush_bytes_threshold~ : Int = 65536,
@@ -81,7 +81,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::mutate(
   }
 
   // 3. 判定是否达到攒批刷盘条件
-  let count = self.pending_docs.size() + self.pending_tombstones.size()
+  let count = self.pending_docs.length() + self.pending_tombstones.length()
   let trigger_rows = count >= self.flush_rows_threshold
   let trigger_bytes = self.pending_bytes >= self.flush_bytes_threshold
   let trigger_linger = count > 0 &&
@@ -106,15 +106,15 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::flush(
   }
 
   // 1. 抽取所有墓碑
-  let tombstones_arr : Array[UInt64] = Array::new(
-    capacity=self.pending_tombstones.size(),
+  let tombstones_arr : Array[UInt64] = Array(
+    capacity=self.pending_tombstones.length(),
   )
   for id in self.pending_tombstones {
     tombstones_arr.push(id)
   }
 
   // 2. 抽取所有新文档
-  let docs_arr : Array[@core.Doc] = Array::new(capacity=self.pending_docs.size())
+  let docs_arr : Array[@core.Doc] = Array(capacity=self.pending_docs.length())
   for _, d in self.pending_docs {
     docs_arr.push(d)
   }
@@ -175,7 +175,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::read_all_live_docs(
   self : WriteBackBuffer[S]
 ) -> Array[@core.Doc] raise @core.SpndError {
   let durable_docs = self.engine.read_live_docs()
-  let live : Array[@core.Doc] = Array::new()
+  let live : Array[@core.Doc] = Array()
   let seen_ids : Set[UInt64] = Set([])
 
   // 1. 优先放入内存写回缓冲区中的最新活跃文档
@@ -206,7 +206,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::read_all_live_docs(
 
 ///|
 pub fn[S] WriteBackBuffer::pending_count(self : WriteBackBuffer[S]) -> Int {
-  self.pending_docs.size() + self.pending_tombstones.size()
+  self.pending_docs.length() + self.pending_tombstones.length()
 }
 
 ///|

@@ -5,10 +5,11 @@
 ///|
 /// 高性能 BitSet，用于 segment / partition 级存活与匹配行的紧凑位图表示。
 /// 采用 64 位整型数组存储，支持位级并行 AND, OR, NOT 与 popcount 统计。
+#derive(Debug)
 pub(all) struct BitSet {
   size : Int
   words : Array[UInt64]
-} derive(Show)
+}
 
 ///|
 fn popcount64(x : UInt64) -> Int {
@@ -41,7 +42,7 @@ pub fn BitSet::all_set(size : Int) -> BitSet {
 ///|
 fn BitSet::mask_last_word(self : BitSet) -> Unit {
   let rem = self.size % 64
-  if rem != 0 && not(self.words.is_empty()) {
+  if rem != 0 && !(self.words.is_empty()) {
     let last = self.words.length() - 1
     let mask = (1UL << rem) - 1UL
     self.words[last] = self.words[last] & mask
@@ -150,7 +151,7 @@ pub fn BitSet::clone(self : BitSet) -> BitSet {
 ///|
 /// 导出所有置位行号（用于向量扫描候选行迭代）。
 pub fn BitSet::to_rows(self : BitSet) -> Array[Int] {
-  let res : Array[Int] = Array::new(capacity=self.count())
+  let res : Array[Int] = Array(capacity=self.count())
   for w in 0..<self.words.length() {
     let word = self.words[w]
     if word == 0UL {
@@ -228,7 +229,7 @@ fn[S : @store.ObjectStore] load_column_values(
     None => {
       if field == "id" {
         if cs.id_dense {
-          let ids : Array[UInt64] = Array::new(capacity=cs.row_count)
+          let ids : Array[UInt64] = Array(capacity=cs.row_count)
           for r in 0..<cs.row_count {
             ids.push(cs.min_id + r.to_uint64())
           }
@@ -401,7 +402,6 @@ fn[S : @store.ObjectStore] eval_eq_columnar(
     (ColBitmap(bytes), B(target)) => {
       let count = cs.row_count
       let num_words = (count + 63) / 64
-      let full_bytes = bytes.length() - 20
       for w in 0..<num_words {
         let off = 20 + w * 8
         if off + 8 <= bytes.length() {
@@ -434,7 +434,7 @@ fn[S : @store.ObjectStore] eval_eq_columnar(
         }
       }
     (ColU64(arr), I(target)) => {
-      let tu64 = target.to_uint64()
+      let tu64 = target.reinterpret_as_uint64()
       for i in 0..<arr.length() {
         if arr[i] == tu64 {
           bs.set(i)
@@ -476,7 +476,7 @@ fn[S : @store.ObjectStore] eval_in_columnar(
           code_targets.add(i.to_uint16())
         }
       }
-      if not(code_targets.is_empty()) {
+      if !(code_targets.is_empty()) {
         for i in 0..<codes.length() {
           if code_targets.contains(codes[i]) {
             bs.set(i)
@@ -516,7 +516,7 @@ fn[S : @store.ObjectStore] eval_in_columnar(
       let u64_targets : Set[UInt64] = Set([])
       for v in vals {
         match v {
-          I(x) => u64_targets.add(x.to_uint64())
+          I(x) => u64_targets.add(x.reinterpret_as_uint64())
           _ => raise @core.Corrupt("In(\{field}) mixed value types")
         }
       }
@@ -547,7 +547,7 @@ fn[S : @store.ObjectStore] eval_in_columnar(
         }
       } else if has_f {
         for i in 0..<arr.length() {
-          if not(arr[i]) {
+          if !(arr[i]) {
             bs.set(i)
           }
         }
@@ -597,7 +597,7 @@ fn[S : @store.ObjectStore] eval_cmp_columnar(
         }
       }
     (ColU64(arr), I(target)) => {
-      let tu64 = target.to_uint64()
+      let tu64 = target.reinterpret_as_uint64()
       for i in 0..<arr.length() {
         let ok = match op {
           CMP_LT => arr[i] < tu64
@@ -718,13 +718,13 @@ pub fn[S : @store.ObjectStore] eval_pushdown_filter(
   for si in 0..<n.manifest.segments.length() {
     let seg = n.manifest.segments[si]
     let cs = ensure_seg(n, si)
-    if not(seg_may_match(cs, Some(filter))) {
+    if !(seg_may_match(cs, Some(filter))) {
       continue
     }
     let col_cache : Map[String, ColumnValues] = Map([])
     let bs = eval_filter_columnar_with_cache(n, cs, seg.id, filter, col_cache)
     // 剔除 tombstone
-    if not(tomb.is_empty()) {
+    if !(tomb.is_empty()) {
       let rows = bs.to_rows()
       for r in rows {
         let id = row_id(n, cs, seg.id, r)
@@ -759,3 +759,6 @@ pub fn[S : @store.ObjectStore] eval_pushdown_filter(
     allowed_ids,
   }
 }
+
+
+pub extend BitSet with Debug::{to_repr}

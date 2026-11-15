@@ -63,7 +63,7 @@ pub fn train_centroids(
   let k = if nlist < sample_n { nlist } else { sample_n }
   let rng = @core.Rng::new(42U)
   // 部分 Fisher-Yates：idx 前 sample_n 个即确定性采样结果
-  let idx : Array[Int] = Array::new(capacity=n)
+  let idx : Array[Int] = Array(capacity=n)
   for i in 0..<n {
     idx.push(i)
   }
@@ -76,7 +76,7 @@ pub fn train_centroids(
     idx[j] = t
   }
   // 中心初始化：取前 k 个样本（cosine 归一化，euclidean 原始拷贝）
-  let data : Array[Float] = Array::new(capacity=k * dim)
+  let data : Array[Float] = Array(capacity=k * dim)
   for c in 0..<k {
     if euclidean {
       for f in 0..<dim {
@@ -86,11 +86,11 @@ pub fn train_centroids(
       append_normalized(data, docs[idx[c]].vector, dim)
     }
   }
-  let sums : Array[Double] = Array::new(capacity=k * dim)
+  let sums : Array[Double] = Array(capacity=k * dim)
   for _ in 0..<(k * dim) {
     sums.push(0.0)
   }
-  let counts : Array[Int] = Array::new(capacity=k)
+  let counts : Array[Int] = Array(capacity=k)
   for _ in 0..<k {
     counts.push(0)
   }

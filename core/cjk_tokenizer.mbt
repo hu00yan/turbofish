@@ -19,12 +19,13 @@
 
 ///|
 /// 分词器选择。Word = 既有 unicode_word 简化分词（默认，旧行为不变）。
+#derive(Eq, Debug)
 pub(all) enum Tokenizer {
   Word
   Smartcn
   Kuromoji
   Nori
-} derive(Eq, Show)
+}
 
 ///|
 /// 配置串 → Tokenizer：'word' / 'smartcn' / 'kuromoji' / 'nori'；未知返回 None。
@@ -109,6 +110,7 @@ fn zh_emit(run : Array[Char], sink : (String) -> Unit) -> Unit {
 
 ///|
 /// 日语词典词条的活用类型。
+#derive(Eq)
 enum JaType {
   JaIchidan // 一段动词（食べる）
   JaGodan // 五段动词（走る/書く/読む）
@@ -116,7 +118,8 @@ enum JaType {
   JaKuru // カ変（来る）
   JaAdjI // い形容词（高い）
   JaOther // 名词/片假名外来语等（无活用）
-} derive(Eq)
+}
+
 
 ///|
 /// 日语种子词典：(基础形, 类型)。活用 surface 由规则表确定性生成。
@@ -200,7 +203,7 @@ fn godan_te(c : Char) -> String? {
 ///|
 /// (基础形, 类型) → 该基础形的常见活用 surface。数组顺序固定 ⇒ 确定性。
 fn ja_inflections(base : String, ty : JaType) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   match ty {
     JaIchidan => {
       let stem = base[:base.length() - 1].to_owned()
@@ -378,7 +381,7 @@ let ko_particles : Array[String] = [
 ]
 
 ///|
-struct KoDict {
+priv struct KoDict {
   verbs : Map[String, String]
   nouns : Set[String]
   particles : Set[String]
@@ -515,11 +518,11 @@ fn cjk_analyze(
   is_kind_char : (Int) -> Bool,
   analyze_run : (Array[Char]) -> Unit,
 ) -> Unit {
-  let word_chars : Array[Char] = Array::new()
-  let cjk_run : Array[Char] = Array::new()
+  let word_chars : Array[Char] = Array()
+  let cjk_run : Array[Char] = Array()
   let flush_word = () => {
     if word_chars.length() > 0 {
-      let mut term = String::from_array(word_chars.view()).to_lower()
+      let mut term = String::from_array(word_chars.exact_view()).to_lower()
       if term.length() > 255 {
         term = term[:255].to_owned()
       }
@@ -557,7 +560,7 @@ fn cjk_analyze(
 ///|
 /// 带分词器的 tokenize。
 pub fn tokenize_with(tok : Tokenizer, text : String) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   tokenize_into_with(tok, text, fn(t) { out.push(t) })
   out
 }
@@ -613,11 +616,11 @@ test "mixed latin and cjk keeps word path behavior" {
 
 ///|
 test "parse and roundtrip tokenizer names" {
-  inspect(parse_tokenizer("kuromoji"), content="Some(Kuromoji)")
-  inspect(parse_tokenizer("nori"), content="Some(Nori)")
-  inspect(parse_tokenizer("smartcn"), content="Some(Smartcn)")
-  inspect(parse_tokenizer("word"), content="Some(Word)")
-  inspect(parse_tokenizer("bogus"), content="None")
+  assert_eq(parse_tokenizer("kuromoji"), Some(Kuromoji))
+  assert_eq(parse_tokenizer("nori"), Some(Nori))
+  assert_eq(parse_tokenizer("smartcn"), Some(Smartcn))
+  assert_eq(parse_tokenizer("word"), Some(Word))
+  assert_eq(parse_tokenizer("bogus"), None)
   inspect(tokenizer_to_string(Word), content="word")
   inspect(tokenizer_to_string(Kuromoji), content="kuromoji")
 }
@@ -629,3 +632,18 @@ test "parse and roundtrip tokenizer names" {
 //    kuromoji/nori 换 MeCab 式 lattice（Viterbi + 连接代价）。
 // 3. native 后端可选 FFI 到 alyze（MIT）做逐 token 对齐基准。
 
+
+pub extend Tokenizer with Eq::{not_equal, equal}
+pub extend JaType with Eq::{not_equal, equal}
+
+pub impl Show for Tokenizer with fn to_string(self) {
+  match self {
+    Word => "Word"
+    Smartcn => "Smartcn"
+    Kuromoji => "Kuromoji"
+    Nori => "Nori"
+  }
+}
+
+pub extend Tokenizer with Show::{to_string, output}
+pub extend Tokenizer with Debug::{to_repr}

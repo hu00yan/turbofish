@@ -14,6 +14,7 @@ pub fn now_amz_date() -> String
 pub struct CurlTransport {
   version : Int32
 }
+pub fn CurlTransport::execute(Self, String, String, Array[(String, String)], Bytes) -> (Int32, Array[(String, String)], Bytes)
 pub fn CurlTransport::new() -> Self
 pub impl @s3store.HttpTransport for CurlTransport
 

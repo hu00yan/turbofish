@@ -78,6 +78,9 @@ pub(all) suberror SpndError {
   NotFound(String)
   CommitConflict(String)
 }
+pub fn SpndError::equal(Self, Self) -> Bool
+pub fn SpndError::not_equal(Self, Self) -> Bool
+pub fn SpndError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
 pub(all) struct Doc {
@@ -91,8 +94,8 @@ pub(all) struct Doc {
 
 #derive(Eq)
 type JaType
-
-type KoDict
+pub fn JaType::equal(Self, Self) -> Bool
+pub fn JaType::not_equal(Self, Self) -> Bool
 
 pub struct Rng {
   mut state : UInt32
@@ -102,13 +105,19 @@ pub fn Rng::next_f64(Self) -> Double
 pub fn Rng::next_range(Self, Double, Double) -> Double
 pub fn Rng::next_u32(Self) -> UInt32
 
-#derive(Eq, Show)
+#derive(Eq, @debug.Debug)
 pub(all) enum Tokenizer {
   Word
   Smartcn
   Kuromoji
   Nori
 }
+pub fn Tokenizer::equal(Self, Self) -> Bool
+pub fn Tokenizer::not_equal(Self, Self) -> Bool
+pub fn Tokenizer::output(Self, &Logger) -> Unit
+pub fn Tokenizer::to_repr(Self) -> @debug.Repr
+pub fn Tokenizer::to_string(Self) -> String
+pub impl Show for Tokenizer
 
 // Type aliases
 

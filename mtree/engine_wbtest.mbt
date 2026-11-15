@@ -7,10 +7,10 @@
 
 ///|
 fn make_test_docs(start_id : Int, count : Int, dim : Int, prefix : String) -> Array[@core.Doc] {
-  let docs : Array[@core.Doc] = Array::new(capacity=count)
+  let docs : Array[@core.Doc] = Array(capacity=count)
   for i in 0..<count {
     let id_num = start_id + i
-    let v : Array[Float] = Array::new(capacity=dim)
+    let v : Array[Float] = Array(capacity=dim)
     for d in 0..<dim {
       v.push(Float::from_int(id_num * dim + d) * 0.01)
     }
@@ -47,7 +47,7 @@ test "10-row edit produces exactly 1 S3 PUT and zero base rewrite" {
   let puts_before = store.cost().puts
 
   // 2. 模拟 Cursor/Notion 工作负载：对 10 行已有文档进行小批量编辑（修改 id 10..19）
-  let old_ids : Array[UInt64] = Array::new(capacity=10)
+  let old_ids : Array[UInt64] = Array(capacity=10)
   for i in 10..<20 {
     old_ids.push(i.to_uint64())
   }
@@ -135,7 +135,7 @@ test "repeated delta appends and tombstone mask accumulation" {
   // 连续进行 3 次小批量突变（每次 5 行）
   for step in 0..<3 {
     let start_id = step * 5 + 1
-    let old_ids : Array[UInt64] = Array::new(capacity=5)
+    let old_ids : Array[UInt64] = Array(capacity=5)
     for i in 0..<5 {
       old_ids.push((start_id + i).to_uint64())
     }
@@ -162,3 +162,5 @@ test "repeated delta appends and tombstone mask accumulation" {
   assert_eq(loaded_m.parts.length(), 4)
   assert_eq(loaded_m.tombstones.length(), 0)
 }
+
+extend ObjManifestStore with ManifestStore::{load}

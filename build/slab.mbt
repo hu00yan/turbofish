@@ -17,7 +17,7 @@ pub(all) struct SlabBuilder {
 
 ///|
 pub fn SlabBuilder::new() -> SlabBuilder {
-  { components: Array::new() }
+  { components: Array() }
 }
 
 ///|
@@ -215,13 +215,13 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
   let dim = docs[start].vector.length()
   let use_global = cfg.global_vec_parts && cfg.vec_storage == VF16
 
-  let ids : Array[UInt64] = Array::new(capacity=n)
-  let texts : Array[String] = Array::new(capacity=n)
-  let cats : Array[String] = Array::new(capacity=n)
-  let tss : Array[Int64] = Array::new(capacity=n)
-  let pubs : Array[Bool] = Array::new(capacity=n)
-  let flat : Array[Float] = Array::new(capacity=n * dim)
-  let doc_len : Array[Int] = Array::new(capacity=n)
+  let ids : Array[UInt64] = Array(capacity=n)
+  let texts : Array[String] = Array(capacity=n)
+  let cats : Array[String] = Array(capacity=n)
+  let tss : Array[Int64] = Array(capacity=n)
+  let pubs : Array[Bool] = Array(capacity=n)
+  let flat : Array[Float] = Array(capacity=n * dim)
+  let doc_len : Array[Int] = Array(capacity=n)
   let term_map : Map[String, Array[@format.Posting]] = Map([])
   let mut min_id = docs[start].id
   let mut max_id = docs[start].id
@@ -259,7 +259,7 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
       match term_map.get(kv.0) {
         Some(arr) => arr.push(posting)
         None => {
-          let arr : Array[@format.Posting] = Array::new()
+          let arr : Array[@format.Posting] = Array()
           arr.push(posting)
           term_map.set(kv.0, arr)
         }
@@ -268,7 +268,7 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
   }
 
   let enc_flat = if cfg.normalize_vecs { pq_normalize(flat, dim) } else { flat }
-  let components : Array[@format.SlabComponentPayload] = Array::new()
+  let components : Array[@format.SlabComponentPayload] = Array()
 
   // 1. ID column
   let bs_id = @format.encode_col(@format.ColU64(ids))
@@ -312,15 +312,15 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
   }
 
   // 7. FTS components
-  let lists : Array[(String, Array[@format.Posting])] = Array::new()
+  let lists : Array[(String, Array[@format.Posting])] = Array()
   for kv in term_map.iter() {
     lists.push((kv.0, kv.1))
   }
   let built = @format.encode_fts(lists)
   let dir_b = Buffer()
-  dir_b.write_bytesview(built.dir.view(start=0, end=16))
+  dir_b.write_bytesview(built.dir.exact_view(start=0, end=16))
   dir_b.write_uint_le(n.reinterpret_as_uint())
-  dir_b.write_bytesview(built.dir.view(start=20, end=built.dir.length()))
+  dir_b.write_bytesview(built.dir.exact_view(start=20, end=built.dir.length()))
   let bs_dir = dir_b.to_bytes()
 
   components.push(
@@ -352,13 +352,13 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
   }
 
   // 9. Vector partitions (if not global)
-  let partitions : Array[Json] = Array::new()
+  let partitions : Array[Json] = Array()
   if !use_global {
     let k = cent.k()
     let adim = if cent.dim > 0 { cent.dim } else { dim }
-    let part_rows : Array[Array[Int]] = Array::new(capacity=k)
+    let part_rows : Array[Array[Int]] = Array(capacity=k)
     for _ in 0..<k {
-      part_rows.push(Array::new())
+      part_rows.push(Array())
     }
     if k > 0 {
       for r in 0..<n {
@@ -397,7 +397,7 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
       if rows.length() == 0 {
         continue
       }
-      let data : Array[Float] = Array::new(capacity=rows.length() * dim)
+      let data : Array[Float] = Array(capacity=rows.length() * dim)
       for r in rows {
         for d in 0..<dim {
           data.push(enc_flat[r * dim + d])
@@ -412,7 +412,7 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
             sq8_scales,
           )
         VPq16 => {
-          let part_codes : Array[UInt] = Array::new(
+          let part_codes : Array[UInt] = Array(
             capacity=rows.length() * pq_m,
           )
           for r in rows {
@@ -439,7 +439,7 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
   mj.set("partitions", Json::array(partitions))
   mj.set("format", Json::string("slab_v2"))
   if cfg.write_fts_bloom {
-    let terms : Array[String] = Array::new()
+    let terms : Array[String] = Array()
     for kv in term_map.iter() {
       terms.push(kv.0)
     }
@@ -504,3 +504,5 @@ pub fn[S : @store.ObjectStore] write_segment_pluggable(
       write_segment_slab(store, cfg, cent, docs, start, end, index_at_end~)
   }
 }
+
+pub extend SlabBuilder with Debug::{to_repr}

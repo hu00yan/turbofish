@@ -1782,3 +1782,14 @@ impl MetadataCatalog for MemRdbCatalog with get_unreferenced_segments(
 
   unref
 }
+
+pub extend CatalogError with Debug::{to_repr}
+pub extend CatalogError with Eq::{not_equal, equal}
+pub extend LeaseToken with Debug::{to_repr}
+pub extend LeaseToken with Eq::{not_equal, equal}
+pub extend RdbTenant with Debug::{to_repr}
+pub extend RdbLease with Debug::{to_repr}
+pub extend RdbSnapshot with Debug::{to_repr}
+pub extend RdbLineage with Debug::{to_repr}
+pub extend RdbSegmentRef with Debug::{to_repr}
+pub extend RdbManifest with Debug::{to_repr}

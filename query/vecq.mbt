@@ -26,7 +26,7 @@ fn select_probes(
     return []
   }
   let np = if nprobe < kk { nprobe } else { kk }
-  let dists : Array[(Int, Double)] = Array::new(capacity=kk)
+  let dists : Array[(Int, Double)] = Array(capacity=kk)
   for cid in 0..<kk {
     // euclidean namespace：l2sq 最小 = 欧氏最近；
     // cosine：手工构造的旧 namespace 中心未必归一化，保持通用 cosine
@@ -38,7 +38,7 @@ fn select_probes(
     dists.push((cid, d))
   }
   dists.sort_by(fn(a, b) { a.1.compare(b.1) })
-  let out : Array[Int] = Array::new(capacity=np)
+  let out : Array[Int] = Array(capacity=np)
   for i in 0..<np {
     out.push(dists[i].0)
   }
@@ -72,7 +72,7 @@ fn vec_score_of(
 /// 查询向量 L2 归一化（PQ ADC 用；零向量原样）。
 fn normalize_query(qv : Array[Float]) -> Array[Float] {
   let n = @core.norm_f32(qv, 0, qv.length())
-  let out : Array[Float] = Array::new(capacity=qv.length())
+  let out : Array[Float] = Array(capacity=qv.length())
   for v in qv {
     out.push(if n > 0.0 { Float::from_double(v.to_double() / n) } else { v })
   }
@@ -83,7 +83,7 @@ fn normalize_query(qv : Array[Float]) -> Array[Float] {
 /// PQ16 ADC：查询子空间 vs 256 个码字建 LUT，再按每行 codes 求和。
 /// 返回 (row, 累计 l2sq 距离)。cosine 口径的分数换算（1 - dist/2，要求码本
 /// 在归一化向量上训练）由调用方按 namespace 度量执行：euclidean 直接取 -dist。
-fn pq_adc_candidates(
+pub fn pq_adc_candidates(
   qv_adc : Array[Float],
   pq : @format.PQPart,
   codebooks : Array[Float],
@@ -102,7 +102,7 @@ fn pq_adc_candidates_filtered(
 ) -> Array[(Int, Double)] {
   let m = pq.m
   let dsub = pq.dsub
-  let lut : Array[Double] = Array::new(capacity=m * 256)
+  let lut : Array[Double] = Array(capacity=m * 256)
   for c in 0..<m {
     let qb = c * dsub
     for j in 0..<256 {
@@ -115,11 +115,11 @@ fn pq_adc_candidates_filtered(
       lut.push(dist)
     }
   }
-  let out : Array[(Int, Double)] = Array::new(capacity=pq.rows.length())
+  let out : Array[(Int, Double)] = Array(capacity=pq.rows.length())
   for i in 0..<pq.rows.length() {
     let row = pq.rows[i]
     match bitset {
-      Some(bs) => if not(bs.get(row)) { continue }
+      Some(bs) => if !(bs.get(row)) { continue }
       None => ()
     }
     let mut dist = 0.0
@@ -188,8 +188,8 @@ fn[S : @store.ObjectStore] vec_segment(
       None => None
     }
   }
-  let cands : Array[(Int, Double)] = Array::new()
-  let pq_cands : Array[(Int, Double)] = Array::new()
+  let cands : Array[(Int, Double)] = Array()
+  let pq_cands : Array[(Int, Double)] = Array()
   let mut has_pq = false
   for cid in probes {
     if !part_set.contains(cid) {
@@ -295,7 +295,7 @@ fn[S : @store.ObjectStore] vec_segment(
   } else if has_pq {
     pq_cands.sort_by(fn(a, b) { b.1.compare(a.1) })
     let ef = if pq_cands.length() < 50 { pq_cands.length() } else { 50 }
-    let top : Array[(Int, Double)] = Array::new(capacity=ef)
+    let top : Array[(Int, Double)] = Array(capacity=ef)
     for i in 0..<ef {
       top.push(pq_cands[i])
     }
@@ -355,7 +355,7 @@ fn[S : @store.ObjectStore] vec_segment(
   if cands.length() > k {
     cands.truncate(k)
   }
-  let out : Array[(Int, Int, Double)] = Array::new()
+  let out : Array[(Int, Int, Double)] = Array()
   for c in cands {
     out.push((seg_idx, c.0, c.1))
   }
@@ -378,8 +378,8 @@ fn TopKHeap::new(k : Int) -> TopKHeap {
   {
     capacity: cap,
     size: 0,
-    ids: Array::new(capacity=cap),
-    scores: Array::new(capacity=cap),
+    ids: Array(capacity=cap),
+    scores: Array(capacity=cap),
   }
 }
 
@@ -434,7 +434,7 @@ fn TopKHeap::push(self : TopKHeap, id : UInt64, score : Double) -> Unit {
 }
 
 fn TopKHeap::to_results(self : TopKHeap) -> Array[QueryResult] {
-  let out : Array[QueryResult] = Array::new(capacity=self.size)
+  let out : Array[QueryResult] = Array(capacity=self.size)
   for i in 0..<self.size {
     out.push({ id: self.ids[i], score: self.scores[i] })
   }
@@ -636,7 +636,7 @@ fn[S : @store.ObjectStore] collect_global_candidates(
 /// - 字段引用前置绑定，段级别元数据直接扁平下标索引 O(1)
 /// - tombstone 与 filter 先行短路，跳过无用向量乘法
 /// - 点积采用 8-way 并行累加器 auto-vec 级计算
-fn[S : @store.ObjectStore] score_global_part(
+fn[S] score_global_part(
   n : Namespace[S],
   gp : @format.GlobalVecPart,
   qv : Array[Float],
@@ -664,7 +664,7 @@ fn[S : @store.ObjectStore] score_global_part(
   let gp_data = gp.data
   let gp_rows = gp.rows
   let num_rows = gp_rows.length()
-  let has_tomb = not(tomb.is_empty())
+  let has_tomb = !(tomb.is_empty())
 
   for i in 0..<num_rows {
     let (si, row) = gp_rows[i]
@@ -677,10 +677,10 @@ fn[S : @store.ObjectStore] score_global_part(
       continue
     }
     match seg_bitsets[si] {
-      Some(bs) => if not(bs.get(row)) { continue }
+      Some(bs) => if !(bs.get(row)) { continue }
       None =>
         match seg_matchers[si] {
-          Some(m) => if not(matcher_at(m, row)) { continue }
+          Some(m) => if !(matcher_at(m, row)) { continue }
           None => ()
         }
     }
@@ -698,7 +698,7 @@ fn[S : @store.ObjectStore] score_global_part(
       }
     }
     match allowed_ids {
-      Some(aids) => if not(aids.contains(id)) { continue }
+      Some(aids) => if !(aids.contains(id)) { continue }
       None => ()
     }
     if has_tomb && tomb.contains(id) {
@@ -740,7 +740,7 @@ fn[S : @store.ObjectStore] vec_global_search(
   preload_all_global_parts(n)
 
   // 代 → 该代存在的 cid 集合。旧布局只有一代（来自 ensure_global_cids 的并集）。
-  let gens : Array[String] = Array::new()
+  let gens : Array[String] = Array()
   let gen_cid_sets : Map[String, Set[Int]] = Map([])
   match global_gen_versions(n) {
     Some(vers) =>
@@ -775,13 +775,13 @@ fn[S : @store.ObjectStore] vec_global_search(
   }
   let tomb = tombstones_of(n)
   let nseg = n.manifest.segments.length()
-  let seg_skip : Array[Bool] = Array::new(capacity=nseg)
-  let seg_norm : Array[Bool] = Array::new(capacity=nseg)
-  let seg_dense : Array[Bool] = Array::new(capacity=nseg)
-  let seg_min_id : Array[UInt64] = Array::new(capacity=nseg)
-  let seg_ids_arr : Array[Array[UInt64]?] = Array::new(capacity=nseg)
-  let seg_matchers : Array[RowMatcher?] = Array::new(capacity=nseg)
-  let seg_bitsets : Array[BitSet?] = Array::new(capacity=nseg)
+  let seg_skip : Array[Bool] = Array(capacity=nseg)
+  let seg_norm : Array[Bool] = Array(capacity=nseg)
+  let seg_dense : Array[Bool] = Array(capacity=nseg)
+  let seg_min_id : Array[UInt64] = Array(capacity=nseg)
+  let seg_ids_arr : Array[Array[UInt64]?] = Array(capacity=nseg)
+  let seg_matchers : Array[RowMatcher?] = Array(capacity=nseg)
+  let seg_bitsets : Array[BitSet?] = Array(capacity=nseg)
 
   for si in 0..<nseg {
     let cs = ensure_seg(n, si)
@@ -901,7 +901,7 @@ pub fn[S : @store.ObjectStore] vec_search_with_pushdown(
     )
   }
   let tomb = tombstones_of(n)
-  let cands : Array[(Int, Int, Double)] = Array::new()
+  let cands : Array[(Int, Int, Double)] = Array()
   for si in 0..<n.manifest.segments.length() {
     for
       c in vec_segment(
@@ -913,7 +913,7 @@ pub fn[S : @store.ObjectStore] vec_search_with_pushdown(
   let results = results_from_candidates(n, cands, tomb, k)
   match allowed_ids {
     Some(aids) => {
-      let filtered : Array[QueryResult] = Array::new(capacity=results.length())
+      let filtered : Array[QueryResult] = Array(capacity=results.length())
       for r in results {
         if aids.contains(r.id) {
           filtered.push(r)
@@ -989,7 +989,7 @@ pub fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(
     return []
   }
   let tomb = tombstones_of(n)
-  let cands : Array[(Int, Int, Double)] = Array::new()
+  let cands : Array[(Int, Int, Double)] = Array()
   for si in 0..<n.manifest.segments.length() {
     for
       c in vec_segment(
@@ -1001,7 +1001,7 @@ pub fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(
   let results = results_from_candidates(n, cands, tomb, k)
   match allowed_ids {
     Some(aids) => {
-      let filtered : Array[QueryResult] = Array::new(capacity=results.length())
+      let filtered : Array[QueryResult] = Array(capacity=results.length())
       for r in results {
         if aids.contains(r.id) {
           filtered.push(r)
@@ -1049,7 +1049,7 @@ pub fn[S : @store.ObjectStore] hybrid_search(
 ///|
 /// min-max 归一化（退化分布：全部同分时统一 1.0）。
 fn minmax_norm(scores : Array[(UInt64, Double)]) -> Array[(UInt64, Double)] {
-  let out : Array[(UInt64, Double)] = Array::new(
+  let out : Array[(UInt64, Double)] = Array(
     capacity=scores.length(),
   )
   if scores.is_empty() {
@@ -1093,11 +1093,11 @@ pub fn[S : @store.ObjectStore] hybrid_search_opts(
   }
   let bm = bm25_search(n, query, k, filter)
   let vs = vec_search(n, qv, k, nprobe, filter)
-  let out : Array[QueryResult] = Array::new()
+  let out : Array[QueryResult] = Array()
   if opts.fusion == "linear" {
     let nb = minmax_norm(
       (fn() {
-        let a : Array[(UInt64, Double)] = Array::new(capacity=bm.length())
+        let a : Array[(UInt64, Double)] = Array(capacity=bm.length())
         for r in bm {
           a.push((r.id, r.score))
         }
@@ -1106,7 +1106,7 @@ pub fn[S : @store.ObjectStore] hybrid_search_opts(
     )
     let nv = minmax_norm(
       (fn() {
-        let a : Array[(UInt64, Double)] = Array::new(capacity=vs.length())
+        let a : Array[(UInt64, Double)] = Array(capacity=vs.length())
         for r in vs {
           a.push((r.id, r.score))
         }

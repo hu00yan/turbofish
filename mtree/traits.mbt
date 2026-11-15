@@ -3,6 +3,7 @@
 
 ///|
 /// Part 的清单元数据（manifest 持有；读路径用它做二分定位，不用 GET part）。
+#derive(Debug, Eq)
 pub(all) struct PartMeta {
   part_id : String // PartStore 内容哈希 id（put_part 的返回值）
   level : Int // 0 = L0 delta part，1 = consolidated base part（或更高层）
@@ -11,7 +12,7 @@ pub(all) struct PartMeta {
   max_id : UInt64
   size_bytes : Int // part 对象字节数（写放大/分桶口径）
   mut tombstone_count : Int // 本 part 内已标记删除的墓碑行数
-} derive(Debug, Eq)
+}
 
 ///|
 /// 不可变 part 的存取。对象存储实现 = @store.ObjectStore 上做内容寻址。
@@ -26,11 +27,12 @@ pub(open) trait PartStore {
 }
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct Manifest {
   mut seq : UInt64
   parts : Array[PartMeta]
   tombstones : Array[UInt64]
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn Manifest::new() -> Manifest {
@@ -69,7 +71,7 @@ pub fn Manifest::total_rows(self : Manifest) -> Int {
 }
 
 ///|
-pub fn Manifest::tombstone_ratio(self : Manifest, part : PartMeta) -> Double {
+pub fn Manifest::tombstone_ratio(_self : Manifest, part : PartMeta) -> Double {
   if part.row_count == 0 {
     0.0
   } else {
@@ -94,3 +96,8 @@ pub(open) trait MergePolicy {
   fn pick(self : Self, parts : Array[PartMeta]) -> Array[String]?
 }
 
+
+pub extend PartMeta with Debug::{to_repr}
+pub extend PartMeta with Eq::{not_equal, equal}
+pub extend Manifest with Debug::{to_repr}
+pub extend Manifest with Eq::{not_equal, equal}

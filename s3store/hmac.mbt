@@ -27,8 +27,8 @@ pub fn hmac_sha256(key : Bytes, msg : Bytes) -> Bytes {
     inner.write_byte((kb[i].to_uint() ^ 0x36U).to_byte())
     outer.write_byte((kb[i].to_uint() ^ 0x5cU).to_byte())
   }
-  inner.write_bytes(msg.view())
-  outer.write_bytes(sha256(inner.to_bytes()).view())
+  inner.write_bytes(msg.exact_view())
+  outer.write_bytes(sha256(inner.to_bytes()).exact_view())
   sha256(outer.to_bytes())
 }
 

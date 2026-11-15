@@ -143,7 +143,7 @@ pub(all) struct SlabIndex {
 
 ///|
 pub fn SlabIndex::new() -> SlabIndex {
-  { entries: Array::new() }
+  { entries: Array() }
 }
 
 ///|
@@ -290,8 +290,8 @@ pub fn decode_slab_index(
     raise @core.Corrupt("invalid slab index entry count \{count}")
   }
   let mut pos = index_offset + 8
-  let entries : Array[SlabEntry] = Array::new(capacity=count)
-  for i in 0..<count {
+  let entries : Array[SlabEntry] = Array(capacity=count)
+  for _ in 0..<count {
     if pos + 2 > bs.length() {
       raise @core.Truncated("slab entry name len at \{pos}")
     }
@@ -304,7 +304,7 @@ pub fn decode_slab_index(
     for j in 0..<nlen {
       name_buf.write_byte(bs[pos + j])
     }
-    let name = @utf8.decode(name_buf.to_bytes().view()) catch {
+    let name = @utf8.decode(name_buf.to_bytes().exact_view()) catch {
       _ => raise @core.Corrupt("slab entry name is not valid utf8")
     }
     pos += nlen
@@ -393,7 +393,7 @@ pub fn encode_slab(
 ) -> (Bytes, SlabIndex) {
   if index_at_end {
     let mut cur_offset = SLAB_HEADER_LEN
-    let entries : Array[SlabEntry] = Array::new(capacity=components.length())
+    let entries : Array[SlabEntry] = Array(capacity=components.length())
     for c in components {
       let offset = cur_offset.to_int64()
       let length = c.data.length().to_int64()
@@ -428,7 +428,7 @@ pub fn encode_slab(
       index_len += 2 + name_bs.length() + 8 + 8 + 4
     }
     let mut cur_offset = SLAB_HEADER_LEN + index_len
-    let entries : Array[SlabEntry] = Array::new(capacity=components.length())
+    let entries : Array[SlabEntry] = Array(capacity=components.length())
     for c in components {
       let offset = cur_offset.to_int64()
       let length = c.data.length().to_int64()
@@ -452,3 +452,13 @@ pub fn encode_slab(
     (b.to_bytes(), index)
   }
 }
+
+pub extend SegmentFormat with Debug::{to_repr}
+pub extend SegmentFormat with Eq::{not_equal, equal}
+pub extend SlabComponent with Debug::{to_repr}
+pub extend SlabComponent with Eq::{not_equal, equal}
+pub extend SlabEntry with Debug::{to_repr}
+pub extend SlabEntry with Eq::{not_equal, equal}
+pub extend SlabIndex with Debug::{to_repr}
+pub extend SlabIndex with Eq::{not_equal, equal}
+pub extend SlabComponentPayload with Debug::{to_repr}

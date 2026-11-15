@@ -103,6 +103,9 @@ pub(all) enum CasOutcome {
   Success(CasState)
   Conflict(UInt64, UInt64)
 }
+pub fn CasOutcome::equal(Self, Self) -> Bool
+pub fn CasOutcome::not_equal(Self, Self) -> Bool
+pub fn CasOutcome::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct CasState {
@@ -110,6 +113,9 @@ pub(all) struct CasState {
   manifest_key : String
   epoch : UInt64
 }
+pub fn CasState::equal(Self, Self) -> Bool
+pub fn CasState::not_equal(Self, Self) -> Bool
+pub fn CasState::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum CommitError {
@@ -120,18 +126,27 @@ pub(all) enum CommitError {
   MissingManifest(String)
   BranchNotFound(String)
 }
+pub fn CommitError::equal(Self, Self) -> Bool
+pub fn CommitError::not_equal(Self, Self) -> Bool
+pub fn CommitError::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum CommitOutcome {
   CommitOk(UInt64)
   CommitRejected(CommitError)
 }
+pub fn CommitOutcome::equal(Self, Self) -> Bool
+pub fn CommitOutcome::not_equal(Self, Self) -> Bool
+pub fn CommitOutcome::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum ContainerKind {
   ArrayContainer
   BitmapContainer
 }
+pub fn ContainerKind::equal(Self, Self) -> Bool
+pub fn ContainerKind::not_equal(Self, Self) -> Bool
+pub fn ContainerKind::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum CrashStage {
@@ -142,6 +157,9 @@ pub(all) enum CrashStage {
   CrashAfterManifestUpload
   CrashDuringCasCommit
 }
+pub fn CrashStage::equal(Self, Self) -> Bool
+pub fn CrashStage::not_equal(Self, Self) -> Bool
+pub fn CrashStage::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum FencingError {
@@ -150,6 +168,9 @@ pub(all) enum FencingError {
   NoActiveLease(String)
   NotLeaseHolder(String, String)
 }
+pub fn FencingError::equal(Self, Self) -> Bool
+pub fn FencingError::not_equal(Self, Self) -> Bool
+pub fn FencingError::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct LeaseToken {
@@ -158,6 +179,9 @@ pub(all) struct LeaseToken {
   branch : String
   expires_at_ms : UInt64
 }
+pub fn LeaseToken::equal(Self, Self) -> Bool
+pub fn LeaseToken::not_equal(Self, Self) -> Bool
+pub fn LeaseToken::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct ModelCheckerStats {
@@ -178,6 +202,9 @@ pub(all) struct ModelCheckerStats {
   safety3_checks_passed : Int32
   all_invariants_held : Bool
 }
+pub fn ModelCheckerStats::equal(Self, Self) -> Bool
+pub fn ModelCheckerStats::not_equal(Self, Self) -> Bool
+pub fn ModelCheckerStats::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SpecBranch {
@@ -188,6 +215,9 @@ pub(all) struct SpecBranch {
   origin_manifest_id : String?
   manifest_history : Array[String]
 }
+pub fn SpecBranch::equal(Self, Self) -> Bool
+pub fn SpecBranch::not_equal(Self, Self) -> Bool
+pub fn SpecBranch::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct SpecCatalog {
@@ -198,6 +228,7 @@ pub(all) struct SpecCatalog {
   mut last_token_id : UInt64
 }
 pub fn SpecCatalog::new() -> Self
+pub fn SpecCatalog::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SpecManifest {
@@ -207,12 +238,18 @@ pub(all) struct SpecManifest {
   parent_id : String?
   created_at_ms : UInt64
 }
+pub fn SpecManifest::equal(Self, Self) -> Bool
+pub fn SpecManifest::not_equal(Self, Self) -> Bool
+pub fn SpecManifest::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SpecMergeTree {
   parts : Array[SpecPart]
   tombstones : Array[UInt64]
 }
+pub fn SpecMergeTree::equal(Self, Self) -> Bool
+pub fn SpecMergeTree::not_equal(Self, Self) -> Bool
+pub fn SpecMergeTree::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct SpecObjectStore {
@@ -225,6 +262,7 @@ pub fn SpecObjectStore::is_partially_written(Self, String) -> Bool
 pub fn SpecObjectStore::new() -> Self
 pub fn SpecObjectStore::put(Self, String, Int32, UInt64) -> Unit
 pub fn SpecObjectStore::put_partial(Self, String, Int32, UInt64) -> Unit
+pub fn SpecObjectStore::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SpecPart {
@@ -234,6 +272,9 @@ pub(all) struct SpecPart {
   min_id : UInt64
   max_id : UInt64
 }
+pub fn SpecPart::equal(Self, Self) -> Bool
+pub fn SpecPart::not_equal(Self, Self) -> Bool
+pub fn SpecPart::to_repr(Self) -> @debug.Repr
 
 #derive(@debug.Debug)
 pub(all) struct SpecRng {
@@ -242,6 +283,7 @@ pub(all) struct SpecRng {
 pub fn SpecRng::new(UInt64) -> Self
 pub fn SpecRng::next_int(Self, Int32) -> Int32
 pub fn SpecRng::next_u64(Self) -> UInt64
+pub fn SpecRng::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct SpecSnapshot {
@@ -251,6 +293,9 @@ pub(all) struct SpecSnapshot {
   pinned_segments : Array[String]
   created_at_ms : UInt64
 }
+pub fn SpecSnapshot::equal(Self, Self) -> Bool
+pub fn SpecSnapshot::not_equal(Self, Self) -> Bool
+pub fn SpecSnapshot::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) enum SpecStoreObject {
@@ -258,6 +303,9 @@ pub(all) enum SpecStoreObject {
   PartiallyWritten(Int32)
   Swept
 }
+pub fn SpecStoreObject::equal(Self, Self) -> Bool
+pub fn SpecStoreObject::not_equal(Self, Self) -> Bool
+pub fn SpecStoreObject::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

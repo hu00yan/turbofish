@@ -156,7 +156,7 @@ pub fn apply_compaction(
   tree : SpecMergeTree,
   new_base_part_id : String
 ) -> SpecMergeTree {
-  let live_ids : Array[UInt64] = Array::new()
+  let live_ids : Array[UInt64] = Array()
   let num_parts = tree.parts.length()
   for p_idx in 0..<num_parts {
     let p = tree.parts[p_idx]
@@ -204,3 +204,8 @@ pub fn verify_compaction_live_doc_preservation(
   }
   true
 }
+
+pub extend SpecPart with Debug::{to_repr}
+pub extend SpecPart with Eq::{not_equal, equal}
+pub extend SpecMergeTree with Debug::{to_repr}
+pub extend SpecMergeTree with Eq::{not_equal, equal}

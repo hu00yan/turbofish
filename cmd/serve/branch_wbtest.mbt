@@ -403,7 +403,7 @@ test "cmd/serve: multiple snapshots and branching from restored state" {
 
   // Stage 2: +5 docs -> snap2
   @build.ingest(store, { ..cfg, vector_dim: dim }, make_test_docs(10UL, 5, "stage2"))
-  let snap2 = create_snapshot(store, ns, "snap2")
+  ignore(create_snapshot(store, ns, "snap2"))
 
   let snaps = list_snapshots(store, ns)
   assert_eq(snaps.length(), 2)

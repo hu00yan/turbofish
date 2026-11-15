@@ -24,8 +24,11 @@ pub struct CachedManifestStore[S] {
   mut is_writer : Bool
 }
 pub fn[S] CachedManifestStore::invalidate(Self[S]) -> Unit
-pub fn[S : @store.ObjectStore] CachedManifestStore::new(ObjManifestStore[S], ttl_ms? : Int64, is_writer? : Bool) -> Self[S]
+pub fn[S : @store.ObjectStore] CachedManifestStore::load(Self[S]) -> Manifest raise @core.SpndError
+pub fn[S] CachedManifestStore::new(ObjManifestStore[S], ttl_ms? : Int64, is_writer? : Bool) -> Self[S]
+pub fn[S : @store.ObjectStore] CachedManifestStore::publish(Self[S], Manifest) -> Unit raise @core.SpndError
 pub fn[S] CachedManifestStore::set_writer(Self[S], Bool) -> Unit
+pub impl[S : @store.ObjectStore] ManifestStore for CachedManifestStore[S]
 
 #derive(Eq, @debug.Debug)
 pub(all) struct CompactionResult {
@@ -35,6 +38,9 @@ pub(all) struct CompactionResult {
   tombstones_purged : Int32
   new_seq : UInt64
 }
+pub fn CompactionResult::equal(Self, Self) -> Bool
+pub fn CompactionResult::not_equal(Self, Self) -> Bool
+pub fn CompactionResult::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct CompactionTriggerConfig {
@@ -44,6 +50,9 @@ pub(all) struct CompactionTriggerConfig {
   max_merge_parts : Int32
 }
 pub fn CompactionTriggerConfig::default() -> Self
+pub fn CompactionTriggerConfig::equal(Self, Self) -> Bool
+pub fn CompactionTriggerConfig::not_equal(Self, Self) -> Bool
+pub fn CompactionTriggerConfig::to_repr(Self) -> @debug.Repr
 
 pub struct Compactor[S] {
   engine : MergeTreeEngine[S]
@@ -53,7 +62,7 @@ pub struct Compactor[S] {
   mut wake_signaled : Bool
 }
 pub fn[S : @store.ObjectStore] Compactor::compact_step(Self[S], Int64) -> CompactionResult? raise @core.SpndError
-pub fn[S : @store.ObjectStore] Compactor::new(MergeTreeEngine[S], TieredMergePolicy, CompactionTriggerConfig) -> Self[S]
+pub fn[S] Compactor::new(MergeTreeEngine[S], TieredMergePolicy, CompactionTriggerConfig) -> Self[S]
 pub fn[S] Compactor::notify_mutation(Self[S], Int64) -> Unit
 pub fn[S : @store.ObjectStore] Compactor::tick(Self[S], Int64) -> CompactionResult? raise @core.SpndError
 
@@ -62,7 +71,7 @@ pub struct LeaseCoordinator[S] {
   mut current_holder : String
 }
 pub fn[S] LeaseCoordinator::lease_key(Self[S], String) -> String
-pub fn[S : @store.ObjectStore] LeaseCoordinator::new(S) -> Self[S]
+pub fn[S] LeaseCoordinator::new(S) -> Self[S]
 
 #derive(Eq, @debug.Debug)
 pub(all) struct Manifest {
@@ -70,9 +79,12 @@ pub(all) struct Manifest {
   parts : Array[PartMeta]
   tombstones : Array[UInt64]
 }
+pub fn Manifest::equal(Self, Self) -> Bool
 pub fn Manifest::is_deleted(Self, UInt64) -> Bool
 pub fn Manifest::l0_count(Self) -> Int32
 pub fn Manifest::new() -> Self
+pub fn Manifest::not_equal(Self, Self) -> Bool
+pub fn Manifest::to_repr(Self) -> @debug.Repr
 pub fn Manifest::tombstone_mask(Self) -> Bytes
 pub fn Manifest::tombstone_ratio(Self, PartMeta) -> Double
 pub fn Manifest::total_rows(Self) -> Int32
@@ -103,7 +115,10 @@ pub struct NativeCasCoordinator[S] {
   mut ver_counter : Int32
   mut last_etag : String?
 }
-pub fn[S : @store.ObjectStore] NativeCasCoordinator::new(S) -> Self[S]
+pub fn[S : @store.ObjectStore] NativeCasCoordinator::commit_head(Self[S], String, String?, String) -> Bool raise @core.SpndError
+pub fn[S] NativeCasCoordinator::new(S) -> Self[S]
+pub fn[S : @store.ObjectStore] NativeCasCoordinator::read_head(Self[S], String) -> (String, String)? raise @core.SpndError
+pub impl[S : @store.ObjectStore] HeadCoordinator for NativeCasCoordinator[S]
 
 pub struct ObjManifestStore[S] {
   store : S
@@ -111,13 +126,13 @@ pub struct ObjManifestStore[S] {
 }
 pub fn[S] ObjManifestStore::head_ptr_key(Self[S]) -> String
 pub fn[S] ObjManifestStore::manifest_key(Self[S], UInt64) -> String
-pub fn[S : @store.ObjectStore] ObjManifestStore::new(S, String) -> Self[S]
+pub fn[S] ObjManifestStore::new(S, String) -> Self[S]
 
 pub struct ObjPartStore[S] {
   store : S
   ns : String
 }
-pub fn[S : @store.ObjectStore] ObjPartStore::new(S, String) -> Self[S]
+pub fn[S] ObjPartStore::new(S, String) -> Self[S]
 pub fn[S] ObjPartStore::part_key(Self[S], String) -> String
 
 #derive(Eq, @debug.Debug)
@@ -130,12 +145,19 @@ pub(all) struct PartMeta {
   size_bytes : Int32
   mut tombstone_count : Int32
 }
+pub fn PartMeta::equal(Self, Self) -> Bool
+pub fn PartMeta::not_equal(Self, Self) -> Bool
+pub fn PartMeta::to_repr(Self) -> @debug.Repr
 
 #derive(Eq, @debug.Debug)
 pub(all) struct TieredMergePolicy {
   config : CompactionTriggerConfig
 }
+pub fn TieredMergePolicy::equal(Self, Self) -> Bool
 pub fn TieredMergePolicy::new(CompactionTriggerConfig) -> Self
+pub fn TieredMergePolicy::not_equal(Self, Self) -> Bool
+pub fn TieredMergePolicy::pick(Self, Array[PartMeta]) -> Array[String]?
+pub fn TieredMergePolicy::to_repr(Self) -> @debug.Repr
 pub impl MergePolicy for TieredMergePolicy
 
 pub struct WriteBackBuffer[S] {
@@ -155,7 +177,7 @@ pub fn[S : @store.ObjectStore] WriteBackBuffer::flush(Self[S], Int64) -> String?
 pub fn[S] WriteBackBuffer::get_pending_doc(Self[S], UInt64) -> @core.Doc?
 pub fn[S] WriteBackBuffer::is_deleted(Self[S], UInt64) -> Bool
 pub fn[S : @store.ObjectStore] WriteBackBuffer::mutate(Self[S], Array[@core.Doc], Array[UInt64], Int64) -> String? raise @core.SpndError
-pub fn[S : @store.ObjectStore] WriteBackBuffer::new(MergeTreeEngine[S], flush_rows_threshold? : Int32, flush_bytes_threshold? : Int32, linger_ms? : Int64) -> Self[S]
+pub fn[S] WriteBackBuffer::new(MergeTreeEngine[S], flush_rows_threshold? : Int32, flush_bytes_threshold? : Int32, linger_ms? : Int64) -> Self[S]
 pub fn[S] WriteBackBuffer::pending_bytes_count(Self[S]) -> Int32
 pub fn[S] WriteBackBuffer::pending_count(Self[S]) -> Int32
 pub fn[S : @store.ObjectStore] WriteBackBuffer::read_all_live_docs(Self[S]) -> Array[@core.Doc] raise @core.SpndError

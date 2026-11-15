@@ -73,13 +73,15 @@ pub fn FVal::describe(self : FVal) -> String {
 
 ///|
 /// 单条检索结果。BM25：相关度分；向量：cosine 相似度（1 - 距离）；混合：RRF 分。
+#derive(Debug)
 pub(all) struct QueryResult {
   id : UInt64
   score : Double
-} derive(Debug)
+}
 
 ///|
 /// seg meta.json 的过滤统计（write_stats=true 时存在）。
+#derive(Debug)
 pub(all) struct SegStats {
   has_ts : Bool
   ts_min : Int64
@@ -88,7 +90,7 @@ pub(all) struct SegStats {
   cat_values : Array[String]
   has_pub : Bool
   pub_values : Array[Bool]
-} derive(Debug)
+}
 
 ///|
 /// per-segment 解码缓存。同一 manifest 快照内跨查询复用。
@@ -150,12 +152,12 @@ pub(all) struct MetadataCache[S] {
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::new() -> MetadataCache[S] {
+pub fn[S] MetadataCache::new() -> MetadataCache[S] {
   { entries: Map([]), hits: 0, misses: 0, head_ttl_ms: 60000UL }
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::invalidate(
+pub fn[S] MetadataCache::invalidate(
   self : MetadataCache[S],
   ns : String,
 ) -> Unit {
@@ -163,7 +165,7 @@ pub fn[S : @store.ObjectStore] MetadataCache::invalidate(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::put(
+pub fn[S] MetadataCache::put(
   self : MetadataCache[S],
   ns : String,
   n : Namespace[S],
@@ -172,7 +174,7 @@ pub fn[S : @store.ObjectStore] MetadataCache::put(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::get(
+pub fn[S] MetadataCache::get(
   self : MetadataCache[S],
   ns : String,
 ) -> Namespace[S]? {
@@ -180,7 +182,7 @@ pub fn[S : @store.ObjectStore] MetadataCache::get(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::set_head_ttl(
+pub fn[S] MetadataCache::set_head_ttl(
   self : MetadataCache[S],
   ttl_ms : UInt64,
 ) -> Unit {
@@ -188,7 +190,7 @@ pub fn[S : @store.ObjectStore] MetadataCache::set_head_ttl(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::touch(
+pub fn[S] MetadataCache::touch(
   self : MetadataCache[S],
   ns : String,
 ) -> Unit {
@@ -199,7 +201,7 @@ pub fn[S : @store.ObjectStore] MetadataCache::touch(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] MetadataCache::update_in_memory(
+pub fn[S] MetadataCache::update_in_memory(
   self : MetadataCache[S],
   store : S,
   ns : String,
@@ -211,7 +213,7 @@ pub fn[S : @store.ObjectStore] MetadataCache::update_in_memory(
 
 ///|
 /// 直接从内存元数据构造 Namespace，零 S3 请求。
-pub fn[S : @store.ObjectStore] open_from_meta(
+pub fn[S] open_from_meta(
   store : S,
   ns : String,
   meta : @format.NamespaceMeta,
@@ -258,7 +260,7 @@ fn global_gen_equal(
 
 ///|
 /// 带缓存的从内存元数据打开/复用 Namespace，零 S3 请求。
-pub fn[S : @store.ObjectStore] open_cached_or_create(
+pub fn[S] open_cached_or_create(
   cache : MetadataCache[S],
   store : S,
   ns : String,
@@ -545,13 +547,13 @@ fn[T] global_gen_versions(
     // （单代 `vec_global_version`）处理，而不是静默只读 deltas。
     Some(g) if g.base == "" => None
     Some(g) => {
-      let all : Array[String] = Array::new(capacity=g.deltas.length() + 1)
+      let all : Array[String] = Array(capacity=g.deltas.length() + 1)
       all.push(g.base)
       for d in g.deltas {
         all.push(d)
       }
       let seen : Set[String] = Set([])
-      let out : Array[String] = Array::new(capacity=all.length())
+      let out : Array[String] = Array(capacity=all.length())
       for ver in all {
         if ver != "" && !seen.contains(ver) {
           seen.add(ver)
@@ -585,7 +587,7 @@ fn[S : @store.ObjectStore] global_gen_cids(
         Object(mm) => mm
         _ => raise @core.Corrupt("global vec meta is not an object")
       }
-      let cids : Array[Int] = Array::new()
+      let cids : Array[Int] = Array()
       match m.get("cids") {
         Some(Array(arr)) =>
           for x in arr {
@@ -643,7 +645,7 @@ fn[S : @store.ObjectStore] ensure_global_cids(
     Some(c) => return Some(c)
     None => ()
   }
-  let cids : Array[Int] = Array::new()
+  let cids : Array[Int] = Array()
   match global_gen_versions(n) {
     Some(gens) => {
       let seen : Set[Int] = Set([])
@@ -741,7 +743,7 @@ fn[S : @store.ObjectStore] get_object(
 ///|
 /// Bytes → String（UTF-8）。
 fn bytes_to_string(bs : Bytes) -> String raise @core.SpndError {
-  @utf8.decode(bs.view()) catch {
+  @utf8.decode(bs.exact_view()) catch {
     _ => raise @core.Corrupt("invalid utf8 bytes")
   }
 }
@@ -791,7 +793,7 @@ fn parse_stats(j : Json) -> SegStats? {
     _ => ()
   }
   let mut has_cat = false
-  let cat_values : Array[String] = Array::new()
+  let cat_values : Array[String] = Array()
   match m.get("category") {
     Some(Object(c)) =>
       match c.get("values") {
@@ -809,7 +811,7 @@ fn parse_stats(j : Json) -> SegStats? {
     _ => ()
   }
   let mut has_pub = false
-  let pub_values : Array[Bool] = Array::new()
+  let pub_values : Array[Bool] = Array()
   match m.get("public") {
     Some(Object(p)) =>
       match p.get("values") {
@@ -841,7 +843,7 @@ fn parse_seg_meta(bs : Bytes) -> SegMetaInfo raise @core.SpndError {
     Some(Number(d, ..)) => d.to_int()
     _ => raise @core.Corrupt("seg meta.json missing row_count")
   }
-  let parts : Array[Int] = Array::new()
+  let parts : Array[Int] = Array()
   match m.get("partitions") {
     Some(Array(arr)) =>
       for pj in arr {
@@ -1078,7 +1080,7 @@ fn seg_may_match(cs : CachedSeg, filter : Filter?) -> Bool {
 
 ///|
 /// ts 块级 min/max 与单值/范围谓词是否可能相交（无 stats 时恒 true）。
-fn stats_may_ts(cs : CachedSeg, v : Int64, cmp : (Int64, Int64) -> Bool) -> Bool {
+fn stats_may_ts(cs : CachedSeg, _v : Int64, cmp : (Int64, Int64) -> Bool) -> Bool {
   match cs.stats {
     Some(s) => if s.has_ts { cmp(s.ts_min, s.ts_max) } else { true }
     None => true
@@ -1268,7 +1270,7 @@ fn[S : @store.ObjectStore] ensure_centroids(
 /// 查询词去重（保序）。
 fn dedupe_terms(terms : Array[String]) -> Array[String] {
   let seen : Set[String] = Set([])
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for t in terms {
     if !seen.contains(t) {
       seen.add(t)
@@ -1288,7 +1290,7 @@ fn[S : @store.ObjectStore] results_from_candidates(
   tomb : Set[UInt64],
   k : Int,
 ) -> Array[QueryResult] raise @core.SpndError {
-  let out : Array[QueryResult] = Array::new()
+  let out : Array[QueryResult] = Array()
   for c in cands {
     let (si, row, score) = c
     let seg = n.manifest.segments[si]
@@ -1305,3 +1307,6 @@ fn[S : @store.ObjectStore] results_from_candidates(
   }
   out
 }
+
+pub extend QueryResult with Debug::{to_repr}
+pub extend SegStats with Debug::{to_repr}

@@ -284,7 +284,7 @@ pub fn SimStore::new(cfg : SimConfig) -> SimStore {
     next_ver: 1,
     total_latency_us: 0.0,
     concurrent_latency_us: 0.0,
-    workers: Array::new(),
+    workers: Array(),
     retries: 0,
     errors: 0,
     op_count: 0,
@@ -627,7 +627,7 @@ pub impl @store.ObjectStore for SimStore with fn list(
 ) -> Array[String] {
   self.op_count += 1
   let fail = self.should_fail(self.cfg.list_error_probability)
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for kv in self.data.iter() {
     if kv.0.has_prefix(prefix) {
       out.push(kv.0)
@@ -758,7 +758,7 @@ fn slice_bytes(value : Bytes, offset : Int, len : Int) -> Bytes {
     return Bytes::make(0, b'\x00')
   }
   let b = Buffer()
-  b.write_bytesview(value.view(start=lo, end=hi))
+  b.write_bytesview(value.exact_view(start=lo, end=hi))
   b.to_bytes()
 }
 
@@ -881,7 +881,7 @@ pub fn SimStore::clear_ranges(self : SimStore) -> Unit {
 ///|
 /// 逐出某一类 key（classify_key）的 NVMe/ranges/LRU 痕迹；数据本体不动。
 pub fn SimStore::evict_class(self : SimStore, cls : String) -> Unit {
-  let keys : Array[String] = Array::new()
+  let keys : Array[String] = Array()
   for kv in self.data.iter() {
     if @store.classify_key(kv.0) == cls {
       keys.push(kv.0)
@@ -928,7 +928,7 @@ pub fn SimStore::prime_nvme(self : SimStore) -> Unit {
   if self.cfg.nvme_capacity_bytes <= 0 {
     return
   }
-  let entries : Array[(Int, String)] = Array::new()
+  let entries : Array[(Int, String)] = Array()
   for kv in self.data.iter() {
     entries.push((kv.1.length(), kv.0))
   }
@@ -1024,3 +1024,5 @@ pub fn tpu_scan_bill(bytes : Int64) -> Double {
 pub fn SimStore::tpu_query_bill(self : SimStore) -> Double {
   tpu_scan_bill(self.bytes_logical_read)
 }
+
+pub extend SimStore with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete}

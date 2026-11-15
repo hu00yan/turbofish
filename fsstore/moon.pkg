@@ -1,10 +1,9 @@
+#cfg(any(target="native", target="llvm"))
 import {
-  "moonbitlang/core/test",
   "turbofish/core",
   "turbofish/store",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/json",
-  "moonbitlang/core/abort",
 }
 
 options(

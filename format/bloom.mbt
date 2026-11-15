@@ -98,7 +98,7 @@ pub fn bloom_to_hex(b : Bloom) -> String {
       out.write_string_utf8(hex_digit(((w >> shift) & 0xFUL).to_int()))
     }
   }
-  @utf8.decode(out.to_bytes().view()) catch {
+  @utf8.decode(out.to_bytes().exact_view()) catch {
     _ => ""
   }
 }

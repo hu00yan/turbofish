@@ -1,5 +1,4 @@
 ///|
-using @test {assert_eq}
 
 // query 包白盒测试：不依赖 build 包，用 MemStore + format.encode_* 手工构造
 // 一个 mini namespace（2 个 segment、6 个 doc、dim=2、2 个中心、f32 存储），
@@ -44,7 +43,7 @@ fn seg_meta_json_bytes(
   m.set("row_count", Json::number(row_count.to_double()))
   m.set("min_id", Json::number(min_id.to_double()))
   m.set("max_id", Json::number(max_id.to_double()))
-  let pj : Array[Json] = Array::new()
+  let pj : Array[Json] = Array()
   for c in parts {
     pj.push(Json::number(c.to_double()))
   }
@@ -255,7 +254,7 @@ fn make_test_store(deleted : Array[UInt64]) -> @store.MemStore {
 
 ///|
 fn ids_of(results : Array[QueryResult]) -> Array[UInt64] {
-  let out : Array[UInt64] = Array::new()
+  let out : Array[UInt64] = Array()
   for r in results {
     out.push(r.id)
   }
@@ -392,7 +391,7 @@ test "vec nprobe=all matches brute force" {
     [-0.2, 9.9],
   ]
   let doc_ids : Array[UInt64] = [1UL, 2UL, 3UL, 4UL, 5UL, 6UL]
-  let brute : Array[(UInt64, Double)] = Array::new()
+  let brute : Array[(UInt64, Double)] = Array()
   for i in 0..<6 {
     brute.push(
       (doc_ids[i], 1.0 - @core.cosine_dist_f32(qv, 0, doc_vecs[i], 0, 2)),
@@ -525,9 +524,9 @@ fn make_wand_store() -> @store.MemStore {
   let cent : @format.Centroids = { dim: 2, data: [1.0, 0.0] }
   tput(s, "\{ns}/_centroids/centroids-w.bin", @format.encode_centroids(cent))
   // fts：hot 全部行，mid 100..299，rare 0..9
-  let hot : Array[@format.Posting] = Array::new(capacity=nrows)
-  let mid : Array[@format.Posting] = Array::new()
-  let rare : Array[@format.Posting] = Array::new()
+  let hot : Array[@format.Posting] = Array(capacity=nrows)
+  let mid : Array[@format.Posting] = Array()
+  let rare : Array[@format.Posting] = Array()
   for r in 0..<nrows {
     hot.push({ row: r, tf: 1 + r % 3 })
     if r >= 100 && r < 300 {
@@ -545,7 +544,7 @@ fn make_wand_store() -> @store.MemStore {
   let built = @format.encode_fts(lists)
   tput(s, "\{ns}/_segments/seg-w/fts/dir.bin", built.dir)
   tput(s, "\{ns}/_segments/seg-w/fts/postings.bin", built.postings)
-  let dls : Array[Int] = Array::new(capacity=nrows)
+  let dls : Array[Int] = Array(capacity=nrows)
   for r in 0..<nrows {
     dls.push(2 + r)
   }
@@ -565,12 +564,12 @@ fn make_wand_store() -> @store.MemStore {
   )
   // rows
   let ra = "\{ns}/_segments/seg-w/rows"
-  let ids : Array[UInt64] = Array::new(capacity=nrows)
-  let texts : Array[String] = Array::new(capacity=nrows)
-  let cats : Array[String] = Array::new(capacity=nrows)
-  let tss : Array[Int64] = Array::new(capacity=nrows)
-  let pubs : Array[Bool] = Array::new(capacity=nrows)
-  let vecs : Array[Float] = Array::new(capacity=nrows * 2)
+  let ids : Array[UInt64] = Array(capacity=nrows)
+  let texts : Array[String] = Array(capacity=nrows)
+  let cats : Array[String] = Array(capacity=nrows)
+  let tss : Array[Int64] = Array(capacity=nrows)
+  let pubs : Array[Bool] = Array(capacity=nrows)
+  let vecs : Array[Float] = Array(capacity=nrows * 2)
   for r in 0..<nrows {
     ids.push((r + 1).to_uint64())
     texts.push("hot hot mid rare")
@@ -841,7 +840,7 @@ test "dict/bitmap filter matchers avoid expansion" {
 
 ///|
 test "PQ ADC ranks nearest code first" {
-  let codebooks : Array[Float] = Array::new(capacity=256)
+  let codebooks : Array[Float] = Array(capacity=256)
   for j in 0..<256 {
     codebooks.push(Float::from_int(j))
   }
@@ -1215,7 +1214,7 @@ fn make_delta_chain_store(deleted : Array[UInt64]) -> @store.MemStore raise {
     ),
   )
   let n0 = open(s, ns)
-  let segs : Array[@format.SegmentMeta] = Array::new()
+  let segs : Array[@format.SegmentMeta] = Array()
   for sm in n0.manifest.segments {
     segs.push(sm)
   }

@@ -226,7 +226,7 @@ pub impl ObjectStore for MemStore with fn get_range(
       }
       // 返回拷贝（模拟网络传输出的独立缓冲区）
       let b = Buffer()
-      b.write_bytesview(value.view(start=lo, end=hi))
+      b.write_bytesview(value.exact_view(start=lo, end=hi))
       Some(b.to_bytes())
     }
     None => {
@@ -241,7 +241,7 @@ pub impl ObjectStore for MemStore with fn list(self : MemStore, prefix : String)
   String,
 ] {
   self.lists += 1
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   for kv in self.data.iter() {
     if kv.0.has_prefix(prefix) {
       out.push(kv.0)
@@ -273,7 +273,7 @@ pub impl ObjectStore for MemStore with fn head_version(
 
 ///|
 pub fn MemStore::cost(self : MemStore) -> CostSnapshot {
-  let classes : Array[(String, Int, Int)] = Array::new()
+  let classes : Array[(String, Int, Int)] = Array()
   for kv in self.class_stats.iter() {
     classes.push((kv.0, kv.1.reqs, kv.1.bytes))
   }
@@ -337,3 +337,5 @@ pub fn MemStore::head_version(self : MemStore, key : String) -> String? {
     None => None
   }
 }
+
+pub extend MemStore with ObjectStore::{put_if_match, put, list, get_range, get, delete}

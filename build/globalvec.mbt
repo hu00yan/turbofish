@@ -41,7 +41,7 @@ fn[S : @store.ObjectStore] read_global_meta(
 ///|
 /// global meta 的 cids（缺省 []）。
 fn global_meta_cids(m : Map[String, Json]) -> Array[Int] {
-  let out : Array[Int] = Array::new()
+  let out : Array[Int] = Array()
   match m.get("cids") {
     Some(Array(arr)) =>
       for x in arr {
@@ -87,7 +87,7 @@ fn global_meta_kind_base(m : Map[String, Json]) -> (String, String) {
 /// 读路径（`rebuild_global_vec_parts` / `compact`）必须遍历全部代，否则 delta
 /// 之后写出的新段向量会丢（S2b）。
 fn global_gen_versions(m : @format.ManifestData) -> Array[String] {
-  let out : Array[String] = Array::new()
+  let out : Array[String] = Array()
   let push_one = fn(v : String) -> Unit {
     if v == "" {
       return
@@ -143,14 +143,14 @@ fn[S : @store.ObjectStore] read_global_gen_parts(
     )
   }
   let mut gdim = 0
-  let parts : Array[@format.GlobalVecPart] = Array::new()
+  let parts : Array[@format.GlobalVecPart] = Array()
   // 解码（pack 代按 pack 读 + index 二分；未打包代每 cid 一 GET），再统一校验。
   let ps = match gm.get("pack_size") {
     Some(Number(d, ..)) => if d.to_int() < 1 { 1 } else { d.to_int() }
     _ => 1
   }
-  let decoded : Array[@format.GlobalVecPart] = Array::new()
-  let keys : Array[String] = Array::new()
+  let decoded : Array[@format.GlobalVecPart] = Array()
+  let keys : Array[String] = Array()
   if ps > 1 {
     let by_pack : Map[Int, Array[Int]] = Map([])
     for cid in global_meta_cids(gm) {
@@ -289,7 +289,7 @@ fn[S : @store.ObjectStore] segment_partitions(
     Object(mm) => mm
     _ => raise @core.Corrupt("seg meta.json is not an object")
   }
-  let out : Array[Int] = Array::new()
+  let out : Array[Int] = Array()
   match m.get("partitions") {
     Some(Array(arr)) =>
       for p in arr {
@@ -348,12 +348,12 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
   let base = "\{ns}/vec/global/\{manifest.id}"
   let k = if cent.k() > 0 { cent.k() } else { 1 }
   let dim = if cent.dim > 0 { cent.dim } else { cfg.vector_dim }
-  let rows : Array[Array[(Int, Int)]] = Array::new(capacity=k)
-  let data : Array[Array[Float]] = Array::new(capacity=k)
+  let rows : Array[Array[(Int, Int)]] = Array(capacity=k)
+  let data : Array[Array[Float]] = Array(capacity=k)
   let mut part_bytes = 0
   for _ in 0..<k {
-    rows.push(Array::new())
-    data.push(Array::new())
+    rows.push(Array())
+    data.push(Array())
   }
   if dim <= 0 {
     let m : Map[String, Json] = Map([])
@@ -415,7 +415,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
           let (si, row) = gp.rows[i]
           rows[cid].push((si, row))
           if need_norm {
-            let v : Array[Float] = Array::new(capacity=dim)
+            let v : Array[Float] = Array(capacity=dim)
             for d in 0..<dim {
               v.push(gp.data[i * dim + d])
             }
@@ -455,7 +455,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
             for j in 0..<part.rows.length() {
               rows[cid].push((si, part.rows[j]))
               if need_norm {
-                let v : Array[Float] = Array::new(capacity=dim)
+                let v : Array[Float] = Array(capacity=dim)
                 for d in 0..<dim {
                   v.push(part.data[j * dim + d])
                 }
@@ -490,7 +490,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
     }
   }
   // 写新代 global part（每 cid 一个对象，或按 cfg.global_pack_size 打包）
-  let built : Array[(Int, Bytes)] = Array::new()
+  let built : Array[(Int, Bytes)] = Array()
   for cid in 0..<k {
     if rows[cid].length() == 0 {
       continue
@@ -507,7 +507,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
   let (cids, wrote_bytes) = put_global_parts(store, base, built, cfg.global_pack_size)
   part_bytes += wrote_bytes
   let m : Map[String, Json] = Map([])
-  let arr : Array[Json] = Array::new(capacity=cids.length())
+  let arr : Array[Json] = Array(capacity=cids.length())
   for c in cids {
     arr.push(Json::number(c.to_double()))
   }
@@ -519,7 +519,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
   if cfg.global_pack_size > 1 {
     m.set("pack_size", Json::number(cfg.global_pack_size.to_double()))
   }
-  let seg_ids : Array[Json] = Array::new(capacity=manifest.segments.length())
+  let seg_ids : Array[Json] = Array(capacity=manifest.segments.length())
   for s in manifest.segments {
     seg_ids.push(Json::string(s.id))
   }
@@ -540,7 +540,7 @@ fn[S : @store.ObjectStore] put_global_parts(
   parts : Array[(Int, Bytes)],
   pack_size : Int,
 ) -> (Array[Int], Int) {
-  let cids : Array[Int] = Array::new(capacity=parts.length())
+  let cids : Array[Int] = Array(capacity=parts.length())
   let mut bytes = 0
   if pack_size <= 1 {
     for p in parts {
@@ -551,7 +551,7 @@ fn[S : @store.ObjectStore] put_global_parts(
     return (cids, bytes)
   }
   // 打包：parts 升序 ⇒ 按 cid/P 分组后组内 cid 连续。
-  let group : Array[(Int, Bytes)] = Array::new()
+  let group : Array[(Int, Bytes)] = Array()
   let mut cur_pack = -1
   for p in parts {
     let pk = p.0 / pack_size
@@ -599,14 +599,14 @@ fn[S : @store.ObjectStore] write_global_delta_parts(
   let dir = "\{ns}/vec/global/\{manifest.id}"
   let k = if cent.k() > 0 { cent.k() } else { 1 }
   let dim = if cent.dim > 0 { cent.dim } else { cfg.vector_dim }
-  let rows : Array[Array[(Int, Int)]] = Array::new(capacity=k)
-  let data : Array[Array[Float]] = Array::new(capacity=k)
+  let rows : Array[Array[(Int, Int)]] = Array(capacity=k)
+  let data : Array[Array[Float]] = Array(capacity=k)
   let mut part_bytes = 0
   for _ in 0..<k {
-    rows.push(Array::new())
-    data.push(Array::new())
+    rows.push(Array())
+    data.push(Array())
   }
-  let built : Array[(Int, Bytes)] = Array::new()
+  let built : Array[(Int, Bytes)] = Array()
   if dim > 0 {
     // 新段向量：直接来自 docs（不读盘），分配与归一化同 base 路径。
     for j in 0..<new_ranges.length() {
@@ -639,7 +639,7 @@ fn[S : @store.ObjectStore] write_global_delta_parts(
   let (cids, wrote_bytes) = put_global_parts(store, dir, built, cfg.global_pack_size)
   part_bytes += wrote_bytes
   let m : Map[String, Json] = Map([])
-  let arr : Array[Json] = Array::new(capacity=cids.length())
+  let arr : Array[Json] = Array(capacity=cids.length())
   for c in cids {
     arr.push(Json::number(c.to_double()))
   }
@@ -651,7 +651,7 @@ fn[S : @store.ObjectStore] write_global_delta_parts(
   if cfg.global_pack_size > 1 {
     m.set("pack_size", Json::number(cfg.global_pack_size.to_double()))
   }
-  let seg_ids : Array[Json] = Array::new(capacity=new_ranges.length())
+  let seg_ids : Array[Json] = Array(capacity=new_ranges.length())
   for j in 0..<new_ranges.length() {
     let si = old_seg_count + j
     if si >= 0 && si < manifest.segments.length() {
@@ -712,7 +712,7 @@ pub fn[S : @store.ObjectStore] gc_global_versions_grace_keep(
   let now = @env.now()
   let keys = store.list(prefix)
   // 收集 unique version + (meta 是否存在, created_ms)。
-  let vers : Array[(String, Bool, UInt64)] = Array::new()
+  let vers : Array[(String, Bool, UInt64)] = Array()
   let seen : Set[String] = Set([])
   for key in keys {
     let ver = match global_version_of_key(prefix, key) {
@@ -767,7 +767,7 @@ pub fn[S : @store.ObjectStore] gc_global_versions_grace_keep(
     }
   })
   // keep 代的实际创建时间（缺失 meta 的 keep 用 now）。
-  let keep_times : Array[(String, UInt64)] = Array::new(
+  let keep_times : Array[(String, UInt64)] = Array(
     capacity=keep_versions.length(),
   )
   for kv in keep_versions {

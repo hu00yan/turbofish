@@ -347,7 +347,6 @@ pub fn[S : @store.ObjectStore] warm_namespace(
     }
   }
   let _ = tombstones_of(n)
-  preload_all_global_parts(n)
 }
 
 ///|

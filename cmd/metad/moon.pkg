@@ -1,0 +1,17 @@
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/socket",
+  "turbofish/meta",
+  "turbofish/fsstore",
+  "moonbitlang/core/env",
+}
+
+options(
+  "is-main": true,
+  targets: {
+    "main.mbt": [ "native" ],
+    "stub.mbt": [ "wasm", "wasm-gc", "js" ],
+  },
+)

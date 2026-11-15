@@ -1392,13 +1392,18 @@ test "warm query path has ZERO S3 calls and serves directly from memory" {
 }
 
 ///|
-test "warm_namespace preloads all components resulting in zero S3 calls on first query" {
+test "warm_namespace preloads metadata, global parts load lazily" {
   let s = make_delta_chain_store([7UL])
   let n = open(s, "test")
   warm_namespace(n)
   s.reset_cost()
   let r = vec_search(n, [10.0, 0.0], 10, 2, None)
   assert_eq(r.length() > 0, true)
+  // 冷查询只读本次 probe 命中的 global part，不再全量预加载。
+  assert_eq(s.cost().gets > 0, true)
+  s.reset_cost()
+  let r2 = vec_search(n, [10.0, 0.0], 10, 2, None)
+  assert_eq(r2.length() > 0, true)
   assert_eq(s.cost().gets, 0)
   assert_eq(s.cost().ranged_gets, 0)
 }

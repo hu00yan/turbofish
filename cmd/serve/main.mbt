@@ -51,6 +51,60 @@ let created_metrics : Map[String, String] = Map([])
 let meta_cache : @query.MetadataCache[AnyStore] = @query.MetadataCache::new()
 
 ///|
+/// 元数据服务地址（SPND_META_URL，例如 http://127.0.0.1:8090）。
+/// 为空时所有元数据仍回源对象存储，行为与旧版一致。
+let meta_url : Ref[String] = { val: "" }
+
+///|
+/// 元数据服务使用独立的短连接 transport；只在冷启动加载元数据时使用，
+/// 热查询路径命中进程内缓存后不会再访问它。
+let meta_http : @s3http.CurlTransport = @s3http.CurlTransport::new()
+
+///|
+fn meta_get(key : String) -> Bytes? {
+  if meta_url.val == "" || !@meta.is_metadata_key(key) {
+    return None
+  }
+  let (status, _headers, body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
+    "GET",
+    meta_url.val + @meta.METAD_KV_PREFIX + key,
+    [],
+    b"",
+  )
+  if status == 200 {
+    Some(body)
+  } else {
+    None
+  }
+}
+
+///|
+fn meta_put(key : String, bs : Bytes) -> Unit {
+  if meta_url.val == "" || !@meta.is_metadata_key(key) {
+    return
+  }
+  let (_status, _headers, _body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
+    "PUT",
+    meta_url.val + @meta.METAD_KV_PREFIX + key,
+    [],
+    bs,
+  )
+}
+
+///|
+fn meta_delete(key : String) -> Unit {
+  if meta_url.val == "" || !@meta.is_metadata_key(key) {
+    return
+  }
+  let (_status, _headers, _body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
+    "DELETE",
+    meta_url.val + @meta.METAD_KV_PREFIX + key,
+    [],
+    b"",
+  )
+}
+
+///|
 /// 校验 distance_metric 取值。支持 Turbopuffer 规范名 cosine_distance / euclidean_squared。
 fn parse_metric(j : Json) -> String? {
   match j {
@@ -141,8 +195,18 @@ fn raw_head_version(store : AnyStore, key : String) -> String? {
 
 ///|
 pub impl @store.ObjectStore for AnyStore with get(self, key) {
-  match raw_get(self, key) {
+  let cached = meta_get(key)
+  let bs = match cached {
     Some(bs) => Some(bs)
+    None => raw_get(self, key)
+  }
+  match bs {
+    Some(bs) => {
+      if cached is None && @meta.is_metadata_key(key) {
+        meta_put(key, bs)
+      }
+      Some(bs)
+    }
     None => resolve_branch_get(self, key)
   }
 }
@@ -154,6 +218,7 @@ pub impl @store.ObjectStore for AnyStore with put(self, key, bs) {
     S3(s) => s.put(key, bs)
     Sim(s) => s.put(key, bs)
   }
+  meta_put(key, bs)
 }
 
 ///|
@@ -163,18 +228,39 @@ pub impl @store.ObjectStore for AnyStore with put_if_match(
   expected,
   bs
 ) {
-  match self {
+  let ok = match self {
     FS(s) => s.put_if_match(key, expected, bs)
     S3(s) => s.put_if_match(key, expected, bs)
     Sim(s) => s.put_if_match(key, expected, bs)
   }
+  if ok {
+    meta_put(key, bs)
+  }
+  ok
 }
 
 ///|
 pub impl @store.ObjectStore for AnyStore with get_range(self, key, offset, len) {
-  match raw_get_range(self, key, offset, len) {
-    Some(bs) => Some(bs)
-    None => resolve_branch_get_range(self, key, offset, len)
+  if @meta.is_metadata_key(key) {
+    match AnyStore::get(self, key) {
+      Some(bs) =>
+        if offset < 0 || len < 0 || offset > bs.length() {
+          Some(b"")
+        } else {
+          let end = if offset + len > bs.length() {
+            bs.length()
+          } else {
+            offset + len
+          }
+          Some(bs[offset:end].to_owned())
+        }
+      None => None
+    }
+  } else {
+    match raw_get_range(self, key, offset, len) {
+      Some(bs) => Some(bs)
+      None => resolve_branch_get_range(self, key, offset, len)
+    }
   }
 }
 
@@ -191,6 +277,7 @@ pub impl @store.ObjectStore for AnyStore with delete(self, key) {
     S3(s) => s.delete(key)
     Sim(s) => s.delete(key)
   }
+  meta_delete(key)
 }
 
 ///|
@@ -325,20 +412,10 @@ fn NamespaceState::get_query_ns(
   ns : String,
 ) -> @query.Namespace[AnyStore] raise @core.SpndError {
   let n = match self.query_ns {
-    Some(existing) => {
-      for seg in existing.manifest.segments {
-        if !(seg_cache.contains(seg.id)) {
-          let _ = (load_segment_cache(store, ns, seg.id)) catch { _ => None }
-        }
-      }
-      existing
-    }
+    Some(existing) => existing
     None => {
       let snap = @query.open(store, ns)
       let _ = (try { @query.warm_namespace(snap) } catch { _ => () })
-      for seg in snap.manifest.segments {
-        let _ = (load_segment_cache(store, ns, seg.id)) catch { _ => None }
-      }
       self.query_ns = Some(snap)
       self.meta = Some(snap.meta)
       if self.build_head == "" {
@@ -450,11 +527,6 @@ fn NamespaceState::update_after_write(
     head_checked_ms: @env.now(),
   }
   let _ = (try { @query.warm_namespace(new_ns) } catch { _ => () })
-  for seg in manifest.segments {
-    if !(seg_cache.contains(seg.id)) {
-      let _ = (load_segment_cache(store, ns, seg.id)) catch { _ => None }
-    }
-  }
   self.query_ns = Some(new_ns)
   meta_cache.entries.set(ns, new_ns)
   let coord = get_coordinator(store)
@@ -541,9 +613,6 @@ fn get_or_load_ns_state(
     None => {
       let snap = @query.open(store, ns)
       let _ = (try { @query.warm_namespace(snap) } catch { _ => () })
-      for seg in snap.manifest.segments {
-        let _ = (load_segment_cache(store, ns, seg.id)) catch { _ => None }
-      }
       let dim = snap.meta.vector_dim
       let state = get_or_create_ns_state(store, ns, dim)
       state.query_ns = Some(snap)
@@ -2313,6 +2382,7 @@ async fn dispatch(
 ///|
 async fn main {
   let port = env_or("SPND_PORT", "8080")
+  meta_url.val = env_or("SPND_META_URL", "")
   let store = make_store() catch {
     e => {
       println("store init failed: \{err_msg(e)}")

@@ -443,85 +443,6 @@ fn TopKHeap::to_results(self : TopKHeap) -> Array[QueryResult] {
 }
 
 ///|
-/// 全量预加载全局 IVF 分区进 Namespace.global_parts。
-/// 首次调用后热查询从内存返回，不发 S3 请求。
-fn[S : @store.ObjectStore] preload_all_global_parts(
-  n : Namespace[S],
-) -> Unit raise @core.SpndError {
-  match global_gen_versions(n) {
-    Some(gens) =>
-      for ver in gens {
-        let cids = global_gen_cids(n, ver)
-        let ps = global_gen_pack_size(n, ver)
-        if ps > 1 {
-          let needed_packs : Set[Int] = Set([])
-          for cid in cids {
-            let part_key = "\{ver}/\{cid}"
-            if n.global_parts.get(part_key) is None {
-              needed_packs.add(cid / ps)
-            }
-          }
-          for pk in needed_packs {
-            let key = "\{n.ns}/vec/global/\{ver}/pack-\{pk}.bin"
-            let bs = match n.store.get(key) {
-              Some(b) => b
-              None => raise @core.NotFound(key)
-            }
-            let idx = @format.decode_global_pack_index(bs)
-            for item in idx {
-              let (c, off, len) = item
-              let gp = @format.decode_global_part_at(bs, off, len)
-              if gp.cid != c {
-                raise @core.Corrupt("global pack cid mismatch in \{key}")
-              }
-              n.global_parts.set("\{ver}/\{c}", gp)
-            }
-          }
-        } else {
-          for cid in cids {
-            let part_key = "\{ver}/\{cid}"
-            if n.global_parts.get(part_key) is None {
-              let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
-              let bs = match n.store.get(key) {
-                Some(b) => b
-                None => raise @core.NotFound(key)
-              }
-              let p = @format.decode_global_part(bs)
-              n.global_parts.set(part_key, p)
-            }
-          }
-        }
-      }
-    None => {
-      let ver = match n.manifest.vec_global_version {
-        Some(v) => v
-        None =>
-          match n.meta.vec_global_version {
-            Some(v) => v
-            None => return ()
-          }
-      }
-      match ensure_global_cids(n) {
-        Some(cids) =>
-          for cid in cids {
-            let part_key = "\{ver}/\{cid}"
-            if n.global_parts.get(part_key) is None {
-              let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
-              let bs = match n.store.get(key) {
-                Some(b) => b
-                None => raise @core.NotFound(key)
-              }
-              let p = @format.decode_global_part(bs)
-              n.global_parts.set(part_key, p)
-            }
-          }
-        None => ()
-      }
-    }
-  }
-}
-
-///|
 /// 读一代全局分区并重分候选进 TopKHeap。
 /// 零堆对象分配：预解段元数据，候选打分就地 Min-Heap 置换。
 fn[S : @store.ObjectStore] collect_global_candidates(
@@ -736,9 +657,8 @@ fn[S : @store.ObjectStore] vec_global_search(
   if k <= 0 {
     return []
   }
-  // 全量预加载该 generation 的全局分区，确保后续热查询零 S3 调用
-  preload_all_global_parts(n)
-
+  // 只加载本次 probe 命中的全局分区；不要再全量预加载，否则冷查询会
+  // 把所有 generation 的向量分片从对象存储拉一遍。
   // 代 → 该代存在的 cid 集合。旧布局只有一代（来自 ensure_global_cids 的并集）。
   let gens : Array[String] = Array()
   let gen_cid_sets : Map[String, Set[Int]] = Map([])

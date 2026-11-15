@@ -12,6 +12,7 @@ import {
   "turbofish/s3http",
   "turbofish/fsstore",
   "turbofish/simstore",
+  "turbofish/meta",
   "turbofish/mtree",
   "turbofish/core",
   "turbofish/control",

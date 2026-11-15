@@ -29,6 +29,7 @@ the current manifest snapshot.
 | `spec/` | Runtime-checked state-machine specifications |
 | `sdk/` | Python and TypeScript clients |
 | `docs/` | Architecture, deployment, control-plane, state-machine, and verification notes |
+| `perf/` | Reproducible iso-recall comparison against Qdrant on a real VM |
 
 ## Build and test
 
@@ -88,6 +89,10 @@ When comparing against another engine, pin the dataset, recall target, cache
 state, concurrency, and durability settings. A vector-only brute-force scan
 against an IVF index, or a warm in-process database against a cold HTTP service,
 is not an apples-to-apples comparison.
+
+[`perf/`](perf/README.md) contains a reproducible, exact-ground-truth
+iso-recall comparison against Qdrant, with the measured
+[results](perf/RESULTS.md) and their threats to validity.
 
 ## Documentation
 

@@ -105,6 +105,7 @@ iso-recall comparison against Qdrant, with the measured
 - [Control plane](docs/CONTROL_PLANE.md)
 - [State machines](docs/STATE_MACHINES.md)
 - [Verification notes](docs/FORMAL_VERIFICATION.md)
+- [Turbopuffer comparison and next steps](docs/TURBOPUFFER.md)
 - [Third-party licenses](THIRD_PARTY_LICENSES.md)
 
 ## License

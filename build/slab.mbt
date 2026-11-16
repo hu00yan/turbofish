@@ -40,12 +40,12 @@ pub fn SlabBuilder::build(
 
 ///|
 /// 通过 1 次 Range GET 读取位于固定偏移 14 处的 Index Header。
-pub fn[S : @store.ObjectStore] read_slab_index_from_start(
+pub async fn[S : @store.ObjectStore] read_slab_index_from_start(
   store : S,
   ns : String,
   seg_id : String,
   prefetch_len? : Int,
-) -> @format.SlabIndex raise @core.SpndError {
+) -> @format.SlabIndex {
   let key = segment_slab_key(ns, seg_id)
   let plen = match prefetch_len {
     Some(l) => l
@@ -62,13 +62,13 @@ pub fn[S : @store.ObjectStore] read_slab_index_from_start(
 
 ///|
 /// 通过 1 次 Range GET 读取位于文件末尾的 Trailer + Index Table。
-pub fn[S : @store.ObjectStore] read_slab_index_from_tail(
+pub async fn[S : @store.ObjectStore] read_slab_index_from_tail(
   store : S,
   ns : String,
   seg_id : String,
   size_bytes : Int,
   tail_len? : Int,
-) -> @format.SlabIndex raise @core.SpndError {
+) -> @format.SlabIndex {
   let key = segment_slab_key(ns, seg_id)
   let tlen = match tail_len {
     Some(l) => l
@@ -86,12 +86,12 @@ pub fn[S : @store.ObjectStore] read_slab_index_from_tail(
 /// 1. 先尝试拉取头部 [0..1024)；
 /// 2. 若 index_offset == 14（固定偏移），则在同一响应内完成解码（1 次请求）；
 /// 3. 若 index_offset 位于末尾，则按 size_bytes 拉取末尾完成解码。
-pub fn[S : @store.ObjectStore] read_slab_index(
+pub async fn[S : @store.ObjectStore] read_slab_index(
   store : S,
   ns : String,
   seg_id : String,
   size_bytes : Int,
-) -> @format.SlabIndex raise @core.SpndError {
+) -> @format.SlabIndex {
   let key = segment_slab_key(ns, seg_id)
   let prefetch_len = if size_bytes < 1024 { size_bytes } else { 1024 }
   match store.get_range(key, 0, prefetch_len) {
@@ -110,12 +110,12 @@ pub fn[S : @store.ObjectStore] read_slab_index(
 
 ///|
 /// 按 SlabEntry 精确范围读取单一组件的原始字节切片。
-pub fn[S : @store.ObjectStore] read_slab_component(
+pub async fn[S : @store.ObjectStore] read_slab_component(
   store : S,
   ns : String,
   seg_id : String,
   entry : @format.SlabEntry,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   let key = segment_slab_key(ns, seg_id)
   let off = entry.offset.to_int()
   let len = entry.length.to_int()
@@ -127,13 +127,13 @@ pub fn[S : @store.ObjectStore] read_slab_component(
 
 ///|
 /// 按组件名称通过 Index 范围读取单一组件原始字节。
-pub fn[S : @store.ObjectStore] read_slab_component_by_name(
+pub async fn[S : @store.ObjectStore] read_slab_component_by_name(
   store : S,
   ns : String,
   seg_id : String,
   index : @format.SlabIndex,
   name : String,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   match index.get(name) {
     Some(entry) => read_slab_component(store, ns, seg_id, entry)
     None =>
@@ -145,25 +145,25 @@ pub fn[S : @store.ObjectStore] read_slab_component_by_name(
 
 ///|
 /// 范围读取并解码列数据（ColData）。
-pub fn[S : @store.ObjectStore] read_slab_column(
+pub async fn[S : @store.ObjectStore] read_slab_column(
   store : S,
   ns : String,
   seg_id : String,
   index : @format.SlabIndex,
   col_name : String,
-) -> @format.ColData raise @core.SpndError {
+) -> @format.ColData {
   let bs = read_slab_component_by_name(store, ns, seg_id, index, col_name)
   @format.decode_col(bs)
 }
 
 ///|
 /// 范围读取并解码全文倒排目录（FtsDirEntry）。
-pub fn[S : @store.ObjectStore] read_slab_fts_dir(
+pub async fn[S : @store.ObjectStore] read_slab_fts_dir(
   store : S,
   ns : String,
   seg_id : String,
   index : @format.SlabIndex,
-) -> Array[@format.FtsDirEntry] raise @core.SpndError {
+) -> Array[@format.FtsDirEntry] {
   let bs = read_slab_component_by_name(store, ns, seg_id, index, "fts/dir")
   @format.decode_fts_dir(bs)
 }
@@ -171,14 +171,14 @@ pub fn[S : @store.ObjectStore] read_slab_fts_dir(
 ///|
 /// BM25 查询路径：直接从 segment.slab 内部对应的 postings 区间按需读取单个 term 的 postings 切片。
 /// （无独立 postings.bin 文件，零对象碎片）。
-pub fn[S : @store.ObjectStore] read_slab_fts_postings_range(
+pub async fn[S : @store.ObjectStore] read_slab_fts_postings_range(
   store : S,
   ns : String,
   seg_id : String,
   index : @format.SlabIndex,
   term_offset : Int,
   term_size : Int,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   let entry = match index.get("fts/postings") {
     Some(e) => e
     None =>
@@ -198,20 +198,22 @@ pub fn[S : @store.ObjectStore] read_slab_fts_postings_range(
 }
 
 ///|
-/// 构建并写入 SlabV2 单文件段（segment.slab 与 meta.json）。
+/// 构建 SlabV2 单文件段的字节与元数据（**不落盘**）：供 `write_segment_slab`
+/// （segment.slab + 碎片 meta.json）与 L0 单对象写入（`ingest_l0_slab`）复用。
 /// 所有 ID 列、属性列、倒排索引及元数据紧凑拼接在单一 segment.slab 内。
-pub fn[S : @store.ObjectStore] write_segment_slab(
-  store : S,
+///
+/// 返回 (slab 字节, meta.json 字节, SegmentMeta)；meta 也以 "meta" 组件内嵌在
+/// slab 里，因此只要 slab 就自描述（L0 路径不写额外对象）。
+pub fn build_segment_slab(
   cfg : BuildConfig,
   cent : @format.Centroids,
   docs : Array[@core.Doc],
   start : Int,
   end : Int,
+  seg_id~ : String,
   index_at_end~ : Bool = true,
-) -> @format.SegmentMeta {
+) -> (Bytes, Bytes, @format.SegmentMeta) {
   let n = end - start
-  let seg_id = new_segment_id()
-  let segp = "\{cfg.ns}/_segments/\{seg_id}"
   let dim = docs[start].vector.length()
   let use_global = cfg.global_vec_parts && cfg.vec_storage == VF16
 
@@ -479,16 +481,40 @@ pub fn[S : @store.ObjectStore] write_segment_slab(
 
   // 打包为单一 segment.slab
   let (slab_bytes, _index) = @format.encode_slab(components, index_at_end~)
-  store.put(segment_slab_key(cfg.ns, seg_id), slab_bytes)
-  store.put("\{segp}/meta.json", bs_meta)
-
   let size_bytes = slab_bytes.length()
-  { id: seg_id, row_count: n, min_id, max_id, doc_len_sum, size_bytes }
+  (
+    slab_bytes,
+    bs_meta,
+    { id: seg_id, row_count: n, min_id, max_id, doc_len_sum, size_bytes },
+  )
+}
+
+///|
+/// 构建并写入 SlabV2 单文件段（segment.slab + 兼容的碎片 meta.json）。
+pub async fn[S : @store.ObjectStore] write_segment_slab(
+  store : S,
+  cfg : BuildConfig,
+  cent : @format.Centroids,
+  docs : Array[@core.Doc],
+  start : Int,
+  end : Int,
+  index_at_end~ : Bool = true,
+) -> @format.SegmentMeta {
+  let seg_id = new_segment_id()
+  let (slab_bytes, bs_meta, meta) = build_segment_slab(
+    cfg, cent, docs, start, end, seg_id~, index_at_end~,
+  )
+  // slab + meta.json 一次批量写（异步后端并发上传）。
+  store.put_many([
+    (segment_slab_key(cfg.ns, seg_id), slab_bytes),
+    ("\{cfg.ns}/_segments/\{seg_id}/meta.json", bs_meta),
+  ])
+  meta
 }
 
 ///|
 /// 可插拔 segment 写入函数：按 SegmentFormat 自动派发至 LegacyMultiFile 或 SlabV2。
-pub fn[S : @store.ObjectStore] write_segment_pluggable(
+pub async fn[S : @store.ObjectStore] write_segment_pluggable(
   store : S,
   cfg : BuildConfig,
   cent : @format.Centroids,

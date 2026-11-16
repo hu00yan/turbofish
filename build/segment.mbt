@@ -54,10 +54,10 @@ fn bytes_to_json(bs : Bytes, what : String) -> Json raise @core.SpndError {
 
 ///|
 /// 读 namespace.json：不存在返回 None，损坏 raise Corrupt。
-fn[S : @store.ObjectStore] read_namespace(
+async fn[S : @store.ObjectStore] read_namespace(
   store : S,
   ns : String,
-) -> @format.NamespaceMeta? raise @core.SpndError {
+) -> @format.NamespaceMeta? {
   match store.get(ns_meta_key(ns)) {
     Some(bs) => {
       let m = @format.namespace_from_json(bytes_to_json(bs, "namespace.json"))
@@ -71,11 +71,11 @@ fn[S : @store.ObjectStore] read_namespace(
 
 ///|
 /// 按 manifest id 读 manifest 对象；缺失 raise NotFound。
-fn[S : @store.ObjectStore] load_manifest(
+async fn[S : @store.ObjectStore] load_manifest(
   store : S,
   ns : String,
   manifest_id : String,
-) -> @format.ManifestData raise @core.SpndError {
+) -> @format.ManifestData {
   let key = manifest_key(ns, manifest_id)
   match store.get(key) {
     Some(bs) => @format.manifest_from_json(bytes_to_json(bs, "manifest"))
@@ -85,11 +85,11 @@ fn[S : @store.ObjectStore] load_manifest(
 
 ///|
 /// 按 centroid_version 读中心对象；缺失 raise NotFound。
-fn[S : @store.ObjectStore] load_centroids(
+async fn[S : @store.ObjectStore] load_centroids(
   store : S,
   ns : String,
   centroid_version : String,
-) -> @format.Centroids raise @core.SpndError {
+) -> @format.Centroids {
   let key = centroids_key(ns, centroid_version)
   match store.get(key) {
     Some(bs) => @format.decode_centroids(bs)
@@ -101,10 +101,10 @@ fn[S : @store.ObjectStore] load_centroids(
 /// 首次创建 namespace：写静态 namespace.json + schema.json。
 /// head 由 append-only `_heads/` log 维护；namespace.json 的 head_manifest 只作
 /// 旧数据 fallback。
-fn[S : @store.ObjectStore] init_namespace(
+async fn[S : @store.ObjectStore] init_namespace(
   store : S,
   cfg : BuildConfig,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let meta : @format.NamespaceMeta = {
     format: @core.FORMAT_NAME,
     ns_name: cfg.ns,
@@ -145,12 +145,12 @@ fn[S : @store.ObjectStore] init_namespace(
 /// 当前 head；否则并发写者会静默丢掉对方的新段（review P0-1）。
 /// 优点：不需要 If-Match，也不需要 lock 对象；只做 create PUT + LIST。
 /// 若另一写者已经发布了更大的 manifest id，则本次发布输掉 → CommitConflict。
-fn[S : @store.ObjectStore] publish_head(
+async fn[S : @store.ObjectStore] publish_head(
   store : S,
   ns : String,
   expected_head : String,
   new_head : String,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   // S3Store.put 在非 2xx 时静默；发布前确认 manifest 真的存在，避免 head 指向
   // 不存在的对象（review P1-2）。这是一次 GET，不增加 A 类 PUT。
   let mkey = manifest_key(ns, new_head)
@@ -164,12 +164,12 @@ fn[S : @store.ObjectStore] publish_head(
 ///|
 /// manifest `descendant` 的 parent 链上是否包含 `ancestor`。用于 head log 的
 /// fork 检测：两个并发写者都基于同一基线时，后写者必须发现先写者这个 sibling。
-fn[S : @store.ObjectStore] manifest_is_ancestor(
+async fn[S : @store.ObjectStore] manifest_is_ancestor(
   store : S,
   ns : String,
   descendant : String,
   ancestor : String,
-) -> Bool raise @core.SpndError {
+) -> Bool {
   let mut cur : String? = Some(descendant)
   let mut steps = 0
   while steps < 100000 {
@@ -189,12 +189,12 @@ fn[S : @store.ObjectStore] manifest_is_ancestor(
 
 ///|
 /// 带显式 expected 的 append-only head 发布（并发竞争测试入口）。
-fn[S : @store.ObjectStore] publish_head_expect(
+async fn[S : @store.ObjectStore] publish_head_expect(
   store : S,
   ns : String,
   expected_head : String,
   new_head : String,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   // legacy namespace 只有 namespace.json.head_manifest、没有 `_heads/` 记录：
   // 必须用 expected_head 作为 fallback，否则旧数据永远 CommitConflict（P0-3）。
   let cur = @store.read_head(store, ns, expected_head)
@@ -402,7 +402,7 @@ fn build_blockmax(
 ///   VPq16 用整段训练的码本（保证列与分区量化一致）
 /// - meta.json：id/row_count/min_id/max_id/partitions + 可选 id_encoding/stats/
 ///   vec_storage
-fn[S : @store.ObjectStore] write_segment(
+async fn[S : @store.ObjectStore] write_segment(
   store : S,
   cfg : BuildConfig,
   cent : @format.Centroids,
@@ -469,30 +469,35 @@ fn[S : @store.ObjectStore] write_segment(
   // IVF 性能：写入前可选 L2 归一化，查询侧 cosine = dot（省两次 norm）
   let enc_flat = if cfg.normalize_vecs { pq_normalize(flat, dim) } else { flat }
   let mut size_bytes = 0
+  // 批量写入：本段所有对象收集后一次 put_many（异步后端并发上传）。
+  let items : Array[(String, Bytes)] = Array()
+  let put = fn(k : String, v : Bytes) -> Unit {
+    items.push((k, v))
+  }
   // rows/id.bin（始终 u64 列；dense 标记在 meta.json）
   let bs_id = @format.encode_col(@format.ColU64(ids))
-  store.put("\{segp}/rows/id.bin", bs_id)
+  put("\{segp}/rows/id.bin", bs_id)
   size_bytes += bs_id.length()
   // text 始终普通字符串列；category 由 use_dict_cols 控制
   let bs_text = @format.encode_col_str_plain(texts)
-  store.put("\{segp}/rows/text.bin", bs_text)
+  put("\{segp}/rows/text.bin", bs_text)
   size_bytes += bs_text.length()
   let bs_cat = if cfg.use_dict_cols {
     @format.encode_col(@format.ColStr(cats))
   } else {
     @format.encode_col_str_plain(cats)
   }
-  store.put("\{segp}/rows/category.bin", bs_cat)
+  put("\{segp}/rows/category.bin", bs_cat)
   size_bytes += bs_cat.length()
   let bs_ts = @format.encode_col(@format.ColI64(tss))
-  store.put("\{segp}/rows/ts.bin", bs_ts)
+  put("\{segp}/rows/ts.bin", bs_ts)
   size_bytes += bs_ts.length()
   let bs_pub = if cfg.use_bool_bitmap {
     @format.encode_col(@format.ColBool(pubs))
   } else {
     @format.encode_col_bool_plain(pubs)
   }
-  store.put("\{segp}/rows/public.bin", bs_pub)
+  put("\{segp}/rows/public.bin", bs_pub)
   size_bytes += bs_pub.length()
   let partitions : Array[Json] = Array()
   // 全局 IVF 模式：向量只存一份（global part），不写 rows/vector.bin
@@ -506,7 +511,7 @@ fn[S : @store.ObjectStore] write_segment(
       }
       VPq16 => @format.encode_vec_col(dim, enc_flat, cfg.use_f16)
     }
-    store.put("\{segp}/rows/vector.bin", bs_vec)
+    put("\{segp}/rows/vector.bin", bs_vec)
     size_bytes += bs_vec.length()
   }
   // fts/*
@@ -522,21 +527,21 @@ fn[S : @store.ObjectStore] write_segment(
   dir_b.write_uint_le(n.reinterpret_as_uint())
   dir_b.write_bytesview(built.dir.exact_view(start=20, end=built.dir.length()))
   let bs_dir = dir_b.to_bytes()
-  store.put("\{segp}/fts/dir.bin", bs_dir)
+  put("\{segp}/fts/dir.bin", bs_dir)
   size_bytes += bs_dir.length()
-  store.put("\{segp}/fts/postings.bin", built.postings)
+  put("\{segp}/fts/postings.bin", built.postings)
   size_bytes += built.postings.length()
   let bs_dlen = @format.encode_col(@format.ColU32(doc_len))
-  store.put("\{segp}/fts/doc_len.bin", bs_dlen)
+  put("\{segp}/fts/doc_len.bin", bs_dlen)
   size_bytes += bs_dlen.length()
   if cfg.write_block_stats {
     let bs_bst = build_blockstats(tss, 256)
-    store.put("\{segp}/rows/blockstats.bin", bs_bst)
+    put("\{segp}/rows/blockstats.bin", bs_bst)
     size_bytes += bs_bst.length()
   }
   if cfg.write_blockmax {
     let bs_blk = build_blockmax(built.entries, term_map, doc_len, 128)
-    store.put("\{segp}/fts/blockmax.bin", bs_blk)
+    put("\{segp}/fts/blockmax.bin", bs_blk)
     size_bytes += bs_blk.length()
   }
   // 全局 IVF 模式：分区数据已由 global part 承载，跳过 per-segment parts
@@ -578,7 +583,7 @@ fn[S : @store.ObjectStore] write_segment(
     // PQ16 共享码本：每段只写一次（避免每个 part 重复 256×dim f32）
     if cfg.vec_storage == VPq16 {
       let bs_cb = @format.encode_pq_codebook(dim, pq_m, pq_codebooks)
-      store.put("\{segp}/vec/pq-codebook.bin", bs_cb)
+      put("\{segp}/vec/pq-codebook.bin", bs_cb)
       size_bytes += bs_cb.length()
     }
     for c in 0..<k {
@@ -612,7 +617,7 @@ fn[S : @store.ObjectStore] write_segment(
           @format.encode_pq_part_shared(rows, dim, pq_m, part_codes)
         }
       }
-      store.put("\{segp}/vec/part-\{c}.bin", bs_part)
+      put("\{segp}/vec/part-\{c}.bin", bs_part)
       size_bytes += bs_part.length()
       partitions.push(Json::number(c.to_double()))
     }
@@ -661,7 +666,8 @@ fn[S : @store.ObjectStore] write_segment(
     mj.set("vec_normalized", Json::boolean(true))
   }
   let bs_meta = json_bytes(Json::object(mj))
-  store.put("\{segp}/meta.json", bs_meta)
+  put("\{segp}/meta.json", bs_meta)
   size_bytes += bs_meta.length()
+  store.put_many(items)
   { id: seg_id, row_count: n, min_id, max_id, doc_len_sum, size_bytes }
 }

@@ -1,0 +1,12 @@
+import {
+  "turbofish/core",
+  "turbofish/format",
+  "turbofish/simcluster",
+  "turbofish/simstore",
+  "moonbitlang/core/bench",
+  "moonbitlang/core/env" @env,
+}
+
+options(
+  "is-main": true,
+)

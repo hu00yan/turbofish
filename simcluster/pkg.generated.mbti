@@ -1,0 +1,95 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/simcluster"
+
+import {
+  "turbofish/simstore",
+}
+
+// Values
+pub fn cfg_label(ClusterSimConfig) -> String
+
+pub fn fmt_fixed(Double, Int32) -> String
+
+pub fn format_comparison_table(String, ClusterSimReport, String, ClusterSimReport) -> String
+
+pub fn run_cluster_sim(ClusterSimConfig, WorkloadSpec, seed? : UInt32) -> ClusterSimReport
+
+// Errors
+
+// Types and methods
+pub(all) struct ClusterSimConfig {
+  serve_processes : Int32
+  ram_cache_mb_per_proc : Double
+  s3_slots_per_proc : Int32
+  dedicated_compactd : Bool
+  async_io : Bool
+  group_commit_window_us : Double
+  cpu : CpuProfile
+  s3_get_ttfb_p50_us : Double
+  s3_put_ttfb_p50_us : Double
+  s3_ttfb_sigma : Double
+  s3_bw_mbps : Double
+  rates : @simstore.BillRates
+  vcpu_price_per_hour : Double
+}
+pub fn ClusterSimConfig::legacy(@simstore.BillRates) -> Self
+pub fn ClusterSimConfig::modern(@simstore.BillRates) -> Self
+
+pub(all) struct ClusterSimReport {
+  cfg_label : String
+  serve_processes : Int32
+  query_p50_ms : Double
+  query_p95_ms : Double
+  query_p99_ms : Double
+  achieved_qps : Double
+  offered_qps : Double
+  completed_queries : Int32
+  dropped_queries : Int32
+  write_p50_ms : Double
+  write_p99_ms : Double
+  completed_writes : Int32
+  dropped_writes : Int32
+  avg_cpu_util : Double
+  avg_s3_slot_util : Double
+  total_s3_gets : Int32
+  total_s3_puts : Int32
+  compaction_events : Int32
+  monthly_s3_get_usd : Double
+  monthly_s3_put_usd : Double
+  monthly_storage_usd : Double
+  monthly_compute_usd : Double
+  monthly_total_usd : Double
+  bottleneck : String
+}
+pub fn ClusterSimReport::format_summary_table(Self) -> String
+pub fn ClusterSimReport::to_json_string(Self) -> String
+
+pub(all) struct CpuProfile {
+  vec_dot_ns_per_dim : Double
+  bm25_posting_ns : Double
+  slab_decode_ns_per_kb : Double
+  ingest_doc_us : Double
+  compact_doc_us : Double
+}
+pub fn CpuProfile::default_profile() -> Self
+pub fn CpuProfile::to_json_string(Self) -> String
+
+pub(all) struct WorkloadSpec {
+  duration_sec : Double
+  query_qps : Double
+  write_rps : Double
+  rows_per_write : Int32
+  total_docs : Int32
+  dim : Int32
+  nprobe : Int32
+  num_tenants : Int32
+  cache_hit_ratio : Double
+  l0_delta_count : Int32
+}
+pub fn WorkloadSpec::cpu_bound_reads(Double, Double, Int32) -> Self
+pub fn WorkloadSpec::kv_mixed() -> Self
+pub fn WorkloadSpec::write_heavy(Double, Double, Int32) -> Self
+
+// Type aliases
+
+// Traits

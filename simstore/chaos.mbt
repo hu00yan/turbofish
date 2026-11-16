@@ -958,13 +958,14 @@ pub extend ChaosStore with @store.ObjectStore::{
   head_version,
   get_many,
   get_range_many,
+  put_many,
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ChaosStore::get_or_raise(
+pub async fn[S : @store.ObjectStore] ChaosStore::get_or_raise(
   self : ChaosStore[S],
   key : String,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   match self.get(key) {
     Some(b) => b
     None => raise @core.NotFound("ChaosStore: get failed for key \{key}")
@@ -972,12 +973,12 @@ pub fn[S : @store.ObjectStore] ChaosStore::get_or_raise(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ChaosStore::get_range_or_raise(
+pub async fn[S : @store.ObjectStore] ChaosStore::get_range_or_raise(
   self : ChaosStore[S],
   key : String,
   offset : Int,
   len : Int,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   match self.get_range(key, offset, len) {
     Some(b) => {
       if b.length() < len {
@@ -992,7 +993,7 @@ pub fn[S : @store.ObjectStore] ChaosStore::get_range_or_raise(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ChaosStore::retry_get(
+pub async fn[S : @store.ObjectStore] ChaosStore::retry_get(
   self : ChaosStore[S],
   key : String,
   max_attempts : Int,
@@ -1011,7 +1012,7 @@ pub fn[S : @store.ObjectStore] ChaosStore::retry_get(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ChaosStore::retry_get_range(
+pub async fn[S : @store.ObjectStore] ChaosStore::retry_get_range(
   self : ChaosStore[S],
   key : String,
   offset : Int,
@@ -1032,7 +1033,7 @@ pub fn[S : @store.ObjectStore] ChaosStore::retry_get_range(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ChaosStore::retry_put(
+pub async fn[S : @store.ObjectStore] ChaosStore::retry_put(
   self : ChaosStore[S],
   key : String,
   value : Bytes,
@@ -1050,7 +1051,7 @@ pub fn[S : @store.ObjectStore] ChaosStore::retry_put(
 }
 
 ///|
-pub fn[S : @store.ObjectStore] ChaosStore::retry_cas(
+pub async fn[S : @store.ObjectStore] ChaosStore::retry_cas(
   self : ChaosStore[S],
   key : String,
   max_attempts : Int,

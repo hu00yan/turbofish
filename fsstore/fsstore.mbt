@@ -412,9 +412,10 @@ pub impl @store.ObjectStore for FsStore with fn put(
 pub impl @store.ObjectStore for FsStore with fn put_if_match(
   self : FsStore,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
+  let @store.Expected(expected) = e
   let k = self.checked(key)
   let current = self.read_version(k)
   let ok = match (expected, current) {
@@ -435,9 +436,10 @@ pub impl @store.ObjectStore for FsStore with fn put_if_match(
 pub impl @store.ObjectStore for FsStore with fn get_range(
   self : FsStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   let k = self.checked(key)
   let fd = c_open_ro(cstr(self.data_path(k)), 0)
   if fd < 0 {
@@ -522,11 +524,11 @@ pub impl @store.BatchStore for FsStore with fn get_many(
 /// 顺序 fallback：逐项委托现有单键 get_range（元素为 (key, offset, len)）。
 pub impl @store.BatchStore for FsStore with fn get_range_many(
   self : FsStore,
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[@store.KeyRange],
 ) -> Array[Bytes?] {
   let out : Array[Bytes?] = Array()
   for r in ranges {
-    out.push(self.get_range(r.0, r.1, r.2))
+    out.push(self.get_range(r.key, @store.ByteRange::{ off: r.off, len: r.len }))
   }
   out
 }

@@ -49,18 +49,18 @@ async test "S3Store get_range_many 与逐个 get_range 完全一致（含 404 / 
     fixed_date(),
   )
   let ranges = [
-    ("data.bin", 2, 4),
-    ("missing.bin", 0, 3),
-    ("short.bin", 1, 100),
-    ("data.bin", 10, 5),
-    ("data.bin", 0, 0),
-    ("short.bin", 0, 3),
+    @store.KeyRange::{ key: "data.bin", off: 2, len: 4 },
+    @store.KeyRange::{ key: "missing.bin", off: 0, len: 3 },
+    @store.KeyRange::{ key: "short.bin", off: 1, len: 100 },
+    @store.KeyRange::{ key: "data.bin", off: 10, len: 5 },
+    @store.KeyRange::{ key: "data.bin", off: 0, len: 0 },
+    @store.KeyRange::{ key: "short.bin", off: 0, len: 3 },
   ]
   let batch = @store.ObjectStore::get_range_many(s, ranges)
   assert_eq(batch.length(), ranges.length())
   for i in 0..<ranges.length() {
     let r = ranges[i]
-    let single = s.get_range(r.0, r.1, r.2)
+    let single = s.get_range(r.key, @store.ByteRange::{ off: r.off, len: r.len })
     assert_eq(batch[i], single)
   }
   assert_eq(batch[0], Some(b"2345"))
@@ -83,7 +83,7 @@ async test "S3Store 空批量返回空数组，不产生请求" {
     fixed_date(),
   )
   let keys : Array[String] = []
-  let ranges : Array[(String, Int, Int)] = []
+  let ranges : Array[@store.KeyRange] = []
   assert_eq(@store.ObjectStore::get_many(s, keys).length(), 0)
   assert_eq(@store.ObjectStore::get_range_many(s, ranges).length(), 0)
   assert_eq(m.requests.length(), 0)

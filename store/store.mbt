@@ -4,13 +4,38 @@
 // - get_range：范围读（对应 S3 GetObject Range），用于只拉 posting 局部区间
 
 ///|
+/// CAS 期望版本：`Expected(None)` = 仅当对象不存在；`Expected(Some(v))` = 仅当版本为 v。
+/// 类型化包装（newtype），防止 `put_if_match` 在不同实现间 (key, expected, value) /
+/// (key, body, expected) 参数顺序混用（真实逃逸事故根因）。
+#derive(Debug, Eq)
+pub(all) struct Expected(String?)
+
+
+///|
+/// 范围读参数：`[off, off + len)`。类型化包装，防止 offset/len 顺序颠倒。
+#derive(Debug, Eq)
+pub(all) struct ByteRange {
+  off : Int
+  len : Int
+}
+
+///|
+/// 批量范围读元素：key + 范围。
+#derive(Debug, Eq)
+pub(all) struct KeyRange {
+  key : String
+  off : Int
+  len : Int
+}
+
+///|
 pub(open) trait ObjectStore {
   async fn get(Self, String) -> Bytes?
   async fn put(Self, String, Bytes) -> Unit
-  /// CAS 写入：expected 为 None 时要求 key 不存在；返回 true 表示写入成功。
-  async fn put_if_match(Self, String, String?, Bytes) -> Bool
-  /// 范围读 [offset, offset+len)，返回可能截短的 payload。
-  async fn get_range(Self, String, Int, Int) -> Bytes?
+  /// CAS 写入：`Expected(None)` 时要求 key 不存在；返回 true 表示写入成功。
+  async fn put_if_match(Self, String, Expected, Bytes) -> Bool
+  /// 范围读 [br.off, br.off + br.len)，返回可能截短的 payload。
+  async fn get_range(Self, String, ByteRange) -> Bytes?
   /// 返回 prefix 下所有 key，升序。
   async fn list(Self, String) -> Array[String]
   async fn delete(Self, String) -> Unit
@@ -19,7 +44,7 @@ pub(open) trait ObjectStore {
   /// 批量整读。默认顺序调用 `get`，返回与输入同长同序；`None` 保持在原下标。
   async fn get_many(Self, Array[String]) -> Array[Bytes?] = _
   /// 批量范围读。默认顺序调用 `get_range`，语义与单键完全一致。
-  async fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?] = _
+  async fn get_range_many(Self, Array[KeyRange]) -> Array[Bytes?] = _
   /// 批量写入。默认顺序调用 `put`；异步后端覆盖为并发上传。
   async fn put_many(Self, Array[(String, Bytes)]) -> Unit = _
 }

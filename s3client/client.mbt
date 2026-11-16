@@ -540,7 +540,7 @@ pub fn range_header(offset : Int, len : Int) -> String {
 ///|
 /// GetObject(range)：`Range: bytes=off-(off+len-1)`。
 /// 206 → body；服务端忽略 Range 返回 200 → 本地切片；404/416 → None。
-pub async fn S3Client::get_range(
+pub async fn S3Client::fetch_range(
   self : S3Client,
   key : String,
   offset : Int,
@@ -578,7 +578,7 @@ pub async fn S3Client::put(
 /// - `expected=None` → `If-None-Match: *`（仅当对象不存在时创建）
 /// - `expected=Some(v)` → `If-Match: <v>`（仅当当前版本为 v 时更新）
 /// 200/204 → true；409/412 → false；其他非 2xx → raise。
-pub async fn S3Client::put_if_match(
+pub async fn S3Client::conditional_put(
   self : S3Client,
   key : String,
   body : Bytes,
@@ -729,20 +729,22 @@ impl @store.ObjectStore for S3Client with fn put(
 impl @store.ObjectStore for S3Client with fn put_if_match(
   self : S3Client,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
-  self.put_if_match(key, value, expected)
+  let @store.Expected(expected) = e
+  self.conditional_put(key, value, expected)
 }
 
 ///|
 impl @store.ObjectStore for S3Client with fn get_range(
   self : S3Client,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
-  self.get_range(key, offset, len)
+  let offset = br.off
+  let len = br.len
+  self.fetch_range(key, offset, len)
 }
 
 ///|
@@ -783,7 +785,7 @@ impl @store.ObjectStore for S3Client with fn get_many(
 /// ObjectStore 的批量范围读：同样委托给 @store.BatchStore。
 impl @store.ObjectStore for S3Client with fn get_range_many(
   self : S3Client,
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[@store.KeyRange],
 ) -> Array[Bytes?] {
   @store.BatchStore::get_range_many(self, ranges)
 }
@@ -822,7 +824,7 @@ impl @store.BatchStore for S3Client with fn get_many(
 /// 真并发批量范围读：元素为 (key, offset, len)，与单键 get_range 逐位一致。
 impl @store.BatchStore for S3Client with fn get_range_many(
   self : S3Client,
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[@store.KeyRange],
 ) -> Array[Bytes?] {
   let n = ranges.length()
   let out : Array[Bytes?] = Array(capacity=n)
@@ -830,8 +832,10 @@ impl @store.BatchStore for S3Client with fn get_range_many(
     out.push(None)
   }
   self.for_each_inflight(n, async fn (i) {
-    let (key, offset, len) = ranges[i]
-    let v = self.get_range(key, offset, len)
+    let key = ranges[i].key
+    let offset = ranges[i].off
+    let len = ranges[i].len
+    let v = self.fetch_range(key, offset, len)
     out[i] = v
   })
   out

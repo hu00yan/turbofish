@@ -276,7 +276,7 @@ async fn fs_read_range_path(
   len : Int,
 ) -> Bytes? {
   let path = (s.file_path(key)) catch {
-    _ => return s.get_range(key, offset, len)
+    _ => return s.get_range(key, @store.ByteRange::{ off: offset, len: len })
   }
   eng.read_range(path, offset, len)
 }
@@ -305,10 +305,10 @@ async fn raw_get_range(
     FS(s) =>
       match fs_io_engine.val {
         Some(eng) => fs_read_range_path(s, eng, key, offset, len)
-        None => s.get_range(key, offset, len)
+        None => s.get_range(key, @store.ByteRange::{ off: offset, len: len })
       }
-    S3Async(s) => @s3client.S3Client::get_range(s, key, offset, len)
-    Sim(s) => s.get_range(key, offset, len)
+    S3Async(s) => @s3client.S3Client::fetch_range(s, key, offset, len)
+    Sim(s) => s.get_range(key, @store.ByteRange::{ off: offset, len: len })
   }
 }
 
@@ -525,15 +525,10 @@ pub impl @store.ObjectStore for AnyStore with put(self, key, bs) {
 }
 
 ///|
-pub impl @store.ObjectStore for AnyStore with put_if_match(
-  self,
-  key,
-  expected,
-  bs
-) {
+pub impl @store.ObjectStore for AnyStore with put_if_match(self, key, expected : @store.Expected, bs) {
   let ok = match self {
     FS(s) => s.put_if_match(key, expected, bs)
-    S3Async(s) => @s3client.S3Client::put_if_match(s, key, bs, expected)
+    S3Async(s) => @s3client.S3Client::conditional_put(s, key, bs, expected.0)
     Sim(s) => s.put_if_match(key, expected, bs)
   }
   if ok {
@@ -543,7 +538,9 @@ pub impl @store.ObjectStore for AnyStore with put_if_match(
 }
 
 ///|
-pub impl @store.ObjectStore for AnyStore with get_range(self, key, offset, len) {
+pub impl @store.ObjectStore for AnyStore with get_range(self, key, br : @store.ByteRange) {
+  let offset = br.off
+  let len = br.len
   if @meta.is_metadata_key(key) {
     match AnyStore::get(self, key) {
       Some(bs) =>

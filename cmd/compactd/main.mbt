@@ -97,30 +97,22 @@ pub impl @store.ObjectStore for CompactStore with put(self, key, bs) {
 }
 
 ///|
-pub impl @store.ObjectStore for CompactStore with put_if_match(
-  self,
-  key,
-  expected,
-  bs
-) {
+pub impl @store.ObjectStore for CompactStore with put_if_match(self, key, expected : @store.Expected, bs) {
   match self {
     FS(s) => s.put_if_match(key, expected, bs)
-    S3Async(s) => @s3client.S3Client::put_if_match(s, key, bs, expected)
+    S3Async(s) => @s3client.S3Client::conditional_put(s, key, bs, expected.0)
     Sim(s) => s.put_if_match(key, expected, bs)
   }
 }
 
 ///|
-pub impl @store.ObjectStore for CompactStore with get_range(
-  self,
-  key,
-  offset,
-  len
-) {
+pub impl @store.ObjectStore for CompactStore with get_range(self, key, br : @store.ByteRange) {
+  let offset = br.off
+  let len = br.len
   match self {
-    FS(s) => s.get_range(key, offset, len)
-    S3Async(s) => @s3client.S3Client::get_range(s, key, offset, len)
-    Sim(s) => s.get_range(key, offset, len)
+    FS(s) => s.get_range(key, @store.ByteRange::{ off: offset, len: len })
+    S3Async(s) => @s3client.S3Client::fetch_range(s, key, offset, len)
+    Sim(s) => s.get_range(key, @store.ByteRange::{ off: offset, len: len })
   }
 }
 
@@ -239,12 +231,7 @@ pub impl @store.ObjectStore for MdsBackend with put(self, key, bs) {
 }
 
 ///|
-pub impl @store.ObjectStore for MdsBackend with put_if_match(
-  self,
-  key,
-  expected,
-  bs
-) {
+pub impl @store.ObjectStore for MdsBackend with put_if_match(self, key, expected : @store.Expected, bs) {
   let ok = self.raw.put_if_match(key, expected, bs)
   if ok && @meta.is_metadata_key(key) {
     self.meta_put(key, bs)
@@ -253,12 +240,9 @@ pub impl @store.ObjectStore for MdsBackend with put_if_match(
 }
 
 ///|
-pub impl @store.ObjectStore for MdsBackend with get_range(
-  self,
-  key,
-  offset,
-  len
-) {
+pub impl @store.ObjectStore for MdsBackend with get_range(self, key, br : @store.ByteRange) {
+  let offset = br.off
+  let len = br.len
   if @meta.is_metadata_key(key) {
     match MdsBackend::get(self, key) {
       Some(bs) =>
@@ -275,7 +259,7 @@ pub impl @store.ObjectStore for MdsBackend with get_range(
       None => None
     }
   } else {
-    self.raw.get_range(key, offset, len)
+    self.raw.get_range(key, @store.ByteRange::{ off: offset, len: len })
   }
 }
 

@@ -84,20 +84,20 @@ async test "BudgetStore: pass-through correctness to MemStore" {
   assert_eq(bstore.inner().get("k1"), Some(b"hello world"))
 
   // put_if_match
-  let cas1 = bstore.put_if_match("k2", None, b"cas initial")
+  let cas1 = bstore.put_if_match("k2", Expected(None), b"cas initial")
   assert_eq(cas1, true)
   let ver = bstore.head_version("k2")
   assert_eq(ver, Some("v2"))
 
-  let cas_fail = bstore.put_if_match("k2", Some("v999"), b"cas fail")
+  let cas_fail = bstore.put_if_match("k2", Expected(Some("v999")), b"cas fail")
   assert_eq(cas_fail, false)
 
-  let cas_ok = bstore.put_if_match("k2", Some("v2"), b"cas updated")
+  let cas_ok = bstore.put_if_match("k2", Expected(Some("v2")), b"cas updated")
   assert_eq(cas_ok, true)
   assert_eq(bstore.get("k2"), Some(b"cas updated"))
 
   // get_range
-  let range_val = bstore.get_range("k1", 0, 5)
+  let range_val = bstore.get_range("k1", ByteRange::{ off: 0, len: 5 })
   assert_eq(range_val, Some(b"hello"))
 
   // list
@@ -118,7 +118,10 @@ async test "BudgetStore: pass-through correctness to MemStore" {
   assert_eq(many[1], Some(b"val2"))
   assert_eq(many[2], None)
 
-  let range_many = bstore.get_range_many([("b1", 0, 3), ("b2", 1, 2)])
+  let range_many = bstore.get_range_many([
+    KeyRange::{ key: "b1", off: 0, len: 3 },
+    KeyRange::{ key: "b2", off: 1, len: 2 },
+  ])
   assert_eq(range_many.length(), 2)
   assert_eq(range_many[0], Some(b"val"))
   assert_eq(range_many[1], Some(b"al"))

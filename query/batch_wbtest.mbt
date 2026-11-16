@@ -41,20 +41,22 @@ pub impl @store.ObjectStore for CountingBatchStore with fn put(
 pub impl @store.ObjectStore for CountingBatchStore with fn put_if_match(
   self : CountingBatchStore,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
-  self.inner.put_if_match(key, expected, value)
+  let @store.Expected(expected) = e
+  self.inner.put_if_match(key, @store.Expected(expected), value)
 }
 
 ///|
 pub impl @store.ObjectStore for CountingBatchStore with fn get_range(
   self : CountingBatchStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
-  self.inner.get_range(key, offset, len)
+  let offset = br.off
+  let len = br.len
+  self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
 }
 
 ///|
@@ -94,7 +96,7 @@ pub impl @store.ObjectStore for CountingBatchStore with fn get_many(
 ///|
 pub impl @store.ObjectStore for CountingBatchStore with fn get_range_many(
   self : CountingBatchStore,
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[@store.KeyRange],
 ) -> Array[Bytes?] {
   self.range_calls += 1
   @store.BatchStore::get_range_many(self.inner, ranges)

@@ -45,26 +45,26 @@ async test "get_range: 区间读 + 越界截短 + 空区间" {
   s.put("seg/rows/id.bin", data)
   // 正常区间 [10, 30)
   assert_eq(
-    s.get_range("seg/rows/id.bin", 10, 20),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 10, len: 20 }),
     Some(data[10:30].to_owned()),
   )
   // 越界截短：[90, 200) → [90, 100)
   assert_eq(
-    s.get_range("seg/rows/id.bin", 90, 110),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 90, len: 110 }),
     Some(data[90:100].to_owned()),
   )
   // offset 超出文件大小 → 空
   assert_eq(
-    s.get_range("seg/rows/id.bin", 100, 5),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 100, len: 5 }),
     Some(Bytes::make(0, b'\x00')),
   )
   // 全量
-  assert_eq(s.get_range("seg/rows/id.bin", 0, 100), Some(data))
+  assert_eq(s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 0, len: 100 }), Some(data))
   // 不存在的 key
-  assert_eq(s.get_range("seg/nope.bin", 0, 5), None)
+  assert_eq(s.get_range("seg/nope.bin", @store.ByteRange::{ off: 0, len: 5 }), None)
   // len=0 → 空
   assert_eq(
-    s.get_range("seg/rows/id.bin", 10, 0),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 10, len: 0 }),
     Some(Bytes::make(0, b'\x00')),
   )
   cleanup_store(s)
@@ -121,7 +121,7 @@ async test "delete: 数据 + 版本 sidecar + 索引项" {
   assert_eq(s.head_version("a/b.bin"), None)
   assert_eq(s.list("a/"), [])
   // 版本 sidecar 文件也被删掉了（可再次 CAS None 建立）
-  assert_eq(s.put_if_match("a/b.bin", None, b"again"), true)
+  assert_eq(s.put_if_match("a/b.bin", @store.Expected(None), b"again"), true)
   // 删不存在的 key 是 no-op
   s.delete("a/b.bin")
   s.delete("never/existed.bin")
@@ -133,23 +133,23 @@ async test "delete: 数据 + 版本 sidecar + 索引项" {
 async test "put_if_match: 与 MemStore 一致的 CAS 语义" {
   let s = FsStore::new(fresh_root("cas"))
   // 新 key：expected=None 成功
-  assert_eq(s.put_if_match("m/manifest.json", None, b"v1-body"), true)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(None), b"v1-body"), true)
   assert_eq(s.head_version("m/manifest.json"), Some("v1"))
   // 新 key：expected=None 第二次必须失败（key 已存在）
-  assert_eq(s.put_if_match("m/manifest.json", None, b"bad"), false)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(None), b"bad"), false)
   // 正确版本串成功，版本自增
-  assert_eq(s.put_if_match("m/manifest.json", Some("v1"), b"v2-body"), true)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(Some("v1")), b"v2-body"), true)
   assert_eq(s.get("m/manifest.json"), Some(b"v2-body"))
   assert_eq(s.head_version("m/manifest.json"), Some("v2"))
   // 过期版本失败，内容不变
-  assert_eq(s.put_if_match("m/manifest.json", Some("v1"), b"stale"), false)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(Some("v1")), b"stale"), false)
   assert_eq(s.get("m/manifest.json"), Some(b"v2-body"))
   assert_eq(s.head_version("m/manifest.json"), Some("v2"))
   // 现版本再次成功
-  assert_eq(s.put_if_match("m/manifest.json", Some("v2"), b"v3-body"), true)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(Some("v2")), b"v3-body"), true)
   assert_eq(s.head_version("m/manifest.json"), Some("v3"))
   // 不存在的 key：Some 期望失败
-  assert_eq(s.put_if_match("m/nope.json", Some("v1"), b"x"), false)
+  assert_eq(s.put_if_match("m/nope.json", @store.Expected(Some("v1")), b"x"), false)
   cleanup_store(s)
 }
 
@@ -259,16 +259,18 @@ async test "BatchStore get_range_many：与逐个 get_range 逐位一致（含�
   let data = Bytes::makei(50, i => i.to_byte())
   s.put("seg/rows/id.bin", data)
   let ranges = [
-    ("seg/rows/id.bin", 5, 10),
-    ("seg/missing.bin", 0, 4),
-    ("seg/rows/id.bin", 45, 100),
+    @store.KeyRange::{ key: "seg/rows/id.bin", off: 5, len: 10 },
+    @store.KeyRange::{ key: "seg/missing.bin", off: 0, len: 4 },
+    @store.KeyRange::{ key: "seg/rows/id.bin", off: 45, len: 100 },
   ]
   let batch = s.get_range_many(ranges)
   assert_eq(batch.length(), ranges.length())
   // 与逐个 get_range 逐位一致
   for i in 0..<ranges.length() {
-    let (k, off, len) = ranges[i]
-    assert_eq(batch[i], s.get_range(k, off, len))
+    let k = ranges[i].key
+    let off = ranges[i].off
+    let len = ranges[i].len
+    assert_eq(batch[i], s.get_range(k, @store.ByteRange::{ off: off, len: len }))
   }
   // None 保持在缺失下标；截短语义与单键一致
   assert_eq(batch[0], Some(data[5:15].to_owned()))
@@ -288,4 +290,11 @@ async fn[S : @store.ObjectStore] must_get(
     Some(v) => v
     None => abort("missing key: \{key}")
   }
+}
+
+///|
+/// 跨后端一致性契约（与 MemStore 同一套，store/conformance 维护）。
+async test "conformance: FsStore 通过全部契约" {
+  let report = @conformance.conformance_report(fn () { FsStore::new(fresh_root("conf")) })
+  assert_eq(report, "")
 }

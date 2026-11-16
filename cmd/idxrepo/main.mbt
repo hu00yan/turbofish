@@ -465,26 +465,18 @@ pub impl @store.ObjectStore for CountingStore with put(self, key, bs) {
 }
 
 ///|
-pub impl @store.ObjectStore for CountingStore with put_if_match(
-  self,
-  key,
-  expected,
-  bs
-) {
+pub impl @store.ObjectStore for CountingStore with put_if_match(self, key, expected : @store.Expected, bs) {
   self.puts += 1
   self.put_bytes += bs.length()
-  @s3client.S3Client::put_if_match(self.inner, key, bs, expected)
+  @s3client.S3Client::conditional_put(self.inner, key, bs, expected.0)
 }
 
 ///|
-pub impl @store.ObjectStore for CountingStore with get_range(
-  self,
-  key,
-  offset,
-  len
-) {
+pub impl @store.ObjectStore for CountingStore with get_range(self, key, br : @store.ByteRange) {
+  let offset = br.off
+  let len = br.len
   self.gets += 1
-  @s3client.S3Client::get_range(self.inner, key, offset, len)
+  @s3client.S3Client::fetch_range(self.inner, key, offset, len)
 }
 
 ///|

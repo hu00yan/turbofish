@@ -879,9 +879,10 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn put(
 pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn put_if_match(
   self : S3Store[T],
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
+  let @store.Expected(expected) = e
   if self.conditional_writes_supported {
     let req = match expected {
       None => self.build_put_object(key, value, None, Some("*"))
@@ -908,9 +909,10 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn put_if_mat
 fn[T : HttpTransport] S3Store::put_if_match_lease(
   self : S3Store[T],
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
+  let @store.Expected(expected) = e
   match self.lease_coordinator {
     None => false
     Some(coord) => {
@@ -953,9 +955,10 @@ fn[T : HttpTransport] S3Store::put_if_match_lease(
 pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn get_range(
   self : S3Store[T],
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   if len <= 0 {
     return self.finish_get_range(
       key,

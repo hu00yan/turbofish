@@ -352,7 +352,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with update_hea
     }
   }
 
-  // 3. Expected Head CAS 校验
+  // 3. @store.Expected Head CAS 校验
   let cur_head = match @store.read_head_pointer(self.store, ns) {
     Some(ptr) => ptr
     None => ""
@@ -1378,7 +1378,7 @@ impl MetadataCatalog for MemRdbCatalog with update_head_manifest(
         }
     }
 
-    // 2. Expected Head CAS 校验
+    // 2. @store.Expected Head CAS 校验
     let old_tenant = match self.find_visible_tenant(ns, tx) {
       Some(rec) => rec
       None => raise CatalogError::NotFound("Namespace \{ns} not found")

@@ -55,20 +55,22 @@ impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn put(
 impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn put_if_match(
   self : RebaseStore[S],
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
-  self.inner.put_if_match(key, expected, value)
+  let @store.Expected(expected) = e
+  self.inner.put_if_match(key, @store.Expected(expected), value)
 }
 
 ///|
 impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn get_range(
   self : RebaseStore[S],
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
-  self.inner.get_range(key, offset, len)
+  let offset = br.off
+  let len = br.len
+  self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
 }
 
 ///|

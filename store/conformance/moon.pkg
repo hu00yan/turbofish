@@ -1,0 +1,14 @@
+import {
+  "turbofish/store",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "conformance_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

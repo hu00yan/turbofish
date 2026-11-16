@@ -482,22 +482,22 @@ async test "S3Store CAS 流程（mock 状态模拟）：语义与 MemStore 对�
     fixed_date(),
   )
   // 新 key：expected=None 成功，版本 = etag-1
-  assert_eq(s.put_if_match("m/manifest.json", None, b"v1-body"), true)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(None), b"v1-body"), true)
   assert_eq(s.head_version("m/manifest.json"), Some("etag-1"))
   // 再来一次 None：对象已存在 → 412 → false
-  assert_eq(s.put_if_match("m/manifest.json", None, b"bad"), false)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(None), b"bad"), false)
   // 正确版本 → 成功，版本推进
-  assert_eq(s.put_if_match("m/manifest.json", Some("etag-1"), b"v2-body"), true)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(Some("etag-1")), b"v2-body"), true)
   assert_eq(s.get("m/manifest.json"), Some(b"v2-body"))
   assert_eq(s.head_version("m/manifest.json"), Some("etag-2"))
   // 过期版本 → 412 → false，内容不变
-  assert_eq(s.put_if_match("m/manifest.json", Some("etag-1"), b"stale"), false)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(Some("etag-1")), b"stale"), false)
   assert_eq(s.get("m/manifest.json"), Some(b"v2-body"))
   // 当前版本 → 成功
-  assert_eq(s.put_if_match("m/manifest.json", Some("etag-2"), b"v3-body"), true)
+  assert_eq(s.put_if_match("m/manifest.json", @store.Expected(Some("etag-2")), b"v3-body"), true)
   assert_eq(s.head_version("m/manifest.json"), Some("etag-3"))
   // 不存在的 key：Some 期望 → false；head_version → None
-  assert_eq(s.put_if_match("m/nope.json", Some("etag-1"), b"x"), false)
+  assert_eq(s.put_if_match("m/nope.json", @store.Expected(Some("etag-1")), b"x"), false)
   assert_eq(s.head_version("m/nope.json"), None)
   // get 未命中
   assert_eq(s.get("m/nope.json"), None)
@@ -514,15 +514,15 @@ async test "S3Store etag 缓存：预置 412 映射为 put_if_match false" {
     m,
     fixed_date(),
   )
-  assert_eq(s.put_if_match("k", None, b"v1"), true)
+  assert_eq(s.put_if_match("k", @store.Expected(None), b"v1"), true)
   let v1 = s.head_version("k").unwrap_or("")
   // 人为污染缓存：模拟读到过期 etag
   s.etag_cache.set("k", "etag-stale")
   // 缓存的 etag 与服务端不一致 → mock 412 → false（期望走 HEAD 刷新吗？不：
   // 契约是缓存命中即发 If-Match，失败返回 false 由上层重读仲裁）
-  assert_eq(s.put_if_match("k", Some("etag-stale"), b"v2"), false)
+  assert_eq(s.put_if_match("k", @store.Expected(Some("etag-stale")), b"v2"), false)
   // 正确 etag 恢复
-  assert_eq(s.put_if_match("k", Some(v1), b"v2"), true)
+  assert_eq(s.put_if_match("k", @store.Expected(Some(v1)), b"v2"), true)
 }
 
 ///|
@@ -539,32 +539,32 @@ async test "S3Store get_range：206 截取 + 416 → 空 + 404 → None" {
   let data = Bytes::makei(100, i => (i % 251).to_byte())
   s.put("seg/rows/id.bin", data)
   assert_eq(
-    s.get_range("seg/rows/id.bin", 10, 20),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 10, len: 20 }),
     Some(data[10:30].to_owned()),
   )
   // 越界截短：[90, 200) → mock 端 clamp 到 [90, 100)
   assert_eq(
-    s.get_range("seg/rows/id.bin", 90, 110),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 90, len: 110 }),
     Some(data[90:100].to_owned()),
   )
   // offset 超界 → 416 → 空
   assert_eq(
-    s.get_range("seg/rows/id.bin", 100, 5),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 100, len: 5 }),
     Some(Bytes::make(0, b'\x00')),
   )
   // len=0 → HEAD 探测
   assert_eq(
-    s.get_range("seg/rows/id.bin", 10, 0),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 10, len: 0 }),
     Some(Bytes::make(0, b'\x00')),
   )
   assert_eq(
-    s.get_range("seg/rows/id.bin", 10, 0),
+    s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 10, len: 0 }),
     Some(Bytes::make(0, b'\x00')),
   )
   // 不存在的 key
-  assert_eq(s.get_range("seg/nope.bin", 0, 5), None)
+  assert_eq(s.get_range("seg/nope.bin", @store.ByteRange::{ off: 0, len: 5 }), None)
   // 全量读
-  assert_eq(s.get_range("seg/rows/id.bin", 0, 100), Some(data))
+  assert_eq(s.get_range("seg/rows/id.bin", @store.ByteRange::{ off: 0, len: 100 }), Some(data))
 }
 
 ///|
@@ -685,11 +685,11 @@ async test "S3Store: CAS via LeaseCoordinator fallback when conditional writes a
   assert_eq(s.conditional_writes_supported(), false)
 
   // expected=None 创建成功
-  assert_eq(s.put_if_match("cas-fallback.json", None, b"v1-data"), true)
+  assert_eq(s.put_if_match("cas-fallback.json", @store.Expected(None), b"v1-data"), true)
   assert_eq(s.get("cas-fallback.json"), Some(b"v1-data"))
 
   // expected=None 重复创建失败（对象已存在）
-  assert_eq(s.put_if_match("cas-fallback.json", None, b"v1-dup"), false)
+  assert_eq(s.put_if_match("cas-fallback.json", @store.Expected(None), b"v1-dup"), false)
   assert_eq(s.get("cas-fallback.json"), Some(b"v1-data"))
 
   // 获取当前版本串（ETag）
@@ -700,14 +700,14 @@ async test "S3Store: CAS via LeaseCoordinator fallback when conditional writes a
 
   // expected=Some(ver1) 更新成功
   assert_eq(
-    s.put_if_match("cas-fallback.json", Some(ver1), b"v2-data"),
+    s.put_if_match("cas-fallback.json", @store.Expected(Some(ver1)), b"v2-data"),
     true,
   )
   assert_eq(s.get("cas-fallback.json"), Some(b"v2-data"))
 
   // 过期版本更新被拒绝
   assert_eq(
-    s.put_if_match("cas-fallback.json", Some(ver1), b"v3-stale"),
+    s.put_if_match("cas-fallback.json", @store.Expected(Some(ver1)), b"v3-stale"),
     false,
   )
   assert_eq(s.get("cas-fallback.json"), Some(b"v2-data"))
@@ -731,12 +731,12 @@ async test "S3Store: LeaseCoordinator mutual exclusion on lease contention" {
   assert_eq(coord.acquire("contested.json", "worker-B", 5000L), true)
 
   // worker-A 尝试写入失败（租约冲突）
-  assert_eq(s.put_if_match("contested.json", None, b"locked-out"), false)
+  assert_eq(s.put_if_match("contested.json", @store.Expected(None), b"locked-out"), false)
   assert_eq(s.get("contested.json"), None)
 
   // worker-B 释放租约后，worker-A 成功写入
   assert_eq(coord.release("contested.json", "worker-B"), true)
-  assert_eq(s.put_if_match("contested.json", None, b"now-succeeds"), true)
+  assert_eq(s.put_if_match("contested.json", @store.Expected(None), b"now-succeeds"), true)
   assert_eq(s.get("contested.json"), Some(b"now-succeeds"))
 }
 
@@ -757,7 +757,23 @@ async test "S3Store: dynamic degradation to LeaseCoordinator on 501 Not Implemen
   assert_eq(s.conditional_writes_supported(), true)
 
   // 触发 501，自动降级至 Lease 协调器并重试成功
-  assert_eq(s.put_if_match("auto-deg.txt", None, b"auto-fallback-body"), true)
+  assert_eq(s.put_if_match("auto-deg.txt", @store.Expected(None), b"auto-fallback-body"), true)
   assert_eq(s.conditional_writes_supported(), false)
   assert_eq(s.get("auto-deg.txt"), Some(b"auto-fallback-body"))
+}
+
+///|
+/// 跨后端一致性契约（与 MemStore/FsStore 同一套，store/conformance 维护）。
+async test "conformance: S3Store(MockS3Transport) 通过全部契约" {
+  let m = MockS3Transport::new("bucket")
+  let st = S3Store::new(
+    "https://s3.us-east-1.amazonaws.com",
+    "bucket",
+    "us-east-1",
+    test_creds(),
+    m,
+    fixed_date(),
+  )
+  let report = @conformance.conformance_report(fn () { st })
+  assert_eq(report, "")
 }

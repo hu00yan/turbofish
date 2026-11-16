@@ -127,7 +127,7 @@ async fn[S : @store.ObjectStore] init_namespace(
   }
   let key = ns_meta_key(cfg.ns)
   let bs = json_bytes(meta.to_json())
-  if !store.put_if_match(key, None, bs) {
+  if !store.put_if_match(key, @store.Expected(None), bs) {
     match store.get(key) {
       Some(_) =>
         raise @core.CommitConflict("namespace already exists: \{cfg.ns}")

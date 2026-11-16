@@ -328,11 +328,11 @@ async test "e2e: 假 S3 服务器验证状态码映射 / Range / CAS / 分页 / 
     assert_eq(as_text(client.get("obj").unwrap()), "hello-s3")
     assert_true(client.get("missing") is None)
     // GET range：服务端返回 206
-    assert_eq(as_text(client.get_range("obj", 3, 3).unwrap()), "lo-")
+    assert_eq(as_text(client.fetch_range("obj", 3, 3).unwrap()), "lo-")
     // GET range：服务端忽略 Range 返回 200 → 客户端本地切片
-    assert_eq(as_text(client.get_range("norange", 2, 3).unwrap()), "234")
+    assert_eq(as_text(client.fetch_range("norange", 2, 3).unwrap()), "234")
     // GET range：越界 → 416 → None
-    assert_true(client.get_range("obj", 99, 5) is None)
+    assert_true(client.fetch_range("obj", 99, 5) is None)
     // HEAD：ETag（服务端返回对象大小但无 body，符合 S3 语义）
     assert_eq(client.head_version("obj"), Some("\"v1\""))
     assert_true(client.head_version("missing") is None)
@@ -343,14 +343,14 @@ async test "e2e: 假 S3 服务器验证状态码映射 / Range / CAS / 分页 / 
     client.put("empty", b"")
     assert_eq(as_text(client.get("empty").unwrap()), "")
     // CAS：已存在时 create → 412 → false
-    assert_false(client.put_if_match("obj", b"x", None))
+    assert_false(client.conditional_put("obj", b"x", None))
     // CAS：不存在时 create → true
-    assert_true(client.put_if_match("cas", b"x", None))
+    assert_true(client.conditional_put("cas", b"x", None))
     let v = client.head_version("cas").unwrap()
     // CAS：版本不匹配 → 412 → false
-    assert_false(client.put_if_match("cas", b"y", Some("\"nope\"")))
+    assert_false(client.conditional_put("cas", b"y", Some("\"nope\"")))
     // CAS：版本匹配 → true
-    assert_true(client.put_if_match("cas", b"y", Some(v)))
+    assert_true(client.conditional_put("cas", b"y", Some(v)))
     assert_eq(as_text(client.get("cas").unwrap()), "y")
     // DELETE（幂等：删不存在的 key 也不报错）
     client.delete("cas")
@@ -452,10 +452,10 @@ async test "e2e: 真并发批量 ObjectStore（put_many / get_many / get_range_m
 
     // ---- 3) 并发范围读：区间切片与下标都对 ----
     state.max_inflight_seen = 0
-    let ranges : Array[(String, Int, Int)] = Array(capacity=n)
+    let ranges : Array[@store.KeyRange] = Array(capacity=n)
     for i in 0..<n {
       // "body-{i}" 的 [1, 4) → "ody"
-      ranges.push(("slow/k\{i}", 1, 3))
+      ranges.push(@store.KeyRange::{ key: "slow/k\{i}", off: 1, len: 3 })
     }
     let rg = @store.ObjectStore::get_range_many(client, ranges)
     assert_eq(rg.length(), ranges.length())
@@ -468,7 +468,7 @@ async test "e2e: 真并发批量 ObjectStore（put_many / get_many / get_range_m
     let again = @store.BatchStore::get_many(client, ["slow/k3", "slow/missing"])
     assert_eq(as_text(again[0].unwrap()), "body-3")
     assert_true(again[1] is None)
-    let again_rg = @store.BatchStore::get_range_many(client, [("slow/k4", 0, 5)])
+    let again_rg = @store.BatchStore::get_range_many(client, [@store.KeyRange::{ key: "slow/k4", off: 0, len: 5 }])
     assert_eq(as_text(again_rg[0].unwrap()), "body-")
 
     // ---- 5) 单键方法经 @store.ObjectStore trait 调用与直接调用等价 ----
@@ -476,7 +476,7 @@ async test "e2e: 真并发批量 ObjectStore（put_many / get_many / get_range_m
     assert_eq(as_text(@store.ObjectStore::get(client, "slow/k5").unwrap()), "body-5")
     @store.ObjectStore::put(client, "slow/trait-put", b"tp")
     assert_eq(
-      as_text(@store.ObjectStore::get_range(client, "slow/trait-put", 0, 2).unwrap()),
+      as_text(@store.ObjectStore::get_range(client, "slow/trait-put", @store.ByteRange::{ off: 0, len: 2 }).unwrap()),
       "tp",
     )
     assert_true(@store.ObjectStore::head_version(client, "slow/trait-put") is Some(_))

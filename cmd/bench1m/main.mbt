@@ -258,10 +258,11 @@ impl @store.ObjectStore for CountingStore with fn put(
 impl @store.ObjectStore for CountingStore with fn put_if_match(
   self : CountingStore,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
-  let ok = self.inner.put_if_match(key, expected, value)
+  let @store.Expected(expected) = e
+  let ok = self.inner.put_if_match(key, @store.Expected(expected), value)
   if ok {
     // CAS 失败不落字节（真 S3 也只产生一次失败请求，不产生新数据字节）。
     self.put_bytes += value.length()
@@ -273,10 +274,11 @@ impl @store.ObjectStore for CountingStore with fn put_if_match(
 impl @store.ObjectStore for CountingStore with fn get_range(
   self : CountingStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
-  self.inner.get_range(key, offset, len)
+  let offset = br.off
+  let len = br.len
+  self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
 }
 
 ///|

@@ -640,7 +640,7 @@ async fn[S : @store.ObjectStore] load_slab_index(
   seg_id : String,
 ) -> @format.SlabIndex? {
   let key = seg_slab_key(n.ns, seg_id)
-  let hdr = match n.store.get_range(key, 0, SLAB_INDEX_PREFETCH) {
+  let hdr = match n.store.get_range(key, @store.ByteRange::{ off: 0, len: SLAB_INDEX_PREFETCH }) {
     Some(b) => b
     None => return None
   }
@@ -655,7 +655,7 @@ async fn[S : @store.ObjectStore] load_slab_index(
       if off <= 0 {
         return None
       }
-      match n.store.get_range(key, off, SLAB_INDEX_TAIL_PREFETCH) {
+      match n.store.get_range(key, @store.ByteRange::{ off: off, len: SLAB_INDEX_TAIL_PREFETCH }) {
         Some(tail) => {
           let idx = @format.decode_slab_index(tail, 0) catch {
             _ => return None
@@ -698,11 +698,7 @@ pub async fn[S : @store.ObjectStore] seg_read_component(
     Some(index) =>
       match slab_entry_of(index, rel_path) {
         Some(e) =>
-          n.store.get_range(
-            seg_slab_key(n.ns, seg_id),
-            e.offset.to_int(),
-            e.length.to_int(),
-          )
+          n.store.get_range(seg_slab_key(n.ns, seg_id), @store.ByteRange::{ off: e.offset.to_int(), len: e.length.to_int() })
         None => n.store.get(seg_legacy_key(n.ns, seg_id, rel_path))
       }
     None => n.store.get(seg_legacy_key(n.ns, seg_id, rel_path))
@@ -724,15 +720,11 @@ pub async fn[S : @store.ObjectStore] seg_read_component_range(
     Some(index) =>
       match slab_entry_of(index, rel_path) {
         Some(e) =>
-          n.store.get_range(
-            seg_slab_key(n.ns, seg_id),
-            e.offset.to_int() + off,
-            len,
-          )
+          n.store.get_range(seg_slab_key(n.ns, seg_id), @store.ByteRange::{ off: e.offset.to_int() + off, len: len })
         None =>
-          n.store.get_range(seg_legacy_key(n.ns, seg_id, rel_path), off, len)
+          n.store.get_range(seg_legacy_key(n.ns, seg_id, rel_path), @store.ByteRange::{ off: off, len: len })
       }
-    None => n.store.get_range(seg_legacy_key(n.ns, seg_id, rel_path), off, len)
+    None => n.store.get_range(seg_legacy_key(n.ns, seg_id, rel_path), @store.ByteRange::{ off: off, len: len })
   }
 }
 
@@ -778,9 +770,9 @@ pub async fn[S : @store.ObjectStore] seg_read_components_many(
     }
   }
   if !probe_seg.is_empty() {
-    let ranges : Array[(String, Int, Int)] = Array(capacity=probe_seg.length())
+    let ranges : Array[@store.KeyRange] = Array(capacity=probe_seg.length())
     for seg_id in probe_seg {
-      ranges.push((seg_slab_key(n.ns, seg_id), 0, SLAB_INDEX_PREFETCH))
+      ranges.push(@store.KeyRange::{ key: seg_slab_key(n.ns, seg_id), off: 0, len: SLAB_INDEX_PREFETCH })
     }
     let heads = @store.ObjectStore::get_range_many(n.store, ranges)
     let need_tail : Array[Int] = Array()
@@ -802,7 +794,7 @@ pub async fn[S : @store.ObjectStore] seg_read_components_many(
     }
   }
   // 2) 按布局分派：slab 段合并成一次 get_range_many，碎片段合并成一次 get_many。
-  let slab_ranges : Array[(String, Int, Int)] = Array()
+  let slab_ranges : Array[@store.KeyRange] = Array()
   let slab_pos : Array[Int] = Array()
   let legacy_keys : Array[String] = Array()
   let legacy_pos : Array[Int] = Array()
@@ -815,9 +807,11 @@ pub async fn[S : @store.ObjectStore] seg_read_components_many(
     match entry {
       Some(e) => {
         slab_pos.push(i)
-        slab_ranges.push(
-          (seg_slab_key(n.ns, seg_id), e.offset.to_int(), e.length.to_int()),
-        )
+        slab_ranges.push(@store.KeyRange::{
+          key: seg_slab_key(n.ns, seg_id),
+          off: e.offset.to_int(),
+          len: e.length.to_int(),
+        })
       }
       None => {
         legacy_pos.push(i)

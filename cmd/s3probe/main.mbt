@@ -191,25 +191,17 @@ pub impl @store.ObjectStore for ProbeStore with put(self, key, bs) {
 }
 
 ///|
-pub impl @store.ObjectStore for ProbeStore with put_if_match(
-  self,
-  key,
-  expected,
-  bs
-) {
+pub impl @store.ObjectStore for ProbeStore with put_if_match(self, key, expected : @store.Expected, bs) {
   self.cum.puts += 1
-  @s3client.S3Client::put_if_match(self.inner, key, bs, expected)
+  @s3client.S3Client::conditional_put(self.inner, key, bs, expected.0)
 }
 
 ///|
-pub impl @store.ObjectStore for ProbeStore with get_range(
-  self,
-  key,
-  offset,
-  len
-) {
+pub impl @store.ObjectStore for ProbeStore with get_range(self, key, br : @store.ByteRange) {
+  let offset = br.off
+  let len = br.len
   self.note_get(key)
-  @s3client.S3Client::get_range(self.inner, key, offset, len)
+  @s3client.S3Client::fetch_range(self.inner, key, offset, len)
 }
 
 ///|
@@ -417,7 +409,7 @@ async fn run() -> Unit {
     None => raise @core.NotFound(k)
   }
   println("  put/get: \{got.length()} bytes")
-  let part = match store.get_range(k, 0, 5) {
+  let part = match store.get_range(k, @store.ByteRange::{ off: 0, len: 5 }) {
     Some(v) => v
     None => raise @core.NotFound(k)
   }
@@ -431,13 +423,13 @@ async fn run() -> Unit {
   }
   ts.sort()
   println("  GET latency p50=\{ts[10]}µs p99=\{ts[19]}µs")
-  let cas_new = store.put_if_match("\{ns}/cas.txt", None, b"v1")
+  let cas_new = store.put_if_match("\{ns}/cas.txt", @store.Expected(None), b"v1")
   let ver = match store.head_version("\{ns}/cas.txt") {
     Some(v) => v
     None => "missing"
   }
-  let cas_ok = store.put_if_match("\{ns}/cas.txt", Some(ver), b"v2")
-  let cas_stale = store.put_if_match("\{ns}/cas.txt", Some(ver), b"v3")
+  let cas_ok = store.put_if_match("\{ns}/cas.txt", @store.Expected(Some(ver)), b"v2")
+  let cas_stale = store.put_if_match("\{ns}/cas.txt", @store.Expected(Some(ver)), b"v3")
   println(
     "  CAS: create=\{cas_new} update=\{cas_ok} stale=\{cas_stale} ver=\{ver}",
   )

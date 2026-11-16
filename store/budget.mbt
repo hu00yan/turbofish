@@ -682,9 +682,10 @@ pub impl[S : ObjectStore] ObjectStore for BudgetStore[S] with fn put(
 pub impl[S : ObjectStore] ObjectStore for BudgetStore[S] with fn put_if_match(
   self : BudgetStore[S],
   key : String,
-  expected : String?,
+  e : Expected,
   value : Bytes,
 ) -> Bool {
+  let Expected(expected) = e
   self.tracker.record_put(value.length())
   if self.budget.max_puts >= 0 && self.tracker.puts > self.budget.max_puts {
     self.tracker.record_violation(
@@ -697,23 +698,24 @@ pub impl[S : ObjectStore] ObjectStore for BudgetStore[S] with fn put_if_match(
       "I/O Budget Exceeded: bytes_written limit=\{self.budget.max_bytes_written}, actual=\{self.tracker.bytes_written}",
     )
   }
-  self.store.put_if_match(key, expected, value)
+  self.store.put_if_match(key, Expected(expected), value)
 }
 
 ///|
 pub impl[S : ObjectStore] ObjectStore for BudgetStore[S] with fn get_range(
   self : BudgetStore[S],
   key : String,
-  offset : Int,
-  len : Int,
+  br : ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   self.tracker.record_get(0)
   if self.budget.max_gets >= 0 && self.tracker.gets > self.budget.max_gets {
     self.tracker.record_violation(
       "I/O Budget Exceeded: gets limit=\{self.budget.max_gets}, actual=\{self.tracker.gets}",
     )
   }
-  let res = self.store.get_range(key, offset, len)
+  let res = self.store.get_range(key, ByteRange::{ off: offset, len: len })
   match res {
     Some(bs) => {
       self.tracker.record_read_bytes(bs.length())
@@ -788,11 +790,11 @@ pub impl[S : ObjectStore] BatchStore for BudgetStore[S] with fn get_many(
 ///|
 pub impl[S : ObjectStore] BatchStore for BudgetStore[S] with fn get_range_many(
   self : BudgetStore[S],
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[KeyRange],
 ) -> Array[Bytes?] {
   let out : Array[Bytes?] = []
   for r in ranges {
-    out.push(ObjectStore::get_range(self, r.0, r.1, r.2))
+    out.push(ObjectStore::get_range(self, r.key, ByteRange::{ off: r.off, len: r.len }))
   }
   out
 }
@@ -819,20 +821,18 @@ pub async fn[S : ObjectStore] BudgetStore::put(
 pub async fn[S : ObjectStore] BudgetStore::put_if_match(
   self : BudgetStore[S],
   key : String,
-  expected : String?,
+  e : Expected,
   value : Bytes,
 ) -> Bool {
-  ObjectStore::put_if_match(self, key, expected, value)
+  let Expected(expected) = e
+  ObjectStore::put_if_match(self, key, Expected(expected), value)
 }
 
 ///|
-pub async fn[S : ObjectStore] BudgetStore::get_range(
-  self : BudgetStore[S],
-  key : String,
-  offset : Int,
-  len : Int,
-) -> Bytes? {
-  ObjectStore::get_range(self, key, offset, len)
+pub async fn[S : ObjectStore] BudgetStore::get_range(self : BudgetStore[S], key : String, br : ByteRange) -> Bytes? {
+  let offset = br.off
+  let len = br.len
+  ObjectStore::get_range(self, key, ByteRange::{ off: offset, len: len })
 }
 
 ///|
@@ -878,7 +878,7 @@ pub async fn[S : ObjectStore] BudgetStore::put_many(
 ///|
 pub async fn[S : ObjectStore] BudgetStore::get_range_many(
   self : BudgetStore[S],
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[KeyRange],
 ) -> Array[Bytes?] {
   BatchStore::get_range_many(self, ranges)
 }
@@ -914,11 +914,12 @@ pub async fn[S : ObjectStore] BudgetStore::put_checked(
 pub async fn[S : ObjectStore] BudgetStore::put_if_match_checked(
   self : BudgetStore[S],
   key : String,
-  expected : String?,
+  e : Expected,
   value : Bytes,
 ) -> Bool {
+  let Expected(expected) = e
   let prev_violations = self.tracker.violations.length()
-  let res = ObjectStore::put_if_match(self, key, expected, value)
+  let res = ObjectStore::put_if_match(self, key, Expected(expected), value)
   if self.tracker.violations.length() > prev_violations {
     raise @core.Corrupt(self.tracker.violations[prev_violations])
   }
@@ -929,11 +930,12 @@ pub async fn[S : ObjectStore] BudgetStore::put_if_match_checked(
 pub async fn[S : ObjectStore] BudgetStore::get_range_checked(
   self : BudgetStore[S],
   key : String,
-  offset : Int,
-  len : Int,
+  br : ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   let prev_violations = self.tracker.violations.length()
-  let res = ObjectStore::get_range(self, key, offset, len)
+  let res = ObjectStore::get_range(self, key, ByteRange::{ off: offset, len: len })
   if self.tracker.violations.length() > prev_violations {
     raise @core.Corrupt(self.tracker.violations[prev_violations])
   }

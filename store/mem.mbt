@@ -167,9 +167,10 @@ pub impl ObjectStore for MemStore with fn put(
 pub impl ObjectStore for MemStore with fn put_if_match(
   self : MemStore,
   key : String,
-  expected : String?,
+  e : Expected,
   value : Bytes,
 ) -> Bool {
+  let Expected(expected) = e
   let current = match self.versions.get(key) {
     Some(v) => Some(version_string(v))
     None => None
@@ -193,9 +194,10 @@ pub impl ObjectStore for MemStore with fn put_if_match(
 pub impl ObjectStore for MemStore with fn get_range(
   self : MemStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   self.ranged_gets += 1
   match self.data.get(key) {
     Some(value) => {

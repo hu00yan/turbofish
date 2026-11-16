@@ -27,7 +27,7 @@ async fn[S : @store.ObjectStore] tget_range(
   off : Int,
   len : Int,
 ) -> Bytes? {
-  s.get_range(key, off, len)
+  s.get_range(key, @store.ByteRange::{ off: off, len: len })
 }
 
 ///|

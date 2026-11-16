@@ -114,11 +114,13 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn get_many(
 /// 真实批量范围读：len <= 0 的项用 HEAD（与单键 get_range 一致）。
 pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn get_range_many(
   self : S3Store[T],
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[@store.KeyRange],
 ) -> Array[Bytes?] {
   let reqs : Array[SignedRequest] = Array(capacity=ranges.length())
   for r in ranges {
-    let (key, offset, len) = r
+    let key = r.key
+    let offset = r.off
+    let len = r.len
     if len <= 0 {
       reqs.push(self.build_head_object(key))
     } else {
@@ -130,7 +132,9 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn get_range_
   let results = self.do_many(reqs)
   let out : Array[Bytes?] = Array(capacity=ranges.length())
   for i in 0..<ranges.length() {
-    let (key, offset, len) = ranges[i]
+    let key = ranges[i].key
+    let offset = ranges[i].off
+    let len = ranges[i].len
     out.push(self.finish_get_range(key, offset, len, results[i]))
   }
   out

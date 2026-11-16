@@ -51,7 +51,7 @@ pub async fn[S : @store.ObjectStore] read_slab_index_from_start(
     Some(l) => l
     None => 1024
   }
-  match store.get_range(key, 0, plen) {
+  match store.get_range(key, @store.ByteRange::{ off: 0, len: plen }) {
     Some(bs) => {
       let (_ver, index) = @format.decode_slab_index_from_header_bytes(bs)
       index
@@ -74,7 +74,7 @@ pub async fn[S : @store.ObjectStore] read_slab_index_from_tail(
     Some(l) => l
     None => if size_bytes < 1024 { size_bytes } else { 1024 }
   }
-  match store.get_range(key, size_bytes - tlen, tlen) {
+  match store.get_range(key, @store.ByteRange::{ off: size_bytes - tlen, len: tlen }) {
     Some(tail_bs) =>
       @format.decode_slab_index_from_tail_bytes(tail_bs, size_bytes)
     None => raise @core.NotFound(key)
@@ -94,7 +94,7 @@ pub async fn[S : @store.ObjectStore] read_slab_index(
 ) -> @format.SlabIndex {
   let key = segment_slab_key(ns, seg_id)
   let prefetch_len = if size_bytes < 1024 { size_bytes } else { 1024 }
-  match store.get_range(key, 0, prefetch_len) {
+  match store.get_range(key, @store.ByteRange::{ off: 0, len: prefetch_len }) {
     Some(hdr_bs) => {
       let (_ver, index_offset) = @format.decode_slab_header(hdr_bs)
       let off = index_offset.to_int()
@@ -119,7 +119,7 @@ pub async fn[S : @store.ObjectStore] read_slab_component(
   let key = segment_slab_key(ns, seg_id)
   let off = entry.offset.to_int()
   let len = entry.length.to_int()
-  match store.get_range(key, off, len) {
+  match store.get_range(key, @store.ByteRange::{ off: off, len: len }) {
     Some(bs) => bs
     None => raise @core.NotFound("\{key} range [\{off}, \{off + len})")
   }
@@ -188,7 +188,7 @@ pub async fn[S : @store.ObjectStore] read_slab_fts_postings_range(
   }
   let key = segment_slab_key(ns, seg_id)
   let abs_off = entry.offset.to_int() + 16 + term_offset
-  match store.get_range(key, abs_off, term_size) {
+  match store.get_range(key, @store.ByteRange::{ off: abs_off, len: term_size }) {
     Some(bs) => bs
     None =>
       raise @core.NotFound(

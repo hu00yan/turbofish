@@ -477,9 +477,10 @@ pub impl @store.ObjectStore for SimStore with fn put(
 pub impl @store.ObjectStore for SimStore with fn put_if_match(
   self : SimStore,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
+  let @store.Expected(expected) = e
   self.op_count += 1
   self.puts += 1
   // 真 S3 条件写：无论 CAS 成败都是一次 PUT 请求（延迟 + 费用）。
@@ -515,9 +516,10 @@ pub impl @store.ObjectStore for SimStore with fn put_if_match(
 pub impl @store.ObjectStore for SimStore with fn get_range(
   self : SimStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   self.op_count += 1
   if self.is_resident(@store.classify_key(key)) {
     // 内存档范围读：对象整体在内存，区间拷贝，固定 mem_us，不打 S3。

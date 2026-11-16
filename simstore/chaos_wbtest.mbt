@@ -33,7 +33,7 @@ async test "DST Chaos: passthrough healthy operations with virtual latency" {
   assert_eq(store.virtual_time_us(), 1000.0)
 
   // 3. get_range
-  let r = store.get_range("key1", 0, 5)
+  let r = store.get_range("key1", @store.ByteRange::{ off: 0, len: 5 })
   assert_eq(r, Some(b"hello"))
   assert_eq(store.virtual_time_us(), 1500.0)
 
@@ -124,7 +124,7 @@ async test "DST Chaos: S3 412 PreconditionFailed CAS conflict and retry resilien
   store.set_base_latency(50.0)
 
   // 初始化 head
-  assert_eq(store.put_if_match("ns/_head_ptr", None, b"manifest-v1"), true)
+  assert_eq(store.put_if_match("ns/_head_ptr", @store.Expected(None), b"manifest-v1"), true)
   let v1 = store.head_version("ns/_head_ptr")
 
   // 注入 412 冲突，前 2 次 CAS 尝试必定失败
@@ -235,7 +235,7 @@ async test "DST Chaos: partial truncated Range GET drops tail bytes and triggers
   store.inject_truncated_range(30, key_prefix="seg/", max_triggers=1)
 
   // 第 1 次读取：被截断为 70 字节
-  let truncated_read = store.get_range("seg/slab.bin", 0, 100)
+  let truncated_read = store.get_range("seg/slab.bin", @store.ByteRange::{ off: 0, len: 100 })
   assert_eq(truncated_read != None, true)
   let bytes_read = truncated_read.unwrap()
   assert_eq(bytes_read.length(), 70)
@@ -268,8 +268,8 @@ async test "DST Chaos: deterministic replay with identical seed" {
     s.put("ns/k2", b"val2")
     let _ = s.get("ns/k1")
     let _ = s.get("ns/k2")
-    let _ = s.get_range("ns/k1", 0, 2)
-    let _ = s.put_if_match("ns/head", None, b"h1")
+    let _ = s.get_range("ns/k1", @store.ByteRange::{ off: 0, len: 2 })
+    let _ = s.put_if_match("ns/head", @store.Expected(None), b"h1")
     let v = s.head_version("ns/head")
     let _ = s.put_if_match("ns/head", v, b"h2")
     let _ = s.list("ns/")

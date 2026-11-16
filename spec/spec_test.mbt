@@ -276,7 +276,7 @@ test "formal spec: safety 2 dual-write crash consistency and no dangling pointer
   )
   match res_c4 {
     @spec.CommitOutcome::CommitRejected(_) => ()
-    _ => fail("Expected rejection on aborted CAS upload")
+    _ => fail("@store.Expected rejection on aborted CAS upload")
   }
   let branch_after_c4 = catalog.branches.get("main").unwrap()
   assert_eq(branch_after_c4.head_seq, 1UL) // head never advanced!

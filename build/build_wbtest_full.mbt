@@ -66,9 +66,10 @@ impl @store.ObjectStore for WbStore with fn put(
 impl @store.ObjectStore for WbStore with fn put_if_match(
   self : WbStore,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
+  let @store.Expected(expected) = e
   if !self.cas_enabled {
     return false
   }
@@ -93,9 +94,10 @@ impl @store.ObjectStore for WbStore with fn put_if_match(
 impl @store.ObjectStore for WbStore with fn get_range(
   self : WbStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   match self.data.get(key) {
     Some(value) => {
       let lo = if offset < 0 { 0 } else { offset }
@@ -916,7 +918,7 @@ async test "CAS conflict: stale writer loses, build reports CommitConflict" {
   }
   // 直接 CAS 也应被拒
   let ns_key = "b1cas/_meta/namespace.json"
-  assert_eq(store.put_if_match(ns_key, Some(h1), b"x"), false)
+  assert_eq(store.put_if_match(ns_key, @store.Expected(Some(h1)), b"x"), false)
 }
 
 ///|
@@ -1653,20 +1655,22 @@ impl @store.ObjectStore for ForkStore with fn put(
 impl @store.ObjectStore for ForkStore with fn put_if_match(
   self : ForkStore,
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
-  self.inner.put_if_match(key, expected, value)
+  let @store.Expected(expected) = e
+  self.inner.put_if_match(key, @store.Expected(expected), value)
 }
 
 ///|
 impl @store.ObjectStore for ForkStore with fn get_range(
   self : ForkStore,
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
-  self.inner.get_range(key, offset, len)
+  let offset = br.off
+  let len = br.len
+  self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
 }
 
 ///|

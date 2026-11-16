@@ -671,9 +671,10 @@ pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn pu
 pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn put_if_match(
   self : ChaosStore[S],
   key : String,
-  expected : String?,
+  e : @store.Expected,
   value : Bytes,
 ) -> Bool {
+  let @store.Expected(expected) = e
   let op = OpPutIfMatch(key, expected, value.length())
   let fault = self.evaluate_fault("PUT_IF_MATCH", key)
   match fault {
@@ -700,19 +701,19 @@ pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn pu
     }
     Some(LatencySpike(us)) => {
       self.virtual_time_us += self.base_latency_us
-      let ok = self.inner.put_if_match(key, expected, value)
+      let ok = self.inner.put_if_match(key, @store.Expected(expected), value)
       self.record_trace(op, fault, ok, "CAS=\{ok} [spike +\{us}us]")
       ok
     }
     Some(TruncatedRangeGet(_)) => {
       self.virtual_time_us += self.base_latency_us
-      let ok = self.inner.put_if_match(key, expected, value)
+      let ok = self.inner.put_if_match(key, @store.Expected(expected), value)
       self.record_trace(op, None, ok, "CAS=\{ok}")
       ok
     }
     None => {
       self.virtual_time_us += self.base_latency_us
-      let ok = self.inner.put_if_match(key, expected, value)
+      let ok = self.inner.put_if_match(key, @store.Expected(expected), value)
       self.record_trace(op, None, ok, "CAS=\{ok}")
       ok
     }
@@ -723,9 +724,10 @@ pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn pu
 pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn get_range(
   self : ChaosStore[S],
   key : String,
-  offset : Int,
-  len : Int,
+  br : @store.ByteRange,
 ) -> Bytes? {
+  let offset = br.off
+  let len = br.len
   let op = OpGetRange(key, offset, len)
   let fault = self.evaluate_fault("GET_RANGE", key)
   match fault {
@@ -747,7 +749,7 @@ pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn ge
     }
     Some(TruncatedRangeGet(drop_bytes)) => {
       self.virtual_time_us += self.base_latency_us
-      let res = self.inner.get_range(key, offset, len)
+      let res = self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
       match res {
         Some(payload) => {
           let orig_len = payload.length()
@@ -777,7 +779,7 @@ pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn ge
     }
     Some(LatencySpike(us)) => {
       self.virtual_time_us += self.base_latency_us
-      let res = self.inner.get_range(key, offset, len)
+      let res = self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
       let (succ, desc) = match res {
         Some(bs) => (true, "Some(\{bs.length()}B)")
         None => (false, "None")
@@ -787,7 +789,7 @@ pub impl[S : @store.ObjectStore] @store.ObjectStore for ChaosStore[S] with fn ge
     }
     None => {
       self.virtual_time_us += self.base_latency_us
-      let res = self.inner.get_range(key, offset, len)
+      let res = self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
       let (succ, desc) = match res {
         Some(bs) => (true, "Some(\{bs.length()}B)")
         None => (false, "None")
@@ -979,7 +981,7 @@ pub async fn[S : @store.ObjectStore] ChaosStore::get_range_or_raise(
   offset : Int,
   len : Int,
 ) -> Bytes {
-  match self.get_range(key, offset, len) {
+  match self.get_range(key, @store.ByteRange::{ off: offset, len: len }) {
     Some(b) => {
       if b.length() < len {
         raise @core.Truncated(
@@ -1020,7 +1022,7 @@ pub async fn[S : @store.ObjectStore] ChaosStore::retry_get_range(
   max_attempts : Int,
 ) -> Bytes? {
   for _ in 0..<max_attempts {
-    match self.get_range(key, offset, len) {
+    match self.get_range(key, @store.ByteRange::{ off: offset, len: len }) {
       Some(v) => if v.length() >= len { return Some(v) }
       None =>
         match self.last_injected_fault {

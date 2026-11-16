@@ -20,7 +20,7 @@ async fn drive_mixed_ops(s : SimStore) -> Unit {
   s.put("ns/_segments/seg0/fts/postings.bin", Bytes::make(70000, b'\x06'))
   s.cold()
   let _ = s.get("ns/_segments/seg0/rows/id.bin")
-  let _ = s.get_range("ns/_segments/seg0/fts/postings.bin", 16, 1000)
+  let _ = s.get_range("ns/_segments/seg0/fts/postings.bin", @store.ByteRange::{ off: 16, len: 1000 })
   let _ = s.get("ns/_meta/namespace.json")
   let _ = s.list("ns/_segments/")
   s.delete("ns/_segments/seg0/rows/id.bin")
@@ -59,7 +59,7 @@ async test "billing exact: 1000 PUTs = $0.005; CAS failure also billed" {
   // CAS 失败也计一次 PUT 费（真 S3 条件写失败也是一次请求）
   s.reset_cost()
   assert_eq(
-    s.put_if_match("ns/_segments/seg0/rows/id.bin", Some("v999"), b"x"),
+    s.put_if_match("ns/_segments/seg0/rows/id.bin", @store.Expected(Some("v999")), b"x"),
     false,
   )
   let c2 = s.cost()
@@ -154,7 +154,7 @@ async test "three-tier: resident mem_us exact, cold read, NVMe warm, cold(), pri
   assert_eq(c0m.s3_gets, 0)
   // resident get_range 同样只花 mem_us
   s.reset_cost()
-  let _ = s.get_range("ns/_meta/namespace.json", 0, 2)
+  let _ = s.get_range("ns/_meta/namespace.json", @store.ByteRange::{ off: 0, len: 2 })
   assert_eq(s.cost().total_latency_us, 2.0)
   assert_eq(s.cost().s3_gets, 0)
   // —— 第 3 档：S3 冷读 ——
@@ -231,7 +231,7 @@ async test "get_range: cold range billed once with range-length bytes, repeat hi
   s.put(key, Bytes::make(1000, b'\x09'))
   s.cold()
   s.reset_cost()
-  let p1 = s.get_range(key, 100, 50)
+  let p1 = s.get_range(key, @store.ByteRange::{ off: 100, len: 50 })
   match p1 {
     Some(bytes) => {
       assert_eq(bytes.length(), 50)
@@ -244,14 +244,14 @@ async test "get_range: cold range billed once with range-length bytes, repeat hi
   assert_eq(c1.bytes_s3_read, 50) // bytes 口径 = 区间长度
   assert_eq(abs_f64(c1.bill_get - 0.0004 / 1000.0) < 1.0e-15, true)
   // 同区间再读 → ranges 命中，无 GET 费
-  let _ = s.get_range(key, 100, 50)
+  let _ = s.get_range(key, @store.ByteRange::{ off: 100, len: 50 })
   let c2 = s.cost()
   assert_eq(c2.s3_gets, 1)
   assert_eq(c2.bill_get, c1.bill_get)
   assert_eq(c2.nvme_hits, 1)
   assert_eq(c2.bytes_nvme_read, 50)
   // 未覆盖的新区间 → 又是冷读，再登记
-  let _ = s.get_range(key, 500, 60)
+  let _ = s.get_range(key, @store.ByteRange::{ off: 500, len: 60 })
   let c3 = s.cost()
   assert_eq(c3.s3_gets, 2)
   assert_eq(c3.bytes_s3_read, 110)
@@ -271,16 +271,16 @@ async test "get_range: cold range billed once with range-length bytes, repeat hi
 async test "put_if_match CAS semantics match MemStore" {
   let s = SimStore::new(SimConfig::aws_default(8U))
   // 期望不存在时才能写入
-  assert_eq(s.put_if_match("head", None, b"v1"), true)
+  assert_eq(s.put_if_match("head", @store.Expected(None), b"v1"), true)
   // 已存在，期望 None → 冲突
-  assert_eq(s.put_if_match("head", None, b"v2"), false)
+  assert_eq(s.put_if_match("head", @store.Expected(None), b"v2"), false)
   // 错误版本 → 冲突
-  assert_eq(s.put_if_match("head", Some("v9"), b"v3"), false)
+  assert_eq(s.put_if_match("head", @store.Expected(Some("v9")), b"v3"), false)
   assert_eq(s.get("head"), Some(b"v1"))
   // 正确版本 → 成功
   let cur = s.head_version("head")
   match cur {
-    Some(v) => assert_eq(s.put_if_match("head", Some(v), b"v4"), true)
+    Some(v) => assert_eq(s.put_if_match("head", @store.Expected(Some(v)), b"v4"), true)
     None => fail("expected version")
   }
   assert_eq(s.get("head"), Some(b"v4"))
@@ -499,7 +499,7 @@ async test "resident disabled: _meta/ falls through to S3 (s3_gets grows)" {
   assert_eq(s.cost().s3_gets, 2)
   // get_range 同样穿透（cold 后无 NVMe/区间缓存）
   s.cold()
-  let _ = s.get_range("ns/_meta/namespace.json", 0, 2)
+  let _ = s.get_range("ns/_meta/namespace.json", @store.ByteRange::{ off: 0, len: 2 })
   assert_eq(s.cost().s3_gets, 3)
   // 重新打开恢复内存档
   s.set_resident_enabled(true)

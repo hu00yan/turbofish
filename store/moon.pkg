@@ -12,5 +12,6 @@ options(
   targets: {
     "mem_wbtest.mbt": [ "native", "llvm" ],
     "budget_wbtest.mbt": [ "native", "llvm" ],
+    "txn_wbtest.mbt": [ "native", "llvm" ],
   },
 )

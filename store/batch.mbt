@@ -15,7 +15,7 @@
 /// 收敛到单一 wrapper，未来若需要错误通道再替换为 BatchResult。
 pub(open) trait BatchStore : ObjectStore {
   async fn get_many(Self, Array[String]) -> Array[Bytes?]
-  async fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?]
+  async fn get_range_many(Self, Array[KeyRange]) -> Array[Bytes?]
 }
 
 ///|
@@ -36,11 +36,11 @@ impl ObjectStore with fn get_many(
 ///|
 impl ObjectStore with fn get_range_many(
   self : Self,
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[KeyRange],
 ) -> Array[Bytes?] {
   let out : Array[Bytes?] = Array(capacity=ranges.length())
   for r in ranges {
-    out.push(self.get_range(r.0, r.1, r.2))
+    out.push(self.get_range(r.key, ByteRange::{ off: r.off, len: r.len }))
   }
   out
 }
@@ -59,14 +59,14 @@ pub impl BatchStore for MemStore with fn get_many(
 }
 
 ///|
-/// 顺序 fallback：逐项委托现有单键 get_range（元素为 (key, offset, len)）。
+/// 顺序 fallback：逐项委托现有单键 get_range（元素为 KeyRange）。
 pub impl BatchStore for MemStore with fn get_range_many(
   self : MemStore,
-  ranges : Array[(String, Int, Int)],
+  ranges : Array[KeyRange],
 ) -> Array[Bytes?] {
   let out : Array[Bytes?] = Array()
   for r in ranges {
-    out.push(self.get_range(r.0, r.1, r.2))
+    out.push(self.get_range(r.key, ByteRange::{ off: r.off, len: r.len }))
   }
   out
 }

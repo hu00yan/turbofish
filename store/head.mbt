@@ -121,7 +121,7 @@ pub async fn[S : ObjectStore] write_head(
 ) -> Unit {
   let key = head_key(ns, manifest_id)
   let payload = b""
-  if !store.put_if_match(key, None, payload) {
+  if !store.put_if_match(key, Expected(None), payload) {
     match store.get(key) {
       Some(_) => ()
       None => store.put(key, payload)

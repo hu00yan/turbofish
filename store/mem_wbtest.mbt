@@ -23,16 +23,16 @@ async test "put_get_list_delete" {
 async test "put_if_match CAS" {
   let s = MemStore::new()
   // 期望不存在时才能写入
-  assert_eq(s.put_if_match("head", None, b"v1"), true)
+  assert_eq(s.put_if_match("head", Expected(None), b"v1"), true)
   // 已存在，期望 None → 冲突
-  assert_eq(s.put_if_match("head", None, b"v2"), false)
+  assert_eq(s.put_if_match("head", Expected(None), b"v2"), false)
   // 错误版本 → 冲突
-  assert_eq(s.put_if_match("head", Some("v9"), b"v3"), false)
+  assert_eq(s.put_if_match("head", Expected(Some("v9")), b"v3"), false)
   assert_eq(s.get("head"), Some(b"v1"))
   // 正确版本 → 成功
   let cur = s.head_version("head")
   match cur {
-    Some(v) => assert_eq(s.put_if_match("head", Some(v), b"v4"), true)
+    Some(v) => assert_eq(s.put_if_match("head", Expected(Some(v)), b"v4"), true)
     None => fail("expected version")
   }
   assert_eq(s.get("head"), Some(b"v4"))
@@ -71,7 +71,7 @@ async test "get_range counts partial bytes" {
   s.put("ns/_segments/seg-01/fts/postings.bin", Bytes::make(500, b'\x07'))
   s.cold()
   s.reset_cost()
-  let part = s.get_range("ns/_segments/seg-01/fts/postings.bin", 100, 50)
+  let part = s.get_range("ns/_segments/seg-01/fts/postings.bin", ByteRange::{ off: 100, len: 50 })
   match part {
     Some(bytes) => {
       assert_eq(bytes.length(), 50)
@@ -83,7 +83,7 @@ async test "get_range counts partial bytes" {
   assert_eq(c.ranged_gets, 1)
   assert_eq(c.ranged_bytes, 50)
   // 同一区间再读 → 已预热，0 字节
-  let _ = s.get_range("ns/_segments/seg-01/fts/postings.bin", 100, 50)
+  let _ = s.get_range("ns/_segments/seg-01/fts/postings.bin", ByteRange::{ off: 100, len: 50 })
   let c2 = s.cost()
   assert_eq(c2.ranged_gets, 2)
   assert_eq(c2.ranged_bytes, 50)
@@ -161,15 +161,17 @@ async test "get_range_many 与逐个 get_range 逐位一致（含缺失 key）" 
   s1.reset_cost()
   s2.reset_cost()
   let ranges = [
-    ("ns/seg.bin", 5, 10),
-    ("ns/missing.bin", 0, 4),
-    ("ns/seg.bin", 45, 100),
+    KeyRange::{ key: "ns/seg.bin", off: 5, len: 10 },
+    KeyRange::{ key: "ns/missing.bin", off: 0, len: 4 },
+    KeyRange::{ key: "ns/seg.bin", off: 45, len: 100 },
   ]
   let batch = s1.get_range_many(ranges)
   assert_eq(batch.length(), ranges.length())
   for i in 0..<ranges.length() {
-    let (k, off, len) = ranges[i]
-    assert_eq(batch[i], s2.get_range(k, off, len))
+    let k = ranges[i].key
+    let off = ranges[i].off
+    let len = ranges[i].len
+    assert_eq(batch[i], s2.get_range(k, ByteRange::{ off: off, len: len }))
   }
   // None 保持在缺失下标；截短 / 缺失语义与单键一致
   assert_eq(batch[0], Some(data[5:15].to_owned()))

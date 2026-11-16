@@ -2,7 +2,7 @@
 //
 // query tokenize → 对 manifest.segments 每个 segment：
 //   seg meta.json（缓存，含 stats 预判）→ fts/dir.bin（缓存）→
-//   命中 term 用 store.get_range(postings.bin, offset=16+entry.offset, len=entry.size)
+//   命中 term 用 store.get_range(postings.bin, @store.ByteRange::{ off: offset=16+entry.offset, len: len=entry.size })
 //   拉局部 posting（16 = postings.bin 的 SPNDPOS1 头）→
 //   自写 delta-uvarint 解码（range 读回的字节没有 SPNDPOS1 头）→
 //   fts/doc_len.bin（缓存）→ okapi 打分（df/term/segment，N = segment.row_count，
@@ -755,17 +755,19 @@ async fn[S : @store.ObjectStore] seg_postings_slices(
     Some(index) => slab_entry_of(index, "fts/postings.bin")
     None => None
   }
-  let ranges : Array[(String, Int, Int)] = Array(capacity=matched.length())
+  let ranges : Array[@store.KeyRange] = Array(capacity=matched.length())
   for m in matched {
     let e = m.1
     let off = 16 + e.offset
     match entry {
       Some(en) =>
-        ranges.push(
-          (seg_slab_key(n.ns, seg_id), en.offset.to_int() + off, e.size),
-        )
+        ranges.push(@store.KeyRange::{
+          key: seg_slab_key(n.ns, seg_id),
+          off: en.offset.to_int() + off,
+          len: e.size,
+        })
       None =>
-        ranges.push((seg_legacy_key(n.ns, seg_id, "fts/postings.bin"), off, e.size))
+        ranges.push(@store.KeyRange::{ key: seg_legacy_key(n.ns, seg_id, "fts/postings.bin"), off: off, len: e.size })
     }
   }
   let results = @store.ObjectStore::get_range_many(n.store, ranges)

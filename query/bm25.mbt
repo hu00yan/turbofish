@@ -1034,6 +1034,105 @@ fn[S : @store.ObjectStore] bm25_segment(
 }
 
 ///|
+/// BM25 批量预读：段 meta、fts dir.bin、doc_len.bin。
+/// 只对“统计/Bloom 未剪枝且确实命中 term”的段预读，保持原有的早退语义；
+/// 已缓存的对象跳过，不绕过缓存。
+fn[S : @store.ObjectStore] bm25_prewarm_columns(
+  n : Namespace[S],
+  terms : Array[String],
+  filter : Filter?,
+) -> Unit raise @core.SpndError {
+  prewarm_seg_metas(n)
+  let nseg = n.manifest.segments.length()
+  // 1) 批量读取 dir.bin（仅缓存 miss 且未被段统计/ Bloom 剪枝的段）。
+  let dir_cs : Array[CachedSeg] = Array()
+  let dir_keys : Array[String] = Array()
+  for si in 0..<nseg {
+    let seg = n.manifest.segments[si]
+    let cs = match n.cache.get(seg.id) {
+      Some(c) => c
+      None => raise @core.Corrupt("bm25_prewarm: missing seg cache")
+    }
+    if !seg_may_match(cs, filter) {
+      continue
+    }
+    let bloom_may = match cs.bloom {
+      Some(bl) => {
+        let mut any = false
+        for t in terms {
+          if @format.bloom_may_contain(bl, t) {
+            any = true
+            break
+          }
+        }
+        any
+      }
+      None => true
+    }
+    if !bloom_may || cs.dir is Some(_) {
+      continue
+    }
+    dir_cs.push(cs)
+    dir_keys.push("\{n.ns}/_segments/\{seg.id}/fts/dir.bin")
+  }
+  if !dir_cs.is_empty() {
+    let results = @store.ObjectStore::get_many(n.store, dir_keys)
+    for i in 0..<dir_cs.length() {
+      let key = dir_keys[i]
+      let bs = match results[i] {
+        Some(b) => b
+        None => raise @core.NotFound(key)
+      }
+      dir_cs[i].dir = Some(@format.decode_fts_dir(bs))
+    }
+  }
+  // 2) 批量读取 doc_len.bin（仅确实有命中 term 且缓存 miss 的段）。
+  let dl_cs : Array[CachedSeg] = Array()
+  let dl_keys : Array[String] = Array()
+  for si in 0..<nseg {
+    let seg = n.manifest.segments[si]
+    let cs = match n.cache.get(seg.id) {
+      Some(c) => c
+      None => raise @core.Corrupt("bm25_prewarm: missing seg cache")
+    }
+    if !seg_may_match(cs, filter) || cs.doc_len is Some(_) {
+      continue
+    }
+    let entries = match cs.dir {
+      Some(d) => d
+      None => continue
+    }
+    let mut matched = false
+    for t in terms {
+      if find_entry_idx(entries, t) is Some(_) {
+        matched = true
+        break
+      }
+    }
+    if !matched {
+      continue
+    }
+    dl_cs.push(cs)
+    dl_keys.push("\{n.ns}/_segments/\{seg.id}/fts/doc_len.bin")
+  }
+  if !dl_cs.is_empty() {
+    let results = @store.ObjectStore::get_many(n.store, dl_keys)
+    for i in 0..<dl_cs.length() {
+      let key = dl_keys[i]
+      let bs = match results[i] {
+        Some(b) => b
+        None => raise @core.NotFound(key)
+      }
+      let a = match @format.decode_col(bs) {
+        @format.ColU32(x) => x
+        _ => raise @core.Corrupt("doc_len column dtype is not u32")
+      }
+      dl_cs[i].doc_len = Some(a)
+    }
+  }
+}
+
+///|
 /// BM25 检索实现（use_wand=false 用于正确性对照测试）。
 fn[S : @store.ObjectStore] bm25_search_impl(
   n : Namespace[S],
@@ -1055,6 +1154,7 @@ fn[S : @store.ObjectStore] bm25_search_impl(
   if terms.is_empty() || k <= 0 {
     return []
   }
+  bm25_prewarm_columns(n, terms, filter)
   let tomb = tombstones_of(n)
   let cands : Array[(Int, Int, Double)] = Array()
   for si in 0..<n.manifest.segments.length() {

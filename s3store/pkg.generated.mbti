@@ -69,6 +69,7 @@ pub struct MockS3Transport {
 }
 pub fn MockS3Transport::enqueue(Self, Int32, Array[(String, String)], Bytes) -> Unit
 pub fn MockS3Transport::execute(Self, String, String, Array[(String, String)], Bytes) -> (Int32, Array[(String, String)], Bytes)
+pub fn MockS3Transport::execute_many(Self, Array[(String, String, Array[(String, String)], Bytes)]) -> Array[(Int32, Array[(String, String)], Bytes)]
 pub fn MockS3Transport::new(String) -> Self
 pub fn MockS3Transport::seed(Self, String, Bytes) -> Unit
 pub fn MockS3Transport::set_conditional_writes_supported(Self, Bool) -> Unit
@@ -112,7 +113,9 @@ pub fn[T] S3Store::conditional_writes_supported(Self[T]) -> Bool
 pub fn[T : HttpTransport] S3Store::create_bucket(Self[T]) -> Bool
 pub fn[T : HttpTransport] S3Store::delete(Self[T], String) -> Unit
 pub fn[T : HttpTransport] S3Store::get(Self[T], String) -> Bytes?
+pub fn[T : HttpTransport] S3Store::get_many(Self[T], Array[String]) -> Array[Bytes?]
 pub fn[T : HttpTransport] S3Store::get_range(Self[T], String, Int32, Int32) -> Bytes?
+pub fn[T : HttpTransport] S3Store::get_range_many(Self[T], Array[(String, Int32, Int32)]) -> Array[Bytes?]
 pub fn[T : HttpTransport] S3Store::get_versioned_manifest(Self[T], String, String) -> Bytes?
 pub fn[T : HttpTransport] S3Store::head_version(Self[T], String) -> String?
 pub fn[T : HttpTransport] S3Store::list(Self[T], String) -> Array[String]
@@ -143,6 +146,7 @@ pub fn SignedRequest::to_repr(Self) -> @debug.Repr
 // Traits
 pub(open) trait HttpTransport {
   fn execute(Self, String, String, Array[(String, String)], Bytes) -> (Int32, Array[(String, String)], Bytes)
+  fn execute_many(Self, Array[(String, String, Array[(String, String)], Bytes)]) -> Array[(Int32, Array[(String, String)], Bytes)] = _
 }
 
 pub(open) trait LeaseCoordinator {

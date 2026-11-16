@@ -224,4 +224,6 @@ pub(open) trait ObjectStore {
   fn list(Self, String) -> Array[String]
   fn delete(Self, String) -> Unit
   fn head_version(Self, String) -> String?
+  fn get_many(Self, Array[String]) -> Array[Bytes?] = _
+  fn get_range_many(Self, Array[(String, Int32, Int32)]) -> Array[Bytes?] = _
 }

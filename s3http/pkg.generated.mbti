@@ -13,9 +13,12 @@ pub fn now_amz_date() -> String
 // Types and methods
 pub struct CurlTransport {
   version : Int32
+  mut max_inflight : Int32
 }
 pub fn CurlTransport::execute(Self, String, String, Array[(String, String)], Bytes) -> (Int32, Array[(String, String)], Bytes)
-pub fn CurlTransport::new() -> Self
+pub fn CurlTransport::execute_many(Self, Array[(String, String, Array[(String, String)], Bytes)]) -> Array[(Int32, Array[(String, String)], Bytes)]
+pub fn CurlTransport::new(max_inflight? : Int32) -> Self
+pub fn CurlTransport::set_max_inflight(Self, Int32) -> Unit
 pub impl @s3store.HttpTransport for CurlTransport
 
 // Type aliases

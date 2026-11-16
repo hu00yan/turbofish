@@ -1025,4 +1025,4 @@ pub fn SimStore::tpu_query_bill(self : SimStore) -> Double {
   tpu_scan_bill(self.bytes_logical_read)
 }
 
-pub extend SimStore with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete}
+pub extend SimStore with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete, get_many, get_range_many}

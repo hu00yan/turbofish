@@ -16,6 +16,13 @@ pub(open) trait ObjectStore {
   fn delete(Self, String) -> Unit
   /// 获取对象的当前版本/ETag（用于 CAS 条件写 put_if_match 的 expected 校验）
   fn head_version(Self, String) -> String?
+  ///
+  /// 批量整读。默认顺序调用 `get`，返回与输入同长同序；`None` 保持在原下标。
+  /// S3Store 覆盖为真实批量传输；BatchStore 保留为显式能力 trait。
+  fn get_many(Self, Array[String]) -> Array[Bytes?] = _
+  ///
+  /// 批量范围读。默认顺序调用 `get_range`，语义与单键完全一致。
+  fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?] = _
 }
 
 ///|

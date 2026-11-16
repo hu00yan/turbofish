@@ -19,6 +19,33 @@ pub(open) trait BatchStore : ObjectStore {
 }
 
 ///|
+/// ObjectStore 的默认批量实现：顺序委托单键 get / get_range。
+/// 这样所有既有 store（含 AnyStore、SimStore、自定义测试 store）无需改动即可
+/// 使用 query 的批量读路径；有真实批量能力的 store（S3Store）会覆盖这两个方法。
+impl ObjectStore with fn get_many(
+  self : Self,
+  keys : Array[String],
+) -> Array[Bytes?] {
+  let out : Array[Bytes?] = Array(capacity=keys.length())
+  for k in keys {
+    out.push(self.get(k))
+  }
+  out
+}
+
+///|
+impl ObjectStore with fn get_range_many(
+  self : Self,
+  ranges : Array[(String, Int, Int)],
+) -> Array[Bytes?] {
+  let out : Array[Bytes?] = Array(capacity=ranges.length())
+  for r in ranges {
+    out.push(self.get_range(r.0, r.1, r.2))
+  }
+  out
+}
+
+///|
 /// 顺序 fallback：逐项委托现有单键 get，计费 / 缓存 / 404 语义不变。
 pub impl BatchStore for MemStore with fn get_many(
   self : MemStore,

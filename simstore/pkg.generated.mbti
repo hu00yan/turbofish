@@ -74,8 +74,10 @@ pub fn[S] ChaosStore::dump_trace(Self[S]) -> String
 pub fn[S] ChaosStore::elapsed_virtual_ms(Self[S]) -> Double
 pub fn[S] ChaosStore::faults_injected(Self[S]) -> Int32
 pub fn[S : @store.ObjectStore] ChaosStore::get(Self[S], String) -> Bytes?
+pub fn[S : @store.ObjectStore] ChaosStore::get_many(Self[S], Array[String]) -> Array[Bytes?]
 pub fn[S : @store.ObjectStore] ChaosStore::get_or_raise(Self[S], String) -> Bytes raise @core.SpndError
 pub fn[S : @store.ObjectStore] ChaosStore::get_range(Self[S], String, Int32, Int32) -> Bytes?
+pub fn[S : @store.ObjectStore] ChaosStore::get_range_many(Self[S], Array[(String, Int32, Int32)]) -> Array[Bytes?]
 pub fn[S : @store.ObjectStore] ChaosStore::get_range_or_raise(Self[S], String, Int32, Int32) -> Bytes raise @core.SpndError
 pub fn[S] ChaosStore::get_trace(Self[S]) -> Array[ChaosTraceEvent]
 pub fn[S : @store.ObjectStore] ChaosStore::head_version(Self[S], String) -> String?
@@ -263,7 +265,9 @@ pub fn SimStore::evict_class(Self, String) -> Unit
 pub fn SimStore::evict_key(Self, String) -> Unit
 pub fn SimStore::evict_resident_classes(Self) -> Unit
 pub fn SimStore::get(Self, String) -> Bytes?
+pub fn SimStore::get_many(Self, Array[String]) -> Array[Bytes?]
 pub fn SimStore::get_range(Self, String, Int32, Int32) -> Bytes?
+pub fn SimStore::get_range_many(Self, Array[(String, Int32, Int32)]) -> Array[Bytes?]
 pub fn SimStore::head_version(Self, String) -> String?
 pub fn SimStore::is_resident_enabled(Self) -> Bool
 pub fn SimStore::list(Self, String) -> Array[String]

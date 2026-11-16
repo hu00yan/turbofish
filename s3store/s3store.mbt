@@ -21,6 +21,28 @@ pub(open) trait HttpTransport {
     headers : Array[(String, String)],
     body : Bytes,
   ) -> (Int, Array[(String, String)], Bytes)
+  ///
+  /// 批量传输。默认顺序 fallback（逐项 execute），保持长度/顺序与单发语义一致。
+  /// 真实 transport（CurlTransport）覆盖此方法用 libcurl multi 并发执行。
+  fn execute_many(
+    Self,
+    requests : Array[(String, String, Array[(String, String)], Bytes)],
+  ) -> Array[(Int, Array[(String, String)], Bytes)] = _
+}
+
+///|
+/// 默认批量实现：顺序调用单发 execute（缓存 / 计费 / 404 语义不变）。
+impl HttpTransport with fn execute_many(
+  self : Self,
+  requests : Array[(String, String, Array[(String, String)], Bytes)],
+) -> Array[(Int, Array[(String, String)], Bytes)] {
+  let out : Array[(Int, Array[(String, String)], Bytes)] = Array(
+    capacity=requests.length(),
+  )
+  for r in requests {
+    out.push(self.execute(r.0, r.1, r.2, r.3))
+  }
+  out
 }
 
 ///|
@@ -149,6 +171,21 @@ pub impl HttpTransport for MockS3Transport with fn execute(
     }
     _ => (405, [], Bytes::make(0, b'\x00'))
   }
+}
+
+///|
+/// Mock 的顺序批量 fallback：逐项调用 execute，记录顺序与单发完全一致。
+pub impl HttpTransport for MockS3Transport with fn execute_many(
+  self : MockS3Transport,
+  requests : Array[(String, String, Array[(String, String)], Bytes)],
+) -> Array[(Int, Array[(String, String)], Bytes)] {
+  let out : Array[(Int, Array[(String, String)], Bytes)] = Array(
+    capacity=requests.length(),
+  )
+  for r in requests {
+    out.push(self.execute(r.0, r.1, r.2, r.3))
+  }
+  out
 }
 
 ///|
@@ -817,13 +854,7 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn get(
   self : S3Store[T],
   key : String,
 ) -> Bytes? {
-  let (st, hs, body) = self.do_req(self.build_get_object(key, None))
-  if st == 200 {
-    self.cache_etag(key, st, hs)
-    Some(body)
-  } else {
-    None
-  }
+  self.finish_get(key, self.do_req(self.build_get_object(key, None)))
 }
 
 ///|
@@ -926,32 +957,21 @@ pub impl[T : HttpTransport] @store.ObjectStore for S3Store[T] with fn get_range(
   len : Int,
 ) -> Bytes? {
   if len <= 0 {
-    let (st, _, _) = self.do_req(self.build_head_object(key))
-    if st == 200 {
-      return Some(Bytes::make(0, b'\x00'))
-    }
-    return None
+    return self.finish_get_range(
+      key,
+      offset,
+      len,
+      self.do_req(self.build_head_object(key)),
+    )
   }
   let off = if offset < 0 { 0 } else { offset }
   let range = "bytes=\{off}-\{off + len - 1}"
-  let (st, hs, body) = self.do_req(self.build_get_object(key, Some(range)))
-  if st == 206 {
-    self.cache_etag(key, st, hs)
-    Some(body)
-  } else if st == 200 {
-    self.cache_etag(key, st, hs)
-    let lo = off
-    let hi = if off + len > body.length() { body.length() } else { off + len }
-    if hi <= lo {
-      Some(Bytes::make(0, b'\x00'))
-    } else {
-      Some(body[lo:hi].to_owned())
-    }
-  } else if st == 416 {
-    Some(Bytes::make(0, b'\x00'))
-  } else {
-    None
-  }
+  self.finish_get_range(
+    key,
+    offset,
+    len,
+    self.do_req(self.build_get_object(key, Some(range))),
+  )
 }
 
 ///|
@@ -1070,6 +1090,6 @@ fn xml_all_texts(xml : String, tag : String) -> Array[String] {
 }
 
 pub extend RecordedRequest with Debug::{to_repr}
-pub extend MockS3Transport with HttpTransport::{execute}
+pub extend MockS3Transport with HttpTransport::{execute, execute_many}
 pub extend MemLeaseCoordinator with LeaseCoordinator::{release, acquire}
-pub extend S3Store with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete}
+pub extend S3Store with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete, get_many, get_range_many}

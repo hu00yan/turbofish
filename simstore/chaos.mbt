@@ -956,6 +956,8 @@ pub extend ChaosStore with @store.ObjectStore::{
   list,
   delete,
   head_version,
+  get_many,
+  get_range_many,
 }
 
 ///|

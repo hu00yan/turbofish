@@ -1,7 +1,8 @@
 // cmd/serve 单元与集成白盒测试：
 // 1) 存储可插拔：fs:PATH、sim (SimStore) 与 AnyStore 委托验证；
-// 2) 后台 Compactor：条件唤醒策略 (L0 >= 4, tombstone >= 20%) 与 idle fallback；
-// 3) 查询富化：返回 payload contract 中的 text, category, ts, public。
+// 2) 写路径只有 build 一套；后台按脏 namespace 队列做 build 段合并；
+// 3) 查询富化：返回 payload contract 中的 text, category, ts, public；
+// 4) 内存 LRU 缓存上限与淘汰。
 
 ///|
 test "cmd/serve: AnyStore with SimStore pluggability" {
@@ -23,105 +24,319 @@ test "cmd/serve: AnyStore with SimStore pluggability" {
     @utf8.encode("init"),
   )
   assert_eq(cas_ok, true)
+
+  // 批量读必须与逐个 get 同长同序；缺失 key 保持 None 原下标。
+  @store.ObjectStore::put(store, "test/key2", @utf8.encode("value2"))
+  let keys : Array[String] = ["test/key2", "test/missing", "test/key1"]
+  let got = @store.ObjectStore::get_many(store, keys)
+  assert_eq(got.length(), 3)
+  assert_eq(@utf8.decode(got[0].unwrap().exact_view()) catch { _ => "" }, "value2")
+  assert_eq(got[1] is None, true)
+  assert_eq(@utf8.decode(got[2].unwrap().exact_view()) catch { _ => "" }, "value1")
 }
 
 ///|
-test "cmd/serve: In-process Compactor conditional wake-up & idle fallback" {
-  let sim_cfg = @simstore.SimConfig::aws_default(100U)
+test "cmd/serve: LRU caches evict by entry and weight caps" {
+  let cache : LruCache[Int] = LruCache::new(2, 0, fn(_v : Int) -> Int { 1 })
+  cache.set("a", 1)
+  cache.set("b", 2)
+  // 触达 a，使 b 成为最久未使用
+  assert_eq(cache.get("a"), Some(1))
+  cache.set("c", 3)
+  assert_eq(cache.length(), 2)
+  assert_eq(cache.get("b"), None)
+  assert_eq(cache.get("a"), Some(1))
+  assert_eq(cache.get("c"), Some(3))
+
+  // 权重上限：x=3 + y=3 超过 max_weight=5，淘汰 x
+  let weighted : LruCache[Int] = LruCache::new(
+    10,
+    5,
+    fn(v : Int) -> Int { v },
+  )
+  weighted.set("x", 3)
+  weighted.set("y", 3)
+  assert_eq(weighted.get("x"), None)
+  assert_eq(weighted.get("y"), Some(3))
+  assert_eq(weighted.total_weight, 3)
+}
+
+///|
+test "cmd/serve: namespace state has no write engine and reads stay on build segments" {
+  let sim_cfg = @simstore.SimConfig::aws_default(801U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
-  let ns = "test_serve_compactor"
+  let ns = "test_serve_build_only"
   let dim = 4
 
+  // 只读入口 / 状态创建不应访问 store，也不应初始化 mtree 写引擎。
   let state = get_or_create_ns_state(store, ns, dim)
+  assert_eq(state.query_ns is None, true)
+  assert_eq(sim.cost().s3_gets, 0)
 
-  // 1. 写入基线
-  let base_docs : Array[@core.Doc] = [
+  let cfg = @build.BuildConfig::single_copy(ns)
+  let docs : Array[@core.Doc] = [
     {
       id: 1UL,
-      text: "base doc 1",
-      vector: [0.1, 0.2, 0.3, 0.4],
-      category: "tech",
-      ts: 1000L,
+      text: "single build write path",
+      vector: [1.0, 0.0, 0.0, 0.0],
+      category: "build",
+      ts: 100L,
+      public: true,
+    },
+  ]
+  @build.ingest(store, { ..cfg, vector_dim: dim }, docs)
+  let head = match @store.read_head_pointer(store, ns) {
+    Some(h) => h
+    None => @store.read_head(store, ns, "")
+  }
+  state.update_after_write(store, ns, head)
+
+  let qn = state.get_query_ns(store, ns)
+  assert_eq(qn.manifest.id, head)
+  let hits = @query.bm25_search(qn, "build", 5, None)
+  assert_eq(hits.length(), 1)
+  assert_eq(hits[0].id, 1UL)
+  let attrs = lookup_doc_attrs(store, ns, qn, 1UL)
+  assert_eq(attrs.category, "build")
+  // 没有 mtree compact part 对象：写入只有 build 一套。
+  assert_eq(store.list("\{ns}/_parts/").length(), 0)
+
+  // 冷启动读另一个 namespace：同样不应产生 _parts。
+  let ns2 = "test_serve_build_only_read"
+  @build.ingest(store, { ..@build.BuildConfig::single_copy(ns2), vector_dim: dim }, [
+    {
+      id: 2UL,
+      text: "read only path",
+      vector: [0.0, 1.0, 0.0, 0.0],
+      category: "query",
+      ts: 200L,
+      public: true,
+    },
+  ])
+  let state2 = get_or_load_ns_state(store, ns2)
+  let qn2 = state2.get_query_ns(store, ns2)
+  assert_eq(@query.count_docs(qn2, None), 1)
+  assert_eq(store.list("\{ns2}/_parts/").length(), 0)
+
+  // patch / delete 也都收敛到 build 一套，不再产生 mtree 对象。
+  let patches : Array[RowPatch] = [
+    {
+      id: 1UL,
+      text: None,
+      category: Some("patched"),
+      ts: None,
+      public: None,
+    },
+  ]
+  let (patched, _) = patch_rows_core(store, ns, patches)
+  assert_eq(patched, 1)
+  assert_eq(store.list("\{ns}/_parts/").length(), 0)
+  let deleted = delete_by_filter_core(
+    store,
+    ns,
+    @query.Eq("category", @query.S("patched")),
+  )
+  assert_eq(deleted, 1)
+  assert_eq(store.list("\{ns}/_parts/").length(), 0)
+}
+
+///|
+test "cmd/serve: build segment compaction preserves query results" {
+  let sim_cfg = @simstore.SimConfig::aws_default(802U)
+  let sim = @simstore.SimStore::new(sim_cfg)
+  let store : AnyStore = Sim(sim)
+  let ns = "test_serve_compact_segments"
+  let dim = 4
+  let cfg = { ..@build.BuildConfig::single_copy(ns), vector_dim: dim, segment_rows: 1 }
+
+  let batch1 : Array[@core.Doc] = [
+    {
+      id: 10UL,
+      text: "alpha compact doc",
+      vector: [1.0, 0.0, 0.0, 0.0],
+      category: "alpha",
+      ts: 10L,
+      public: true,
+    },
+    {
+      id: 11UL,
+      text: "beta compact doc",
+      vector: [0.0, 1.0, 0.0, 0.0],
+      category: "beta",
+      ts: 11L,
+      public: false,
+    },
+  ]
+  @build.ingest(store, cfg, batch1)
+  let batch2 : Array[@core.Doc] = [
+    {
+      id: 12UL,
+      text: "gamma compact doc",
+      vector: [0.0, 0.0, 1.0, 0.0],
+      category: "gamma",
+      ts: 12L,
+      public: true,
+    },
+  ]
+  @build.ingest_delta_opts(store, cfg, batch2, 8, false)
+
+  let before = @query.open(store, ns)
+  assert_eq(before.manifest.segments.length() >= 2, true)
+  assert_eq(@query.count_docs(before, None), 3)
+  let hits_before = @query.bm25_search(before, "compact", 10, None)
+  assert_eq(hits_before.length(), 3)
+  let attrs_before = lookup_doc_attrs(store, ns, before, 11UL)
+
+  @build.compact(store, cfg, ns)
+  let after = @query.open(store, ns)
+  assert_eq(after.manifest.segments.length(), 1)
+  assert_eq(@query.count_docs(after, None), 3)
+  let hits_after = @query.bm25_search(after, "compact", 10, None)
+  assert_eq(hits_after.length(), 3)
+  let attrs_after = lookup_doc_attrs(store, ns, after, 11UL)
+  assert_eq(attrs_after.text, attrs_before.text)
+  assert_eq(attrs_after.category, attrs_before.category)
+  assert_eq(attrs_after.ts, attrs_before.ts)
+  assert_eq(attrs_after.public, attrs_before.public)
+}
+
+///|
+test "cmd/serve: compact prunes caches for merged-away segments" {
+  let sim_cfg = @simstore.SimConfig::aws_default(803U)
+  let sim = @simstore.SimStore::new(sim_cfg)
+  let store : AnyStore = Sim(sim)
+  let ns = "test_serve_compact_cache_prune"
+  let dim = 4
+  let cfg = { ..@build.BuildConfig::single_copy(ns), vector_dim: dim, segment_rows: 1 }
+  let batch1 : Array[@core.Doc] = [
+    {
+      id: 1UL,
+      text: "alpha",
+      vector: [1.0, 0.0, 0.0, 0.0],
+      category: "a",
+      ts: 1L,
+      public: true,
+    },
+  ]
+  let batch2 : Array[@core.Doc] = [
+    {
+      id: 2UL,
+      text: "beta",
+      vector: [0.0, 1.0, 0.0, 0.0],
+      category: "b",
+      ts: 2L,
+      public: true,
+    },
+  ]
+  @build.ingest(store, cfg, batch1)
+  @build.ingest_delta_opts(store, cfg, batch2, 8, false)
+  let state = get_or_load_ns_state(store, ns)
+  let before = state.get_query_ns(store, ns)
+  assert_eq(before.manifest.segments.length(), 2)
+  assert_eq(before.cache.length(), 2)
+  compact_namespace_state(store, state, ns)
+  let after = state.get_query_ns(store, ns)
+  assert_eq(after.manifest.segments.length(), 1)
+  assert_eq(after.cache.length(), 1)
+  assert_eq(after.cache.contains(after.manifest.segments[0].id), true)
+}
+
+///|
+test "cmd/serve: compact trigger uses segment/deleted/idle thresholds" {
+  let sim_cfg = @simstore.SimConfig::aws_default(803U)
+  let sim = @simstore.SimStore::new(sim_cfg)
+  let store : AnyStore = Sim(sim)
+  let state = get_or_create_ns_state(store, "test_serve_trigger", 4)
+  let settings : CompactSettings = {
+    interval_ms: 1000L,
+    max_per_tick: 8,
+    seg_threshold: 8,
+    delete_ratio: 0.2,
+    idle_ms: 30000L,
+    max_rows: 5000000,
+  }
+  state.last_write_ms = 1000L
+  state.manifest_num_docs = 100
+  state.live_segments = 9
+  assert_eq(should_compact(state, settings, 1000L), true)
+
+  state.live_segments = 2
+  state.manifest_deleted = 25
+  assert_eq(should_compact(state, settings, 1000L), true)
+
+  state.manifest_deleted = 0
+  assert_eq(should_compact(state, settings, 2000L), false)
+  assert_eq(should_compact(state, settings, 32000L), true)
+
+  // 只有 1 段：永远不需要合并。
+  state.live_segments = 1
+  assert_eq(should_compact(state, settings, 32000L), false)
+}
+
+///|
+test "cmd/serve: background compactor only processes dirty namespaces" {
+  reset_dirty_for_test()
+  let sim_cfg = @simstore.SimConfig::aws_default(804U)
+  let sim = @simstore.SimStore::new(sim_cfg)
+  let store : AnyStore = Sim(sim)
+  let ns = "test_serve_dirty_compact"
+  let dim = 4
+  let cfg = { ..@build.BuildConfig::single_copy(ns), vector_dim: dim, segment_rows: 1 }
+  let docs : Array[@core.Doc] = [
+    {
+      id: 1UL,
+      text: "dirty one",
+      vector: [1.0, 0.0, 0.0, 0.0],
+      category: "dirty",
+      ts: 1L,
       public: true,
     },
     {
       id: 2UL,
-      text: "base doc 2",
-      vector: [0.2, 0.3, 0.4, 0.5],
-      category: "news",
-      ts: 2000L,
-      public: false,
+      text: "dirty two",
+      vector: [0.0, 1.0, 0.0, 0.0],
+      category: "dirty",
+      ts: 2L,
+      public: true,
     },
-  ]
-  let _ = state.engine.append_base_part(base_docs)
-  state.engine.publish_manifest()
-  state.compactor.notify_mutation(1000L)
-
-  // L0 数量为 0，不应触发合并
-  let res0 = state.compactor.tick(1000L)
-  assert_eq(res0 is None, true)
-
-  // 2. 连续追加 4 个 L0 delta batch，达到 l0_threshold (4)
-  for b in 1..<=4 {
-    let delta_docs : Array[@core.Doc] = [
-      {
-        id: (10 + b).to_uint64(),
-        text: "delta doc \{b}",
-        vector: [0.1, 0.1, 0.1, 0.1],
-        category: "delta",
-        ts: (1000 + b).to_int64(),
-        public: true,
-      },
-    ]
-    let _ = state.engine.append_l0_delta_part(delta_docs)
-    state.engine.publish_manifest()
-  }
-
-  assert_eq(state.engine.get_manifest().l0_count(), 4)
-
-  // 3. 唤醒并驱动 tick：由于 L0 count == 4 >= 4，触发条件合并
-  state.compactor.notify_mutation(2000L)
-  let res_comp = state.compactor.tick(2000L)
-  assert_eq(res_comp is Some(_), true)
-  assert_eq(state.engine.get_manifest().l0_count(), 0)
-  assert_eq(state.engine.get_manifest().parts.length(), 1)
-  assert_eq(state.engine.get_manifest().parts[0].level, 1)
-
-  // 4. 测试墓碑比例 >= 20% 唤醒
-  // 当前基线段有 6 行 (2 base + 4 delta)。软删除 2 行 (2/6 = 33.3% >= 20%)
-  state.engine.soft_delete([1UL, 2UL])
-  state.engine.publish_manifest()
-  state.compactor.notify_mutation(3000L)
-  let res_tomb = state.compactor.tick(3000L)
-  assert_eq(res_tomb is Some(_), true)
-  assert_eq(res_tomb.unwrap().tombstones_purged, 2)
-  assert_eq(state.engine.get_manifest().tombstones.length(), 0)
-
-  // 5. 测试 idle fallback 超时回退
-  // 追加 1 个小 delta (1 < 4)
-  let idle_delta : Array[@core.Doc] = [
     {
-      id: 99UL,
-      text: "idle delta",
-      vector: [0.5, 0.5, 0.5, 0.5],
-      category: "idle",
-      ts: 5000L,
+      id: 3UL,
+      text: "dirty three",
+      vector: [0.0, 0.0, 1.0, 0.0],
+      category: "dirty",
+      ts: 3L,
       public: true,
     },
   ]
-  let _ = state.engine.append_l0_delta_part(idle_delta)
-  state.engine.publish_manifest()
-  state.compactor.notify_mutation(10000L)
+  @build.ingest(store, cfg, docs)
 
-  // 未到 idle_fallback_ms (5000ms)，例如只过 1000ms：不触发
-  let res_early = state.compactor.tick(11000L)
-  assert_eq(res_early is None, true)
+  let state = get_or_create_ns_state(store, ns, dim)
+  let head = match @store.read_head_pointer(store, ns) {
+    Some(h) => h
+    None => @store.read_head(store, ns, "")
+  }
+  state.update_after_write(store, ns, head)
+  assert_eq(state.live_segments, 3)
+  mark_namespace_dirty(ns)
 
-  // 超过 idle_fallback_ms (过 6000ms)：触发 idle fallback 合并
-  let res_idle = state.compactor.tick(17000L)
-  assert_eq(res_idle is Some(_), true)
-  assert_eq(state.engine.get_manifest().l0_count(), 0)
+  let settings : CompactSettings = {
+    interval_ms: 1000L,
+    max_per_tick: 8,
+    seg_threshold: 2,
+    delete_ratio: 0.2,
+    idle_ms: 30000L,
+    max_rows: 5000000,
+  }
+  let processed = compact_dirty_once(store, @async.now(), settings)
+  assert_eq(processed, 1)
+  assert_eq(state.live_segments, 1)
+  let after = @query.open(store, ns)
+  assert_eq(@query.count_docs(after, None), 3)
+  assert_eq(@query.bm25_search(after, "dirty", 10, None).length(), 3)
+  // 队列已空：不再扫描所有 active_ns。
+  assert_eq(compact_dirty_once(store, @async.now(), settings), 0)
+  reset_dirty_for_test()
 }
 
 ///|
@@ -384,6 +599,27 @@ test "cmd/serve: delete_by_filter write path" {
   let qres = @query.bm25_search(n_after, "doc", 10, None)
   assert_eq(qres.length(), 1)
   assert_eq(qres[0].id, 3UL)
+
+  // tombstone 行仍在 segment 里，但 lookup 必须返回 None，不能被 patch 复活。
+  assert_eq(lookup_doc_full(store, ns, n_after, 1UL) is None, true)
+  assert_eq(lookup_doc_attrs(store, ns, n_after, 1UL).text, "")
+  let patch_deleted : Array[RowPatch] = [
+    {
+      id: 1UL,
+      text: Some("revived"),
+      category: None,
+      ts: None,
+      public: None,
+    },
+  ]
+  let revived = try {
+    let _ = patch_rows_core(store, ns, patch_deleted)
+    false
+  } catch {
+    @core.NotFound(_) => true
+    _ => false
+  }
+  assert_eq(revived, true)
 }
 
 ///|
@@ -608,8 +844,8 @@ test "cmd/serve: coordinator authoritative in-memory metadata with zero S3 calls
   // Coordinator updates in-memory state on write
   state.update_after_write(store, ns, head1)
   for d in docs1 {
-    state.doc_cache.set(d.id, { text: d.text, category: d.category, ts: d.ts, public: d.public })
-    state.doc_full_cache.set(d.id, d)
+    state.doc_cache.set(d.id.to_string(), { text: d.text, category: d.category, ts: d.ts, public: d.public })
+    state.doc_full_cache.set(d.id.to_string(), d)
   }
 
   // 1. First query: uses state.get_query_ns() directly without reading namespace.json or manifest.json

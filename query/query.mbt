@@ -335,15 +335,45 @@ pub fn[S] open_cached_or_create(
 
 ///|
 /// 预热 Namespace：将 centroids、所有段 meta 与 id 列、tombstone、全局 IVF parts 全部预加载进内存。
+/// 段 meta 与 id 列按“缓存 miss 集合”一次性批量读取；已缓存的段不重复请求。
 pub fn[S : @store.ObjectStore] warm_namespace(
   n : Namespace[S],
 ) -> Unit raise @core.SpndError {
   let _ = ensure_centroids(n)
-  for si in 0..<n.manifest.segments.length() {
+  let seg_count = n.manifest.segments.length()
+  // 1) 批量加载所有缺失的 meta.json。
+  prewarm_seg_metas(n)
+  // 2) 非 dense 段批量加载 id 列（已缓存的跳过）。
+  let need_ids : Array[String] = Array(capacity=seg_count)
+  let need_cs : Array[CachedSeg] = Array(capacity=seg_count)
+  for si in 0..<seg_count {
     let seg = n.manifest.segments[si]
-    let cs = ensure_seg(n, si)
-    if !cs.id_dense {
-      let _ = seg_ids(n, cs, seg.id)
+    let cs = match n.cache.get(seg.id) {
+      Some(c) => c
+      None => raise @core.Corrupt("warm_namespace: missing seg cache")
+    }
+    if !cs.id_dense && cs.ids is None {
+      need_ids.push(seg.id)
+      need_cs.push(cs)
+    }
+  }
+  if !need_ids.is_empty() {
+    let keys : Array[String] = Array(capacity=need_ids.length())
+    for id in need_ids {
+      keys.push("\{n.ns}/_segments/\{id}/rows/id.bin")
+    }
+    let results = @store.ObjectStore::get_many(n.store, keys)
+    for i in 0..<need_ids.length() {
+      let key = keys[i]
+      let bs = match results[i] {
+        Some(b) => b
+        None => raise @core.NotFound(key)
+      }
+      let arr = match @format.decode_col(bs) {
+        @format.ColU64(x) => x
+        _ => raise @core.Corrupt("id column dtype is not u64")
+      }
+      need_cs[i].ids = Some(arr)
     }
   }
   let _ = tombstones_of(n)
@@ -582,33 +612,74 @@ fn[S : @store.ObjectStore] global_gen_cids(
         Some(b) => b
         None => raise @core.NotFound(key)
       }
-      let m = match parse_json_bytes(bs, "global vec meta") {
-        Object(mm) => mm
-        _ => raise @core.Corrupt("global vec meta is not an object")
-      }
-      let cids : Array[Int] = Array()
-      match m.get("cids") {
-        Some(Array(arr)) =>
-          for x in arr {
-            match x {
-              Number(d, ..) => cids.push(d.to_int())
-              _ => ()
-            }
-          }
-        _ =>
-          raise @core.Corrupt(
-            "global vec meta missing cids (\{key})",
-          )
-      }
-      // pack_size 缺省 1（未打包，旧数据兼容）。
-      let ps = match m.get("pack_size") {
-        Some(Number(d, ..)) => d.to_int()
-        _ => 1
-      }
-      n.global_gen_cids.set(ver, cids)
-      n.global_gen_packs.set(ver, if ps < 1 { 1 } else { ps })
-      cids
+      cache_global_gen_meta(n, ver, key, bs)
     }
+  }
+}
+
+///|
+/// 解析并缓存单代 global meta（cids + pack_size）。
+fn[S] cache_global_gen_meta(
+  n : Namespace[S],
+  ver : String,
+  key : String,
+  bs : Bytes,
+) -> Array[Int] raise @core.SpndError {
+  let m = match parse_json_bytes(bs, "global vec meta") {
+    Object(mm) => mm
+    _ => raise @core.Corrupt("global vec meta is not an object")
+  }
+  let cids : Array[Int] = Array()
+  match m.get("cids") {
+    Some(Array(arr)) =>
+      for x in arr {
+        match x {
+          Number(d, ..) => cids.push(d.to_int())
+          _ => ()
+        }
+      }
+    _ =>
+      raise @core.Corrupt(
+        "global vec meta missing cids (\{key})",
+      )
+  }
+  // pack_size 缺省 1（未打包，旧数据兼容）。
+  let ps = match m.get("pack_size") {
+    Some(Number(d, ..)) => d.to_int()
+    _ => 1
+  }
+  n.global_gen_cids.set(ver, cids)
+  n.global_gen_packs.set(ver, if ps < 1 { 1 } else { ps })
+  cids
+}
+
+///|
+/// 批量预加载多代 global meta.json（只读缓存 miss 的代）。
+fn[S : @store.ObjectStore] prewarm_global_gen_cids(
+  n : Namespace[S],
+  vers : Array[String],
+) -> Unit raise @core.SpndError {
+  let missing : Array[String] = Array(capacity=vers.length())
+  for ver in vers {
+    if n.global_gen_cids.get(ver) is None {
+      missing.push(ver)
+    }
+  }
+  if missing.is_empty() {
+    return
+  }
+  let keys : Array[String] = Array(capacity=missing.length())
+  for ver in missing {
+    keys.push("\{n.ns}/vec/global/\{ver}/meta.json")
+  }
+  let results = @store.ObjectStore::get_many(n.store, keys)
+  for i in 0..<missing.length() {
+    let key = keys[i]
+    let bs = match results[i] {
+      Some(b) => b
+      None => raise @core.NotFound(key)
+    }
+    let _ = cache_global_gen_meta(n, missing[i], key, bs)
   }
 }
 
@@ -894,6 +965,67 @@ fn parse_seg_meta(bs : Bytes) -> SegMetaInfo raise @core.SpndError {
 }
 
 ///|
+/// 由 seg meta.json 构造空的 CachedSeg（所有列/索引尚未加载）。
+fn make_cached_seg(info : SegMetaInfo) -> CachedSeg {
+  {
+    row_count: info.row_count,
+    partitions: info.partitions,
+    min_id: info.min_id,
+    id_dense: info.id_dense,
+    vec_storage: info.vec_storage,
+    vec_normalized: info.vec_normalized,
+    stats: info.stats,
+    bloom: info.bloom,
+    dir: None,
+    doc_len: None,
+    ids: None,
+    blockmax: None,
+    blockmax_size: 128,
+    blockmax_tried: false,
+    pq_m: 0,
+    pq_dsub: 0,
+    pq_codebook: None,
+    vec_info: None,
+    block_stats: None,
+    block_stats_tried: false,
+    matchers: Map([]),
+    vec_parts: Map([]),
+  }
+}
+
+///|
+/// 批量加载 manifest 里所有缓存 miss 的 seg meta.json（已缓存的段不重复请求）。
+fn[S : @store.ObjectStore] prewarm_seg_metas(
+  n : Namespace[S],
+) -> Unit raise @core.SpndError {
+  let seg_count = n.manifest.segments.length()
+  let missing_ids : Array[String] = Array(capacity=seg_count)
+  for si in 0..<seg_count {
+    let seg = n.manifest.segments[si]
+    if n.cache.get(seg.id) is None {
+      missing_ids.push(seg.id)
+    }
+  }
+  if missing_ids.is_empty() {
+    return
+  }
+  let keys : Array[String] = Array(capacity=missing_ids.length())
+  for id in missing_ids {
+    keys.push("\{n.ns}/_segments/\{id}/meta.json")
+  }
+  let results = @store.ObjectStore::get_many(n.store, keys)
+  for i in 0..<missing_ids.length() {
+    let key = keys[i]
+    let bs = match results[i] {
+      Some(b) => b
+      None => raise @core.NotFound(key)
+    }
+    let info = parse_seg_meta(bs)
+    n.cache.set(missing_ids[i], make_cached_seg(info))
+  }
+}
+
+///|
 /// 取得（必要时加载）某 segment 的缓存。
 fn[S : @store.ObjectStore] ensure_seg(
   n : Namespace[S],
@@ -906,30 +1038,7 @@ fn[S : @store.ObjectStore] ensure_seg(
       let info = parse_seg_meta(
         get_object(n.store, "\{n.ns}/_segments/\{seg.id}/meta.json"),
       )
-      let cs : CachedSeg = {
-        row_count: info.row_count,
-        partitions: info.partitions,
-        min_id: info.min_id,
-        id_dense: info.id_dense,
-        vec_storage: info.vec_storage,
-        vec_normalized: info.vec_normalized,
-        stats: info.stats,
-        bloom: info.bloom,
-        dir: None,
-        doc_len: None,
-        ids: None,
-        blockmax: None,
-        blockmax_size: 128,
-        blockmax_tried: false,
-        pq_m: 0,
-        pq_dsub: 0,
-        pq_codebook: None,
-        vec_info: None,
-        block_stats: None,
-        block_stats_tried: false,
-        matchers: Map([]),
-        vec_parts: Map([]),
-      }
+      let cs = make_cached_seg(info)
       n.cache.set(seg.id, cs)
       cs
     }

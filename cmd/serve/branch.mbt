@@ -326,7 +326,6 @@ pub fn create_branch(
 
   // 10. 预热与清理缓存，使新分支立即可用
   active_ns.remove(branch_name)
-  meta_cache.invalidate(branch_name)
   let _ = (try {
     let _ = get_or_load_ns_state(store, branch_name)
     ()
@@ -447,7 +446,6 @@ pub fn restore_snapshot(
   }
 
   // 清除旧缓存并重新加载
-  meta_cache.invalidate(ns)
   active_ns.remove(ns)
   let _ = (try {
     let _ = get_or_load_ns_state(store, ns)

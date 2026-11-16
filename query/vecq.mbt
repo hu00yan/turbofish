@@ -488,36 +488,86 @@ fn[S : @store.ObjectStore] collect_global_candidates(
         }
       }
     }
-    for kv in by_pack.iter() {
-      let (pk, want_cids) = kv
-      let key = "\{n.ns}/vec/global/\{ver}/pack-\{pk}.bin"
-      let bs = match n.store.get(key) {
-        Some(b) => b
-        None => raise @core.NotFound(key)
+    // 先把本轮需要的 pack 一次性批量读回，再按原有 by_pack 顺序解码/打分。
+    // 这样既减少串行 GET，又不改变评分顺序与错误语义。
+    if !by_pack.is_empty() {
+      let pack_keys : Array[String] = Array(capacity=by_pack.length())
+      let pack_ids : Array[Int] = Array(capacity=by_pack.length())
+      for kv in by_pack.iter() {
+        pack_ids.push(kv.0)
+        pack_keys.push("\{n.ns}/vec/global/\{ver}/pack-\{kv.0}.bin")
       }
-      let idx = @format.decode_global_pack_index(bs)
-      for item in idx {
-        let (c, off, len) = item
-        let gp = @format.decode_global_part_at(bs, off, len)
-        if gp.cid != c {
-          raise @core.Corrupt("global pack cid mismatch in \{key}")
+      let pack_results = @store.ObjectStore::get_many(n.store, pack_keys)
+      let pack_bytes : Map[Int, Bytes] = Map([])
+      for i in 0..<pack_ids.length() {
+        let key = pack_keys[i]
+        let bs = match pack_results[i] {
+          Some(b) => b
+          None => raise @core.NotFound(key)
         }
-        n.global_parts.set("\{ver}/\{c}", gp)
+        pack_bytes.set(pack_ids[i], bs)
       }
-      for cid in want_cids {
-        let part_key = "\{ver}/\{cid}"
-        match n.global_parts.get(part_key) {
-          Some(gp) =>
-            score_global_part(
-              n, gp, qv, qv_norm, key, nseg, seg_skip, seg_matchers,
-              seg_bitsets, seg_norm, seg_dense, seg_min_id, seg_ids_arr, tomb,
-              allowed_ids, heap,
-            )
-          None => raise @core.NotFound("\{key} missing cid \{cid}")
+      for kv in by_pack.iter() {
+        let (pk, want_cids) = kv
+        let key = "\{n.ns}/vec/global/\{ver}/pack-\{pk}.bin"
+        let bs = match pack_bytes.get(pk) {
+          Some(b) => b
+          None => raise @core.NotFound(key)
+        }
+        let idx = @format.decode_global_pack_index(bs)
+        for item in idx {
+          let (c, off, len) = item
+          let gp = @format.decode_global_part_at(bs, off, len)
+          if gp.cid != c {
+            raise @core.Corrupt("global pack cid mismatch in \{key}")
+          }
+          n.global_parts.set("\{ver}/\{c}", gp)
+        }
+        for cid in want_cids {
+          let part_key = "\{ver}/\{cid}"
+          match n.global_parts.get(part_key) {
+            Some(gp) =>
+              score_global_part(
+                n, gp, qv, qv_norm, key, nseg, seg_skip, seg_matchers,
+                seg_bitsets, seg_norm, seg_dense, seg_min_id, seg_ids_arr, tomb,
+                allowed_ids, heap,
+              )
+            None => raise @core.NotFound("\{key} missing cid \{cid}")
+          }
         }
       }
     }
     return
+  }
+  // 未分包：先批量读取本次 probe 缺失的 part，再按 probes 顺序打分。
+  let missing_cids : Array[Int] = Array()
+  let missing_keys : Array[String] = Array()
+  for cid in probes {
+    if !cid_set.contains(cid) {
+      continue
+    }
+    let part_key = "\{ver}/\{cid}"
+    if n.global_parts.get(part_key) is None {
+      missing_cids.push(cid)
+      missing_keys.push("\{n.ns}/vec/global/\{ver}/part-\{cid}.bin")
+    }
+  }
+  if !missing_cids.is_empty() {
+    let results = @store.ObjectStore::get_many(n.store, missing_keys)
+    for i in 0..<missing_cids.length() {
+      let key = missing_keys[i]
+      let bs = match results[i] {
+        Some(b) => b
+        None => raise @core.NotFound(key)
+      }
+      let p = @format.decode_global_part(bs)
+      if p.dim != qv.length() {
+        raise @core.Corrupt(
+          "global part dim mismatch: \{p.dim} vs qv \{qv.length()}",
+        )
+      }
+      n.global_parts.set("\{ver}/\{missing_cids[i]}", p)
+    }
   }
   for cid in probes {
     if !cid_set.contains(cid) {
@@ -526,21 +576,7 @@ fn[S : @store.ObjectStore] collect_global_candidates(
     let part_key = "\{ver}/\{cid}"
     let gp = match n.global_parts.get(part_key) {
       Some(p) => p
-      None => {
-        let key = "\{n.ns}/vec/global/\{ver}/part-\{cid}.bin"
-        let bs = match n.store.get(key) {
-          Some(b) => b
-          None => raise @core.NotFound(key)
-        }
-        let p = @format.decode_global_part(bs)
-        if p.dim != qv.length() {
-          raise @core.Corrupt(
-            "global part dim mismatch: \{p.dim} vs qv \{qv.length()}",
-          )
-        }
-        n.global_parts.set(part_key, p)
-        p
-      }
+      None => raise @core.NotFound("\{n.ns}/vec/global/\{ver}/part-\{cid}.bin")
     }
     score_global_part(
       n, gp, qv, qv_norm, part_key, nseg, seg_skip, seg_matchers, seg_bitsets,
@@ -663,7 +699,9 @@ fn[S : @store.ObjectStore] vec_global_search(
   let gens : Array[String] = Array()
   let gen_cid_sets : Map[String, Set[Int]] = Map([])
   match global_gen_versions(n) {
-    Some(vers) =>
+    Some(vers) => {
+      // 各代 meta.json 一次批量读回（已缓存的代跳过）。
+      prewarm_global_gen_cids(n, vers)
       for ver in vers {
         let cs : Set[Int] = Set([])
         for c in global_gen_cids(n, ver) {
@@ -672,6 +710,7 @@ fn[S : @store.ObjectStore] vec_global_search(
         gen_cid_sets.set(ver, cs)
         gens.push(ver)
       }
+    }
     None => {
       let ver = match n.manifest.vec_global_version {
         Some(v) => v

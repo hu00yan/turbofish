@@ -24,6 +24,8 @@
 //   OPTIONS 任意路径 → 204（CORS）。
 //
 // 存储：SPND_STORE=fs:PATH（默认 fs:/tmp/spnd-data）| s3（S3_* 环境变量）| sim（SimStore 仿真）。
+// 写路径只有 @build 一套（无 mtree 双写）；查询读 build manifest/segments，进程内只有
+// 小容量 LRU 缓存（active_ns / seg_cache / doc_cache），不落盘。
 // 端口：SPND_PORT（默认 8080）。鉴权：v0 无。
 // namespace 的 fts_tokenizer / distance_metric 落在 namespace.json（首次 write 时由
 // init_namespace 按 cfg 写入；namespace 一旦落盘以 meta 为准，metric 不可再改）。
@@ -45,10 +47,6 @@ let created_tokenizers : Map[String, @core.Tokenizer] = Map([])
 
 ///|
 let created_metrics : Map[String, String] = Map([])
-
-///|
-/// 进程级 metadata cache（consistency="eventual" 时走 open_cached，head TTL 1s）。
-let meta_cache : @query.MetadataCache[AnyStore] = @query.MetadataCache::new()
 
 ///|
 /// 元数据服务地址（SPND_META_URL，例如 http://127.0.0.1:8090）。
@@ -204,6 +202,58 @@ fn raw_head_version(store : AnyStore, key : String) -> String? {
 }
 
 ///|
+/// 批量读取内部存储（S3 走 multi，FS/Sim 走默认顺序 fallback）。
+fn raw_get_many(store : AnyStore, keys : Array[String]) -> Array[Bytes?] {
+  match store {
+    FS(s) => @store.ObjectStore::get_many(s, keys)
+    S3(s) => @store.ObjectStore::get_many(s, keys)
+    Sim(s) => @store.ObjectStore::get_many(s, keys)
+  }
+}
+
+///|
+/// 批量查 metad；只对 metadata key 发请求，未命中不视为错误。
+/// 这一步让冷查询的段 meta / 列元数据也走 multi，而不是逐 key 串行。
+fn meta_get_many(keys : Array[String]) -> Map[String, Bytes] {
+  let out : Map[String, Bytes] = Map([])
+  if meta_url.val == "" {
+    return out
+  }
+  let reqs : Array[(String, String, Array[(String, String)], Bytes)] = Array()
+  let req_keys : Array[String] = Array()
+  let seen : Set[String] = Set([])
+  for key in keys {
+    if !@meta.is_metadata_key(key) || seen.contains(key) {
+      continue
+    }
+    seen.add(key)
+    reqs.push((
+      "GET",
+      meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
+      [],
+      b"",
+    ))
+    req_keys.push(key)
+  }
+  if reqs.is_empty() {
+    return out
+  }
+  let res : Array[(Int, Array[(String, String)], Bytes)] = meta_http.execute_many(
+    reqs,
+  )
+  if res.length() != req_keys.length() {
+    return out
+  }
+  for i in 0..<req_keys.length() {
+    let (status, _headers, body) = res[i]
+    if status == 200 {
+      out.set(req_keys[i], body)
+    }
+  }
+  out
+}
+
+///|
 pub impl @store.ObjectStore for AnyStore with get(self, key) {
   let cached = meta_get(key)
   let bs = match cached {
@@ -219,6 +269,49 @@ pub impl @store.ObjectStore for AnyStore with get(self, key) {
     }
     None => resolve_branch_get(self, key)
   }
+}
+
+///|
+/// 批量读：先并发查 metad，未命中的再按底层 S3 multi 批量回源，保持原下标。
+/// 对 metadata key 的回填仍走 meta_put；branch fallback 只对 miss 逐项处理。
+pub impl @store.ObjectStore for AnyStore with get_many(self, keys) {
+  let out : Array[Bytes?] = Array(capacity=keys.length())
+  for _ in keys {
+    out.push(None)
+  }
+  let hits = meta_get_many(keys)
+  let missing_keys : Array[String] = Array()
+  let missing_idx : Array[Int] = Array()
+  for i in 0..<keys.length() {
+    match hits.get(keys[i]) {
+      Some(bs) => out[i] = Some(bs)
+      None => {
+        missing_keys.push(keys[i])
+        missing_idx.push(i)
+      }
+    }
+  }
+  if missing_keys.is_empty() {
+    return out
+  }
+  let raw = raw_get_many(self, missing_keys)
+  for j in 0..<missing_keys.length() {
+    let key = missing_keys[j]
+    match raw[j] {
+      Some(bs) => {
+        if @meta.is_metadata_key(key) {
+          meta_put(key, bs)
+        }
+        out[missing_idx[j]] = Some(bs)
+      }
+      None =>
+        match resolve_branch_get(self, key) {
+          Some(bs) => out[missing_idx[j]] = Some(bs)
+          None => ()
+        }
+    }
+  }
+  out
 }
 
 ///|
@@ -360,18 +453,188 @@ pub fn make_store() -> AnyStore raise @core.SpndError {
 }
 
 ///|
-struct NamespaceState {
-  engine : @mtree.MergeTreeEngine[AnyStore]
-  compactor : @mtree.Compactor[AnyStore]
-  mut build_head : String
-  mut query_ns : @query.Namespace[AnyStore]?
-  mut meta : @format.NamespaceMeta?
-  doc_cache : Map[UInt64, DocAttributes]
-  doc_full_cache : Map[UInt64, @core.Doc]
+/// 简单进程内 LRU：条目数与总权重双上限，超限时淘汰最久未使用的条目。
+/// 只存在进程内存，不落盘（不做 SSD 缓存，也不新增持久化层）。
+struct LruEntry[V] {
+  mut value : V
+  mut used : UInt64
+  mut weight : Int
 }
 
 ///|
-let active_ns : Map[String, NamespaceState] = Map([])
+struct LruCache[V] {
+  entries : Map[String, LruEntry[V]]
+  capacity : Int
+  max_weight : Int
+  mut total_weight : Int
+  mut tick : UInt64
+  weigh : (V) -> Int
+}
+
+///|
+fn[V] LruCache::new(
+  capacity : Int,
+  max_weight : Int,
+  weigh : (V) -> Int,
+) -> LruCache[V] {
+  {
+    entries: Map([]),
+    capacity: if capacity < 1 { 1 } else { capacity },
+    max_weight,
+    total_weight: 0,
+    tick: 0UL,
+    weigh,
+  }
+}
+
+///|
+fn[V] LruCache::length(self : LruCache[V]) -> Int {
+  self.entries.length()
+}
+
+///|
+fn[V] LruCache::get(self : LruCache[V], key : String) -> V? {
+  match self.entries.get(key) {
+    Some(e) => {
+      self.tick = self.tick + 1UL
+      e.used = self.tick
+      Some(e.value)
+    }
+    None => None
+  }
+}
+
+///|
+fn[V] LruCache::remove(self : LruCache[V], key : String) -> Unit {
+  match self.entries.remove_and_get(key) {
+    Some(e) => self.total_weight = self.total_weight - e.weight
+    None => ()
+  }
+}
+
+///|
+fn[V] LruCache::set(self : LruCache[V], key : String, value : V) -> Unit {
+  let w = (self.weigh)(value)
+  self.tick = self.tick + 1UL
+  match self.entries.get(key) {
+    Some(e) => {
+      self.total_weight = self.total_weight - e.weight + w
+      e.value = value
+      e.weight = w
+      e.used = self.tick
+    }
+    None => {
+      self.entries.set(key, { value, used: self.tick, weight: w })
+      self.total_weight = self.total_weight + w
+    }
+  }
+  self.trim()
+}
+
+///|
+fn[V] LruCache::evict_one(self : LruCache[V]) -> Bool {
+  let mut victim : String? = None
+  let mut victim_used = 0UL
+  let mut first = true
+  for k, e in self.entries {
+    if first || e.used < victim_used {
+      first = false
+      victim = Some(k)
+      victim_used = e.used
+    }
+  }
+  match victim {
+    Some(k) => {
+      self.remove(k)
+      true
+    }
+    None => false
+  }
+}
+
+///|
+fn[V] LruCache::trim(self : LruCache[V]) -> Unit {
+  while self.entries.length() > self.capacity ||
+    (self.max_weight > 0 && self.total_weight > self.max_weight) {
+    if !self.evict_one() {
+      break
+    }
+  }
+}
+
+///|
+fn env_int(key : String, dflt : Int, min_v : Int) -> Int {
+  let v = match @env.get_env_var(key) {
+    Some(s) =>
+      match parse_int_str(s.trim().to_owned()) {
+        Some(n) => n
+        None => dflt
+      }
+    None => dflt
+  }
+  if v < min_v { min_v } else { v }
+}
+
+///|
+/// MB -> bytes，避免 `MB * 1024 * 1024` 在 Int32 上溢出后变成负值（会让 LRU
+/// 误以为“不限字节”）。
+fn env_mb(key : String, dflt : Int) -> Int {
+  let mb = env_int(key, dflt, 0)
+  let capped = if mb > 2047 { 2047 } else { mb }
+  capped * 1024 * 1024
+}
+
+///|
+struct DocAttributes {
+  text : String
+  category : String
+  ts : Int64
+  public : Bool
+}
+
+///|
+struct SegmentCache {
+  ids : Array[UInt64]
+  texts : Array[String]
+  cats : Array[String]
+  tss : Array[Int64]
+  pubs : Array[Bool]
+}
+
+///|
+fn SegmentCache::weight(self : SegmentCache) -> Int {
+  let mut n = self.ids.length() * 8 + self.tss.length() * 8 + self.pubs.length()
+  // 按 UTF-8 上界保守估算：MoonBit String.length() 不是字节数，CJK 会低估。
+  for s in self.texts {
+    n = n + s.length() * 3 + 8
+  }
+  for s in self.cats {
+    n = n + s.length() * 3 + 8
+  }
+  n
+}
+
+///|
+/// 内存中的 namespace 状态：只有 build 读快照与小容量缓存，没有 mtree 写引擎。
+struct NamespaceState {
+  mut build_head : String
+  mut query_ns : @query.Namespace[AnyStore]?
+  mut meta : @format.NamespaceMeta?
+  doc_cache : LruCache[DocAttributes]
+  doc_full_cache : LruCache[@core.Doc]
+  mut last_write_ms : Int64
+  mut live_segments : Int
+  mut manifest_num_docs : Int
+  mut manifest_deleted : Int
+}
+
+///|
+/// 活跃 namespace 上限（LRU）：默认 2048，适合大量小用户，避免无限增长。
+let active_ns : LruCache[NamespaceState] = LruCache::new(
+  env_int("SPND_ACTIVE_NS_MAX", 2048, 1),
+  0,
+  fn(_s : NamespaceState) -> Int { 1 },
+)
 
 ///|
 let global_coordinator : Ref[@control.Coordinator[AnyStore]?] = { val: None }
@@ -431,7 +694,10 @@ fn NamespaceState::get_query_ns(
       if self.build_head == "" {
         self.build_head = snap.manifest.id
       }
-      meta_cache.entries.set(ns, snap)
+      self.live_segments = snap.manifest.segments.length()
+      self.manifest_num_docs = snap.manifest.num_docs
+      self.manifest_deleted = snap.manifest.deleted.length()
+      self.last_write_ms = @async.now()
       snap
     }
   }
@@ -470,6 +736,10 @@ fn NamespaceState::update_after_write(
   let manifest = (@format.manifest_from_json(j)) catch {
     _ => return
   }
+  self.live_segments = manifest.segments.length()
+  self.manifest_num_docs = manifest.num_docs
+  self.manifest_deleted = manifest.deleted.length()
+  self.last_write_ms = @async.now()
   let meta = match self.meta {
     Some(m) => { ..m, head_manifest: new_head }
     None =>
@@ -497,9 +767,47 @@ fn NamespaceState::update_after_write(
         }
       }
   }
-  let old_cache : Map[String, @query.CachedSeg] = match self.query_ns {
-    Some(old) => old.cache
-    None => Map([])
+  // 只继承新 manifest 里仍然存在的段/代，避免 compact 后把被合并掉的
+  // CachedSeg（含 ids/doc_len/vec_parts）和旧 global parts 变成永久孤儿。
+  let keep_seg_ids : Set[String] = Set([])
+  for seg in manifest.segments {
+    keep_seg_ids.add(seg.id)
+  }
+  let keep_vers : Set[String] = Set([])
+  match manifest.vec_global_version {
+    Some(v) => if v != "" { keep_vers.add(v) }
+    None => ()
+  }
+  match self.meta {
+    Some(m) =>
+      match m.vec_global_version {
+        Some(v) => if v != "" { keep_vers.add(v) }
+        None => ()
+      }
+    None => ()
+  }
+  match manifest.global_gen {
+    Some(g) => {
+      if g.base != "" {
+        keep_vers.add(g.base)
+      }
+      for d in g.deltas {
+        keep_vers.add(d)
+      }
+    }
+    None => ()
+  }
+  let old_cache : Map[String, @query.CachedSeg] = Map([])
+  match self.query_ns {
+    Some(old) => {
+      for seg in manifest.segments {
+        match old.cache.get(seg.id) {
+          Some(cs) => old_cache.set(seg.id, cs)
+          None => ()
+        }
+      }
+    }
+    None => ()
   }
   let cent : @format.Centroids? = match self.query_ns {
     Some(old) =>
@@ -510,17 +818,37 @@ fn NamespaceState::update_after_write(
       }
     None => None
   }
-  let global_gen_cids = match self.query_ns {
-    Some(old) => old.global_gen_cids
-    None => Map([])
+  let global_gen_cids : Map[String, Array[Int]] = Map([])
+  let global_gen_packs : Map[String, Int] = Map([])
+  match self.query_ns {
+    Some(old) => {
+      for ver, cids in old.global_gen_cids {
+        if keep_vers.contains(ver) {
+          global_gen_cids.set(ver, cids)
+        }
+      }
+      for ver, ps in old.global_gen_packs {
+        if keep_vers.contains(ver) {
+          global_gen_packs.set(ver, ps)
+        }
+      }
+    }
+    None => ()
   }
-  let global_gen_packs = match self.query_ns {
-    Some(old) => old.global_gen_packs
-    None => Map([])
-  }
-  let global_parts = match self.query_ns {
-    Some(old) => old.global_parts
-    None => Map([])
+  let global_parts : Map[String, @format.GlobalVecPart] = Map([])
+  match self.query_ns {
+    Some(old) => {
+      for key, gp in old.global_parts {
+        let ver = match key.find("/") {
+          Some(i) => key[:i].to_owned()
+          None => key
+        }
+        if keep_vers.contains(ver) {
+          global_parts.set(key, gp)
+        }
+      }
+    }
+    None => ()
   }
   let new_ns : @query.Namespace[AnyStore] = {
     store,
@@ -538,7 +866,6 @@ fn NamespaceState::update_after_write(
   }
   let _ = (try { @query.warm_namespace(new_ns) } catch { _ => () })
   self.query_ns = Some(new_ns)
-  meta_cache.entries.set(ns, new_ns)
   let coord = get_coordinator(store)
   coord.update_tenant_head(ns, new_head, manifest.num_docs)
 }
@@ -581,31 +908,37 @@ fn check_auth(req : @http.Request) -> Bool {
 }
 
 ///|
+/// 取（或创建）内存状态。**不初始化任何写引擎/compactor**：写路径统一走 @build。
 fn get_or_create_ns_state(
-  store : AnyStore,
+  _store : AnyStore,
   ns : String,
-  dim : Int,
-) -> NamespaceState raise @core.SpndError {
+  _dim : Int,
+) -> NamespaceState {
   match active_ns.get(ns) {
     Some(state) => state
     None => {
-      let engine = @mtree.MergeTreeEngine::new(store, ns, dim, false, None)
-      let config : @mtree.CompactionTriggerConfig = {
-        l0_threshold: 4,
-        tombstone_ratio_threshold: 0.20,
-        idle_fallback_ms: 5000L,
-        max_merge_parts: 16,
-      }
-      let policy = @mtree.TieredMergePolicy::new(config)
-      let compactor = @mtree.Compactor::new(engine, policy, config)
       let state : NamespaceState = {
-        engine,
-        compactor,
         build_head: "",
         query_ns: None,
         meta: None,
-        doc_cache: Map([]),
-        doc_full_cache: Map([]),
+        doc_cache: LruCache::new(
+          env_int("SPND_DOC_CACHE_MAX", 8192, 1),
+          env_mb("SPND_DOC_CACHE_MB", 16),
+          fn(a : DocAttributes) -> Int {
+            a.text.length() * 3 + a.category.length() * 3 + 64
+          },
+        ),
+        doc_full_cache: LruCache::new(
+          env_int("SPND_DOC_FULL_CACHE_MAX", 2048, 1),
+          env_mb("SPND_DOC_FULL_CACHE_MB", 32),
+          fn(d : @core.Doc) -> Int {
+            d.text.length() * 3 + d.vector.length() * 4 + 64
+          },
+        ),
+        last_write_ms: 0L,
+        live_segments: 0,
+        manifest_num_docs: 0,
+        manifest_deleted: 0,
       }
       active_ns.set(ns, state)
       state
@@ -628,7 +961,10 @@ fn get_or_load_ns_state(
       state.query_ns = Some(snap)
       state.meta = Some(snap.meta)
       state.build_head = snap.manifest.id
-      meta_cache.entries.set(ns, snap)
+      state.live_segments = snap.manifest.segments.length()
+      state.manifest_num_docs = snap.manifest.num_docs
+      state.manifest_deleted = snap.manifest.deleted.length()
+      state.last_write_ms = @async.now()
       let coord = get_coordinator(store)
       if coord.get_tenant(ns) is None {
         coord.register_tenant(
@@ -646,50 +982,212 @@ fn get_or_load_ns_state(
 }
 
 ///|
-async fn background_compactor_loop(store : AnyStore) -> Unit {
-  for ;; {
-    @async.sleep(200)
-    let now = @async.now()
-    for ns, state in active_ns {
-      try {
-        let res = state.compactor.tick(now)
-        match res {
-          Some(r) => {
-            println(
-              "[compactor] ns=\{ns} compacted parts=\{r.merged_parts_count} -> \{r.output_part_id} rows=\{r.output_row_count} tombstones_purged=\{r.tombstones_purged} new_seq=\{r.new_seq}",
-            )
-            if state.build_head != "" {
-              store.put(@store.head_pointer_key(ns), @utf8.encode(state.build_head))
-            }
-          }
-          None => ()
-        }
-      } catch {
-        e => println("[compactor] error compacting ns=\{ns}: \{err_msg(e)}")
-      }
-    }
+/// 后台合并参数（全部可用环境变量覆盖）。阈值面向“很多小用户”：只处理脏
+/// namespace，每次 tick 限量，避免 O(active_ns) 扫描。
+struct CompactSettings {
+  interval_ms : Int64
+  max_per_tick : Int
+  seg_threshold : Int
+  delete_ratio : Double
+  idle_ms : Int64
+  max_rows : Int
+}
+
+///|
+fn compact_settings() -> CompactSettings {
+  {
+    interval_ms: env_int("SPND_COMPACT_INTERVAL_MS", 1000, 50).to_int64(),
+    max_per_tick: env_int("SPND_COMPACT_MAX_PER_TICK", 8, 1),
+    seg_threshold: env_int("SPND_COMPACT_SEG_THRESHOLD", 8, 1),
+    delete_ratio: env_int("SPND_COMPACT_DELETE_PCT", 20, 0).to_double() /
+    100.0,
+    idle_ms: env_int("SPND_COMPACT_IDLE_MS", 30000, 0).to_int64(),
+    max_rows: env_int("SPND_COMPACT_MAX_ROWS", 5000000, 0),
   }
 }
 
 ///|
-struct DocAttributes {
-  text : String
-  category : String
-  ts : Int64
-  public : Bool
+/// 待合并 namespace 的 FIFO 队列 + 去重集合。只由写入路径入队。
+let dirty_queue : Ref[Array[String]] = { val: [] }
+
+///|
+let dirty_head : Ref[Int] = { val: 0 }
+
+///|
+let dirty_set : Map[String, Bool] = Map([])
+
+///|
+fn mark_namespace_dirty(ns : String) -> Unit {
+  if dirty_set.contains(ns) {
+    return
+  }
+  dirty_set.set(ns, true)
+  dirty_queue.val.push(ns)
 }
 
 ///|
-struct SegmentCache {
-  ids : Array[UInt64]
-  texts : Array[String]
-  cats : Array[String]
-  tss : Array[Int64]
-  pubs : Array[Bool]
+pub fn reset_dirty_for_test() -> Unit {
+  dirty_queue.val = []
+  dirty_head.val = 0
+  dirty_set.clear()
 }
 
 ///|
-let seg_cache : Map[String, SegmentCache] = Map([])
+fn dirty_next() -> String? {
+  while dirty_head.val < dirty_queue.val.length() {
+    let ns = dirty_queue.val[dirty_head.val]
+    dirty_head.val = dirty_head.val + 1
+    if dirty_set.contains(ns) {
+      dirty_set.remove(ns)
+      return Some(ns)
+    }
+  }
+  if dirty_head.val > 0 {
+    dirty_queue.val = []
+    dirty_head.val = 0
+  }
+  None
+}
+
+///|
+fn deleted_ratio(state : NamespaceState) -> Double {
+  if state.manifest_num_docs <= 0 {
+    0.0
+  } else {
+    state.manifest_deleted.to_double() /
+    state.manifest_num_docs.to_double()
+  }
+}
+
+///|
+/// 这个 namespace 是否“将来可能”需要合并：段数 < 2 或超大 namespace 且删除
+/// 比例不高时不再入队，避免每 tick 反复空转。
+fn compact_would_ever(state : NamespaceState, s : CompactSettings) -> Bool {
+  if state.live_segments < 2 {
+    return false
+  }
+  let ratio = deleted_ratio(state)
+  if ratio >= s.delete_ratio {
+    return true
+  }
+  if s.max_rows > 0 && state.manifest_num_docs > s.max_rows {
+    return false
+  }
+  true
+}
+
+///|
+fn should_compact(
+  state : NamespaceState,
+  s : CompactSettings,
+  now : Int64,
+) -> Bool {
+  if !compact_would_ever(state, s) {
+    return false
+  }
+  if state.live_segments > s.seg_threshold {
+    return true
+  }
+  if deleted_ratio(state) >= s.delete_ratio {
+    return true
+  }
+  now - state.last_write_ms >= s.idle_ms
+}
+
+///|
+fn compact_namespace_state(
+  store : AnyStore,
+  state : NamespaceState,
+  ns : String,
+) -> Unit raise @core.SpndError {
+  let cfg = cfg_for(store, ns, false, None, 0)
+  @build.compact(store, cfg, ns)
+  let head = match @store.read_head_pointer(store, ns) {
+    Some(h) => h
+    None => @store.read_head(store, ns, "")
+  }
+  if head != "" {
+    store.put(@store.head_pointer_key(ns), @utf8.encode(head))
+    state.update_after_write(store, ns, head)
+  }
+}
+
+///|
+/// 处理一轮脏 namespace，返回本轮实际取出的 namespace 数。
+/// compact 失败只记日志并保留旧 head，不影响写入。
+fn compact_dirty_once(
+  store : AnyStore,
+  now : Int64,
+  settings : CompactSettings,
+) -> Int {
+  let deferred : Array[String] = Array()
+  let mut processed = 0
+  while processed < settings.max_per_tick {
+    let ns = match dirty_next() {
+      Some(n) => n
+      None => break
+    }
+    processed = processed + 1
+    let state = match (try {
+      Some(get_or_load_ns_state(store, ns))
+    } catch {
+      e => {
+        println("[compactor] load state failed ns=\{ns}: \{err_msg(e)}")
+        None
+      }
+    }) {
+      Some(s) => s
+      None => {
+        deferred.push(ns)
+        continue
+      }
+    }
+    if should_compact(state, settings, now) {
+      let seg_before = state.live_segments
+      let ok = try {
+        compact_namespace_state(store, state, ns)
+        true
+      } catch {
+        e => {
+          println("[compactor] error compacting ns=\{ns}: \{err_msg(e)}")
+          false
+        }
+      }
+      if ok {
+        println(
+          "[compactor] ns=\{ns} segments \{seg_before} -> \{state.live_segments} rows=\{state.manifest_num_docs}",
+        )
+      } else {
+        deferred.push(ns)
+      }
+    } else if compact_would_ever(state, settings) {
+      // 例如还没到 idle 时间：留到下一轮，不在本 tick 内反复处理。
+      deferred.push(ns)
+    }
+  }
+  for ns in deferred {
+    mark_namespace_dirty(ns)
+  }
+  processed
+}
+
+///|
+async fn background_compactor_loop(store : AnyStore) -> Unit {
+  for ;; {
+    let settings = compact_settings()
+    @async.sleep(settings.interval_ms.to_int())
+    let now = @async.now()
+    let _ = compact_dirty_once(store, now, settings)
+  }
+}
+
+///|
+/// 查询所读 segment 的小容量内存缓存（条目 + 字节上限，LRU 淘汰）。
+let seg_cache : LruCache[SegmentCache] = LruCache::new(
+  env_int("SPND_SEG_CACHE_MAX", 4096, 1),
+  env_mb("SPND_SEG_CACHE_MB", 128),
+  fn(sc : SegmentCache) -> Int { sc.weight() },
+)
 
 ///|
 fn[T : @store.ObjectStore] load_segment_cache(
@@ -744,26 +1242,33 @@ fn[T : @store.ObjectStore] load_segment_cache(
 }
 
 ///|
+/// build 段是 append-only；被 delete/覆盖的旧行仍在列里，属性补全/补丁必须
+/// 先看 manifest tombstone，否则已删除文档会被 lookup 复活。
+fn[T] doc_is_deleted(n : @query.Namespace[T], doc_id : UInt64) -> Bool {
+  for d in n.manifest.deleted {
+    if d == doc_id {
+      return true
+    }
+  }
+  false
+}
+
+///|
 fn[T : @store.ObjectStore] lookup_doc_full(
   store : T,
   ns : String,
   n : @query.Namespace[T],
   doc_id : UInt64,
 ) -> @core.Doc? {
+  if doc_is_deleted(n, doc_id) {
+    return None
+  }
   match active_ns.get(ns) {
-    Some(state) => {
-      match state.doc_full_cache.get(doc_id) {
+    Some(state) =>
+      match state.doc_full_cache.get(doc_id.to_string()) {
         Some(d) => return Some(d)
         None => ()
       }
-      let live = (state.engine.read_live_docs()) catch { _ => [] }
-      for d in live {
-        if d.id == doc_id {
-          state.doc_full_cache.set(doc_id, d)
-          return Some(d)
-        }
-      }
-    }
     None => ()
   }
   let mut s_idx = n.manifest.segments.length() - 1
@@ -853,7 +1358,7 @@ fn[T : @store.ObjectStore] lookup_doc_full(
               }
               let doc : @core.Doc = { id: doc_id, text, category, ts, public, vector: vec }
               match active_ns.get(ns) {
-                Some(state) => state.doc_full_cache.set(doc_id, doc)
+                Some(state) => state.doc_full_cache.set(doc_id.to_string(), doc)
                 None => ()
               }
               return Some(doc)
@@ -874,21 +1379,15 @@ fn[T : @store.ObjectStore] lookup_doc_attrs(
   n : @query.Namespace[T],
   doc_id : UInt64,
 ) -> DocAttributes {
+  if doc_is_deleted(n, doc_id) {
+    return { text: "", category: "", ts: 0L, public: true }
+  }
   match active_ns.get(ns) {
-    Some(state) => {
-      match state.doc_cache.get(doc_id) {
+    Some(state) =>
+      match state.doc_cache.get(doc_id.to_string()) {
         Some(attr) => return attr
         None => ()
       }
-      let live = (state.engine.read_live_docs()) catch { _ => [] }
-      for d in live {
-        if d.id == doc_id {
-          let attr : DocAttributes = { text: d.text, category: d.category, ts: d.ts, public: d.public }
-          state.doc_cache.set(doc_id, attr)
-          return attr
-        }
-      }
-    }
     None => ()
   }
   let mut s_idx = n.manifest.segments.length() - 1
@@ -909,7 +1408,7 @@ fn[T : @store.ObjectStore] lookup_doc_attrs(
               let public = if i < c.pubs.length() { c.pubs[i] } else { true }
               let attr : DocAttributes = { text, category, ts, public }
               match active_ns.get(ns) {
-                Some(state) => state.doc_cache.set(doc_id, attr)
+                Some(state) => state.doc_cache.set(doc_id.to_string(), attr)
                 None => ()
               }
               return attr
@@ -1561,6 +2060,8 @@ async fn handle_query(
       "include_attributes and exclude_attributes are mutually exclusive",
     )
   }
+  // consistency 是历史兼容参数：只校验取值，不改变读路径（始终读进程内权威
+  // build 快照）。旧版本也从未据此切换实现，这里不新增未实现的承诺。
   let _consistency = match m.get("consistency") {
     Some(String(s)) =>
       if s == "strong" || s == "eventual" || s == "strong_nocache" {
@@ -1702,40 +2203,20 @@ async fn handle_write(
     None => @store.read_head(store, ns, "")
   }
 
-  // 同步推进 MergeTreeEngine 并通知 in-process Compactor
+  // 写路径只走 build：不再同步推进 mtree 双写，也不再通知内存 compactor。
   let state = get_or_create_ns_state(store, ns, dim)
-  try {
-    if build_head != "" {
-      state.build_head = build_head
-    }
-    if w.docs.length() > 0 && state.engine.get_manifest().parts.is_empty() {
-      let _ = state.engine.append_base_part(w.docs)
-    } else if w.docs.length() > 0 && w.deletes.length() > 0 {
-      let _ = state.engine.mutate_rows(w.docs, w.deletes)
-    } else if w.docs.length() > 0 {
-      let _ = state.engine.append_l0_delta_part(w.docs)
-    } else if w.deletes.length() > 0 {
-      state.engine.soft_delete(w.deletes)
-    }
-    if w.docs.length() > 0 || w.deletes.length() > 0 {
-      state.engine.publish_manifest()
-      let now = @async.now()
-      state.compactor.notify_mutation(now)
-    }
-  } catch {
-    _ => ()
-  }
   if build_head != "" {
     store.put(@store.head_pointer_key(ns), @utf8.encode(build_head))
     state.update_after_write(store, ns, build_head)
+    mark_namespace_dirty(ns)
   }
   for d in w.docs {
-    state.doc_cache.set(d.id, { text: d.text, category: d.category, ts: d.ts, public: d.public })
-    state.doc_full_cache.set(d.id, d)
+    state.doc_cache.set(d.id.to_string(), { text: d.text, category: d.category, ts: d.ts, public: d.public })
+    state.doc_full_cache.set(d.id.to_string(), d)
   }
   for id in w.deletes {
-    state.doc_cache.remove(id)
-    state.doc_full_cache.remove(id)
+    state.doc_cache.remove(id.to_string())
+    state.doc_full_cache.remove(id.to_string())
   }
 
   let head = build_head
@@ -1866,28 +2347,14 @@ fn patch_rows_core(
     None => @store.read_head(store, ns, "")
   }
 
-  try {
-    if build_head != "" {
-      state.build_head = build_head
-    }
-    if state.engine.get_manifest().parts.is_empty() {
-      let _ = state.engine.append_base_part(updated_docs)
-    } else {
-      let _ = state.engine.append_l0_delta_part(updated_docs)
-    }
-    state.engine.publish_manifest()
-    let now = @async.now()
-    state.compactor.notify_mutation(now)
-  } catch {
-    _ => ()
-  }
   if build_head != "" {
     store.put(@store.head_pointer_key(ns), @utf8.encode(build_head))
     state.update_after_write(store, ns, build_head)
+    mark_namespace_dirty(ns)
   }
   for d in updated_docs {
-    state.doc_cache.set(d.id, { text: d.text, category: d.category, ts: d.ts, public: d.public })
-    state.doc_full_cache.set(d.id, d)
+    state.doc_cache.set(d.id.to_string(), { text: d.text, category: d.category, ts: d.ts, public: d.public })
+    state.doc_full_cache.set(d.id.to_string(), d)
   }
   (updated_docs.length(), build_head)
 }
@@ -1970,24 +2437,17 @@ fn delete_by_filter_core(
       Some(h) => h
       None => @store.read_head(store, ns, "")
     }
-    try {
-      if build_head != "" {
-        state.build_head = build_head
-      }
-      state.engine.soft_delete(ids)
-      state.engine.publish_manifest()
-      let now = @async.now()
-      state.compactor.notify_mutation(now)
-    } catch {
-      _ => ()
+    if build_head != "" {
+      state.build_head = build_head
     }
     if build_head != "" {
       store.put(@store.head_pointer_key(ns), @utf8.encode(build_head))
       state.update_after_write(store, ns, build_head)
+      mark_namespace_dirty(ns)
     }
     for id in ids {
-      state.doc_cache.remove(id)
-      state.doc_full_cache.remove(id)
+      state.doc_cache.remove(id.to_string())
+      state.doc_full_cache.remove(id.to_string())
     }
   }
   ids.length()
@@ -2355,8 +2815,9 @@ async fn dispatch(
         ("compact", Post) => {
           try {
             let state = get_or_load_ns_state(store, ns)
-            let cfg = cfg_for(store, ns, false, None, 0)
-            @build.compact_global(store, cfg, ns)
+            // 显式 compact 走 build 段合并（同时重建/复位全局 IVF 代际链）。
+            // 失败只会保留旧 head，不会退化成 mtree 双写。
+            compact_namespace_state(store, state, ns)
             let new_head = match @store.read_head_pointer(store, ns) {
               Some(h) => h
               None => @store.read_head(store, ns, "")

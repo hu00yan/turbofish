@@ -15,7 +15,7 @@
 // 11. 双层集成：ChaosStore 包装 SimStore。
 
 ///|
-test "DST Chaos: passthrough healthy operations with virtual latency" {
+async test "DST Chaos: passthrough healthy operations with virtual latency" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 12345UL)
   store.set_base_latency(500.0) // 500us base latency
@@ -72,7 +72,7 @@ test "DST Chaos: passthrough healthy operations with virtual latency" {
 }
 
 ///|
-test "DST Chaos: S3 503 RateLimit/SlowDown fault injection and retry resilience" {
+async test "DST Chaos: S3 503 RateLimit/SlowDown fault injection and retry resilience" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 42UL)
   store.set_base_latency(100.0)
@@ -118,7 +118,7 @@ test "DST Chaos: S3 503 RateLimit/SlowDown fault injection and retry resilience"
 }
 
 ///|
-test "DST Chaos: S3 412 PreconditionFailed CAS conflict and retry resilience" {
+async test "DST Chaos: S3 412 PreconditionFailed CAS conflict and retry resilience" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 99UL)
   store.set_base_latency(50.0)
@@ -164,7 +164,7 @@ test "DST Chaos: S3 412 PreconditionFailed CAS conflict and retry resilience" {
 }
 
 ///|
-test "DST Chaos: S3 404 NotFound on targeted prefix" {
+async test "DST Chaos: S3 404 NotFound on targeted prefix" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 77UL)
 
@@ -197,7 +197,7 @@ test "DST Chaos: S3 404 NotFound on targeted prefix" {
 }
 
 ///|
-test "DST Chaos: ConnectionReset/Timeout with latency accumulation" {
+async test "DST Chaos: ConnectionReset/Timeout with latency accumulation" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 88UL)
   store.set_base_latency(100.0)
@@ -222,7 +222,7 @@ test "DST Chaos: ConnectionReset/Timeout with latency accumulation" {
 }
 
 ///|
-test "DST Chaos: partial truncated Range GET drops tail bytes and triggers Truncated error" {
+async test "DST Chaos: partial truncated Range GET drops tail bytes and triggers Truncated error" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 555UL)
   store.set_base_latency(50.0)
@@ -261,9 +261,9 @@ test "DST Chaos: partial truncated Range GET drops tail bytes and triggers Trunc
 }
 
 ///|
-test "DST Chaos: deterministic replay with identical seed" {
+async test "DST Chaos: deterministic replay with identical seed" {
   // 驱动相同的随机混沌规则与工作负载，验证确定性回放
-  fn run_simulation_workload(s : ChaosStore[@store.MemStore]) -> Unit {
+  async fn run_simulation_workload(s : ChaosStore[@store.MemStore]) -> Unit {
     s.put("ns/k1", b"val1")
     s.put("ns/k2", b"val2")
     let _ = s.get("ns/k1")
@@ -352,7 +352,7 @@ test "DST Chaos: deterministic replay with identical seed" {
 }
 
 ///|
-test "DST Chaos: replay_reset restores state and reproduces exact trace" {
+async test "DST Chaos: replay_reset restores state and reproduces exact trace" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 0x123456789ABCUL)
   store.add_rule(FaultRule::rate_limit_503(probability=0.4, latency_us=3000.0))
@@ -386,7 +386,7 @@ test "DST Chaos: replay_reset restores state and reproduces exact trace" {
 }
 
 ///|
-test "DST Chaos: different seeds produce different fault distributions" {
+async test "DST Chaos: different seeds produce different fault distributions" {
   let memA = @store.MemStore::new()
   let storeA = ChaosStore::new(memA, 111UL)
   storeA.add_rule(FaultRule::rate_limit_503(probability=0.5))
@@ -418,7 +418,7 @@ test "DST Chaos: different seeds produce different fault distributions" {
 }
 
 ///|
-test "DST Chaos: execution trace formatting and dump_trace inspection" {
+async test "DST Chaos: execution trace formatting and dump_trace inspection" {
   let mem = @store.MemStore::new()
   let store = ChaosStore::new(mem, 777UL)
   store.inject_503(max_triggers=1)
@@ -440,7 +440,7 @@ test "DST Chaos: execution trace formatting and dump_trace inspection" {
 }
 
 ///|
-test "DST Chaos: dual-layer simulation with SimStore as underlying store" {
+async test "DST Chaos: dual-layer simulation with SimStore as underlying store" {
   let sim = SimStore::new(SimConfig::aws_default(1001U))
   let chaos = ChaosStore::new(sim, 2026UL)
   chaos.set_base_latency(200.0)

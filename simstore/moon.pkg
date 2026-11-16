@@ -3,3 +3,15 @@ import {
   "turbofish/store",
   "moonbitlang/core/math",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "sim_wbtest.mbt": [ "native", "llvm" ],
+    "chaos_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

@@ -616,7 +616,7 @@ pub fn[T, L : LeaseCoordinator] S3Store::with_lease_coordinator(
 
 ///|
 /// 读 head 指针：0 LIST，1 次 GET /{bucket}/{ns}/_head_ptr
-pub fn[T : HttpTransport] S3Store::read_head_pointer(
+pub async fn[T : HttpTransport] S3Store::read_head_pointer(
   self : S3Store[T],
   ns : String,
 ) -> String? {
@@ -625,7 +625,7 @@ pub fn[T : HttpTransport] S3Store::read_head_pointer(
 
 ///|
 /// 写 head 指针（PUT /{bucket}/{ns}/_head_ptr）
-pub fn[T : HttpTransport] S3Store::write_head_pointer(
+pub async fn[T : HttpTransport] S3Store::write_head_pointer(
   self : S3Store[T],
   ns : String,
   manifest_id : String,
@@ -636,7 +636,7 @@ pub fn[T : HttpTransport] S3Store::write_head_pointer(
 ///|
 /// 解析当前 head：优先经 _head_ptr 1 次 GET 解析；不存在时回退 fallback。
 /// 保证读/打开路径 0 LIST 请求。
-pub fn[T : HttpTransport] S3Store::resolve_head(
+pub async fn[T : HttpTransport] S3Store::resolve_head(
   self : S3Store[T],
   ns : String,
   fallback~ : String = "",
@@ -646,7 +646,7 @@ pub fn[T : HttpTransport] S3Store::resolve_head(
 
 ///|
 /// 直接读指定版本的 manifest 对象（0 LIST，1 次 GET /{bucket}/{ns}/_manifest/{manifest_id}.json）
-pub fn[T : HttpTransport] S3Store::get_versioned_manifest(
+pub async fn[T : HttpTransport] S3Store::get_versioned_manifest(
   self : S3Store[T],
   ns : String,
   manifest_id : String,
@@ -1092,4 +1092,4 @@ fn xml_all_texts(xml : String, tag : String) -> Array[String] {
 pub extend RecordedRequest with Debug::{to_repr}
 pub extend MockS3Transport with HttpTransport::{execute, execute_many}
 pub extend MemLeaseCoordinator with LeaseCoordinator::{release, acquire}
-pub extend S3Store with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete, get_many, get_range_many}
+pub extend S3Store with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete, get_many, get_range_many, put_many}

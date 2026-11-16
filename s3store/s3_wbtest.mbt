@@ -31,7 +31,7 @@ fn hex_val(c : Char) -> Int {
 }
 
 ///|
-test "sha256: FIPS 向量" {
+async test "sha256: FIPS 向量" {
   // SHA256("")
   assert_eq(
     sha256_hex(b""),
@@ -56,7 +56,7 @@ test "sha256: FIPS 向量" {
 }
 
 ///|
-test "hmac-sha256: RFC 4231 向量 case 1-3" {
+async test "hmac-sha256: RFC 4231 向量 case 1-3" {
   // Case 1: key = 0x0b × 20, data = "Hi There"
   let key1 = hex_decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
   assert_eq(
@@ -80,13 +80,13 @@ test "hmac-sha256: RFC 4231 向量 case 1-3" {
 }
 
 ///|
-test "bytes_to_hex / hex_decode roundtrip" {
+async test "bytes_to_hex / hex_decode roundtrip" {
   let raw = hex_decode("00ff10af")
   assert_eq(bytes_to_hex(raw), "00ff10af")
 }
 
 ///|
-test "sigv4: canonical request（get-vanilla 结构断言）" {
+async test "sigv4: canonical request（get-vanilla 结构断言）" {
   // aws-sig-v4-test-suite get-vanilla 的 canonical request（官方 .creq 文件原文）
   let headers = [
     ("host", "example.amazonaws.com"),
@@ -106,7 +106,7 @@ test "sigv4: canonical request（get-vanilla 结构断言）" {
 }
 
 ///|
-test "sigv4: aws-sig-v4-test-suite get-vanilla（iam, AKIDEXAMPLE）" {
+async test "sigv4: aws-sig-v4-test-suite get-vanilla（iam, AKIDEXAMPLE）" {
   let creds = S3Credentials::{
     access_key: "AKIDEXAMPLE",
     secret_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
@@ -137,7 +137,7 @@ test "sigv4: aws-sig-v4-test-suite get-vanilla（iam, AKIDEXAMPLE）" {
 }
 
 ///|
-test "sigv4: AWS S3 文档示例 GET（Range）" {
+async test "sigv4: AWS S3 文档示例 GET（Range）" {
   let creds = S3Credentials::{
     access_key: "AKIAIOSFODNN7EXAMPLE",
     secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -174,7 +174,7 @@ test "sigv4: AWS S3 文档示例 GET（Range）" {
 }
 
 ///|
-test "sigv4: AWS S3 文档示例 PUT（payload hash + storage class）" {
+async test "sigv4: AWS S3 文档示例 PUT（payload hash + storage class）" {
   let creds = S3Credentials::{
     access_key: "AKIAIOSFODNN7EXAMPLE",
     secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -215,7 +215,7 @@ test "sigv4: AWS S3 文档示例 PUT（payload hash + storage class）" {
 }
 
 ///|
-test "uri_encode / canonical_query" {
+async test "uri_encode / canonical_query" {
   assert_eq(uri_encode("a b/c+d", false), "a%20b/c%2Bd")
   assert_eq(uri_encode("a b/c+d", true), "a%20b%2Fc%2Bd")
   assert_eq(uri_encode("unreserved-._~", true), "unreserved-._~")
@@ -226,7 +226,7 @@ test "uri_encode / canonical_query" {
 }
 
 ///|
-test "sigv4: aws-sig-v4-test-suite get-vanilla-query-unreserved" {
+async test "sigv4: aws-sig-v4-test-suite get-vanilla-query-unreserved" {
   let creds = S3Credentials::{
     access_key: "AKIDEXAMPLE",
     secret_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
@@ -277,7 +277,7 @@ fn fixed_date() -> () -> String {
 }
 
 ///|
-test "GetObject 构造器：URL / host / 授权头结构 / 空 payload hash" {
+async test "GetObject 构造器：URL / host / 授权头结构 / 空 payload hash" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "https://s3.us-east-1.amazonaws.com",
@@ -318,7 +318,7 @@ fn auth_signature(auth : String) -> String {
 }
 
 ///|
-test "GetObject-Range / PutObject 条件头 / DeleteObject 构造器" {
+async test "GetObject-Range / PutObject 条件头 / DeleteObject 构造器" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "https://s3.us-east-1.amazonaws.com",
@@ -355,7 +355,7 @@ test "GetObject-Range / PutObject 条件头 / DeleteObject 构造器" {
 }
 
 ///|
-test "ListObjectsV2 构造器：query 编码与字节序排序" {
+async test "ListObjectsV2 构造器：query 编码与字节序排序" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "https://s3.us-east-1.amazonaws.com",
@@ -373,7 +373,7 @@ test "ListObjectsV2 构造器：query 编码与字节序排序" {
 }
 
 ///|
-test "S3Store::new：缺 scheme 的 endpoint raise Corrupt" {
+async test "S3Store::new：缺 scheme 的 endpoint raise Corrupt" {
   let raised = try {
     let _ = S3Store::new(
       "s3.us-east-1.amazonaws.com",
@@ -391,7 +391,7 @@ test "S3Store::new：缺 scheme 的 endpoint raise Corrupt" {
 }
 
 ///|
-test "mock 状态模拟：get / 404 / range 206 / head / delete" {
+async test "mock 状态模拟：get / 404 / range 206 / head / delete" {
   let m = MockS3Transport::new("bucket")
   m.seed("d/a.bin", Bytes::makei(100, i => (i % 251).to_byte()))
   let (st1, hs1, body1) = m.execute(
@@ -448,7 +448,7 @@ test "mock 状态模拟：get / 404 / range 206 / head / delete" {
 }
 
 ///|
-test "mock 预置响应队列：execute 弹出预置值" {
+async test "mock 预置响应队列：execute 弹出预置值" {
   let m = MockS3Transport::new("bucket")
   m.seed("k", b"seeded") // 预置一个对象，供队列耗尽后验证状态模拟
   m.enqueue(503, [("Retry-After", "1")], b"slow down")
@@ -471,7 +471,7 @@ test "mock 预置响应队列：execute 弹出预置值" {
 }
 
 ///|
-test "S3Store CAS 流程（mock 状态模拟）：语义与 MemStore 对齐" {
+async test "S3Store CAS 流程（mock 状态模拟）：语义与 MemStore 对齐" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "http://127.0.0.1:9000",
@@ -504,7 +504,7 @@ test "S3Store CAS 流程（mock 状态模拟）：语义与 MemStore 对齐" {
 }
 
 ///|
-test "S3Store etag 缓存：预置 412 映射为 put_if_match false" {
+async test "S3Store etag 缓存：预置 412 映射为 put_if_match false" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "http://127.0.0.1:9000",
@@ -526,7 +526,7 @@ test "S3Store etag 缓存：预置 412 映射为 put_if_match false" {
 }
 
 ///|
-test "S3Store get_range：206 截取 + 416 → 空 + 404 → None" {
+async test "S3Store get_range：206 截取 + 416 → 空 + 404 → None" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "http://127.0.0.1:9000",
@@ -568,7 +568,7 @@ test "S3Store get_range：206 截取 + 416 → 空 + 404 → None" {
 }
 
 ///|
-test "S3Store list：mock 分页 continuation token 翻页" {
+async test "S3Store list：mock 分页 continuation token 翻页" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "http://127.0.0.1:9000",
@@ -596,7 +596,7 @@ test "S3Store list：mock 分页 continuation token 翻页" {
 }
 
 ///|
-test "S3Store put/put_if_match 泛型 ObjectStore 调用 + plain put" {
+async test "S3Store put/put_if_match 泛型 ObjectStore 调用 + plain put" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "http://127.0.0.1:9000",
@@ -617,7 +617,7 @@ test "S3Store put/put_if_match 泛型 ObjectStore 调用 + plain put" {
 }
 
 ///|
-fn[T : @store.ObjectStore] must_get_s3(store : T, key : String) -> Bytes {
+async fn[T : @store.ObjectStore] must_get_s3(store : T, key : String) -> Bytes {
   match store.get(key) {
     Some(v) => v
     None => abort("missing key: \{key}")
@@ -625,7 +625,7 @@ fn[T : @store.ObjectStore] must_get_s3(store : T, key : String) -> Bytes {
 }
 
 ///|
-test "S3Store: zero LIST requests on read/open paths via _head_ptr and versioned manifest" {
+async test "S3Store: zero LIST requests on read/open paths via _head_ptr and versioned manifest" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "http://127.0.0.1:9000",
@@ -670,7 +670,7 @@ test "S3Store: zero LIST requests on read/open paths via _head_ptr and versioned
 }
 
 ///|
-test "S3Store: CAS via LeaseCoordinator fallback when conditional writes are disabled" {
+async test "S3Store: CAS via LeaseCoordinator fallback when conditional writes are disabled" {
   let m = MockS3Transport::new("bucket")
   let coord = MemLeaseCoordinator::new()
   let s = S3Store::new(
@@ -714,7 +714,7 @@ test "S3Store: CAS via LeaseCoordinator fallback when conditional writes are dis
 }
 
 ///|
-test "S3Store: LeaseCoordinator mutual exclusion on lease contention" {
+async test "S3Store: LeaseCoordinator mutual exclusion on lease contention" {
   let m = MockS3Transport::new("bucket")
   let coord = MemLeaseCoordinator::new(now_ms=fn() { 1000L })
   let s = S3Store::new(
@@ -741,7 +741,7 @@ test "S3Store: LeaseCoordinator mutual exclusion on lease contention" {
 }
 
 ///|
-test "S3Store: dynamic degradation to LeaseCoordinator on 501 Not Implemented" {
+async test "S3Store: dynamic degradation to LeaseCoordinator on 501 Not Implemented" {
   let m = MockS3Transport::new("bucket")
   m.set_conditional_writes_supported(false)
   let coord = MemLeaseCoordinator::new()

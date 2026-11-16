@@ -1,6 +1,7 @@
 #cfg(any(target="native", target="llvm"))
 import {
   "turbofish/s3store",
+  "turbofish/store",
   "moonbitlang/async",
   "moonbitlang/async/http",
   "moonbitlang/core/encoding/utf8",

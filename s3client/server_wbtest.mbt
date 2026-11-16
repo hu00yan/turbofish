@@ -9,11 +9,36 @@ priv struct FakeS3 {
   mut flaky_left : Int
   list_queries : Array[String]
   errors : Array[String]
+  // 并发观测：当前正在处理的请求数 / 历史峰值（验证客户端真并发）
+  mut current_inflight : Int
+  mut max_inflight_seen : Int
 }
 
 ///|
 fn FakeS3::new() -> FakeS3 {
-  { objects: Map([]), etag_seq: 0, flaky_left: 2, list_queries: [], errors: [] }
+  {
+    objects: Map([]),
+    etag_seq: 0,
+    flaky_left: 2,
+    list_queries: [],
+    errors: [],
+    current_inflight: 0,
+    max_inflight_seen: 0,
+  }
+}
+
+///|
+/// 进入一个请求的处理区间，并刷新并发峰值
+fn FakeS3::enter(self : FakeS3) -> Unit {
+  self.current_inflight += 1
+  if self.current_inflight > self.max_inflight_seen {
+    self.max_inflight_seen = self.current_inflight
+  }
+}
+
+///|
+fn FakeS3::leave(self : FakeS3) -> Unit {
+  self.current_inflight -= 1
 }
 
 ///|
@@ -82,6 +107,8 @@ async fn fake_s3_handler(
   body : &@io.Reader,
   conn : @http.ServerConnection,
 ) -> Unit {
+  state.enter()
+  defer state.leave()
   let payload = body.read_all().binary()
   let raw_path = req.path
   let (route, query) = match raw_path.find("?") {
@@ -90,6 +117,10 @@ async fn fake_s3_handler(
   }
   let hdr = fn(name : String) {
     req.headers.get(@http.CaseInsensitiveString(name))
+  }
+  // 慢路径：/bkt/slow/ 前缀模拟 40ms S3 RTT（用于验证批量接口是真并发）
+  if route.has_prefix("/bkt/slow/") {
+    @async.sleep(40)
   }
   // ---- ListObjectsV2 ----
   if req.meth is @http.Get && route == "/bkt" {
@@ -345,4 +376,143 @@ async test "e2e: 假 S3 服务器验证状态码映射 / Range / CAS / 分页 / 
     println("fake-s3 handler error: \{e}")
   }
   assert_eq(state.errors.length(), 0)
+}
+
+///|
+async test "e2e: 真并发批量 ObjectStore（put_many / get_many / get_range_many）+ CAS 参数顺序" {
+  let state = FakeS3::new()
+  let mut bound : (@http.Server, Int)? = None
+  let mut port = 19347
+  while port < 19377 && bound is None {
+    match try_bind(port) {
+      Some(s) => bound = Some((s, port))
+      None => ()
+    }
+    port += 1
+  }
+  let (server, port) = match bound {
+    Some(x) => x
+    None => panic()
+  }
+  @async.with_task_group() <| group => {
+    group.spawn_bg(no_wait=true, allow_failure=true) <| () => {
+      server.run_forever(
+        async fn (req, body, conn) {
+          try {
+            fake_s3_handler(state, req, body, conn)
+          } catch {
+            e => {
+              state.errors.push(
+                "\{@debug.to_string(req.meth)} \{req.path}: \{e}",
+              )
+            }
+          }
+        },
+        allow_failure=true,
+      )
+    }
+    let client = S3Client::new(
+      "http://127.0.0.1:\{port}",
+      "bkt",
+      "us-east-1",
+      "AKIDEXAMPLE",
+      "secret",
+      max_inflight=4,
+      max_attempts=3,
+    )
+    defer client.close()
+    // ---- 1) 并发写 8 个对象（slow/ 前缀 → 每个 40ms RTT）----
+    let n = 8
+    let items : Array[(String, Bytes)] = Array(capacity=n)
+    for i in 0..<n {
+      items.push(("slow/k\{i}", @utf8.encode("body-\{i}")))
+    }
+    @store.ObjectStore::put_many(client, items)
+    // 写入必须真的落进假 S3（8 个对象 + 1 个探测用 __none__ 都没有额外对象）
+    assert_eq(state.objects.length(), n)
+    // 铁证：写路径确实是并发在飞（max_inflight=4，顺序实现只会有 1）
+    assert_true(state.max_inflight_seen >= 2)
+
+    // ---- 2) 并发整读：下标与内容 100% 对上（中间夹一个缺失 key）----
+    state.max_inflight_seen = 0
+    let keys : Array[String] = ["slow/k0", "slow/missing", "slow/k1"]
+    for i in 2..<n {
+      keys.push("slow/k\{i}")
+    }
+    let got = @store.ObjectStore::get_many(client, keys)
+    assert_eq(got.length(), keys.length())
+    assert_eq(as_text(got[0].unwrap()), "body-0")
+    // None 停在缺失 key 的原下标，不压缩、不重排
+    assert_true(got[1] is None)
+    assert_eq(as_text(got[2].unwrap()), "body-1")
+    for i in 2..<n {
+      assert_eq(as_text(got[i + 1].unwrap()), "body-\{i}")
+    }
+    assert_true(state.max_inflight_seen >= 2)
+
+    // ---- 3) 并发范围读：区间切片与下标都对 ----
+    state.max_inflight_seen = 0
+    let ranges : Array[(String, Int, Int)] = Array(capacity=n)
+    for i in 0..<n {
+      // "body-{i}" 的 [1, 4) → "ody"
+      ranges.push(("slow/k\{i}", 1, 3))
+    }
+    let rg = @store.ObjectStore::get_range_many(client, ranges)
+    assert_eq(rg.length(), ranges.length())
+    for i in 0..<n {
+      assert_eq(as_text(rg[i].unwrap()), "ody")
+    }
+    assert_true(state.max_inflight_seen >= 2)
+
+    // ---- 4) BatchStore 是同一套并发能力的显式命名（结果逐位一致）----
+    let again = @store.BatchStore::get_many(client, ["slow/k3", "slow/missing"])
+    assert_eq(as_text(again[0].unwrap()), "body-3")
+    assert_true(again[1] is None)
+    let again_rg = @store.BatchStore::get_range_many(client, [("slow/k4", 0, 5)])
+    assert_eq(as_text(again_rg[0].unwrap()), "body-")
+
+    // ---- 5) 单键方法经 @store.ObjectStore trait 调用与直接调用等价 ----
+    // （薄委托不能自我递归：trait 实现里调用的是 S3Client 自己的 inherent 方法）
+    assert_eq(as_text(@store.ObjectStore::get(client, "slow/k5").unwrap()), "body-5")
+    @store.ObjectStore::put(client, "slow/trait-put", b"tp")
+    assert_eq(
+      as_text(@store.ObjectStore::get_range(client, "slow/trait-put", 0, 2).unwrap()),
+      "tp",
+    )
+    assert_true(@store.ObjectStore::head_version(client, "slow/trait-put") is Some(_))
+    // FakeS3 的 ListObjectsV2 是固定两页响应，这里只验证 trait 转发到了 list
+    assert_eq(@store.ObjectStore::list(client, "pfx/"), ["pfx/a", "pfx/b"])
+    @store.ObjectStore::delete(client, "slow/trait-put")
+    assert_true(@store.ObjectStore::get(client, "slow/trait-put") is None)
+
+    // ---- 6) ObjectStore::put_if_match 参数顺序 (key, expected, value) ----
+    // create（expected=None → If-None-Match: *）成功
+    assert_true(@store.ObjectStore::put_if_match(client, "slow/cas", None, b"v1"))
+    assert_eq(as_text(client.get("slow/cas").unwrap()), "v1")
+    // 已存在再 create → 412 → false
+    assert_false(@store.ObjectStore::put_if_match(client, "slow/cas", None, b"v2"))
+    assert_eq(as_text(client.get("slow/cas").unwrap()), "v1")
+    // 版本不匹配 → false（参数没被写反：若写反，value 会被当成 expected）
+    assert_false(
+      @store.ObjectStore::put_if_match(
+        client,
+        "slow/cas",
+        Some("\"nope\""),
+        b"v3",
+      ),
+    )
+    assert_eq(as_text(client.get("slow/cas").unwrap()), "v1")
+    // 版本匹配 → true，新 body 落盘
+    let cur = client.head_version("slow/cas").unwrap()
+    assert_true(@store.ObjectStore::put_if_match(client, "slow/cas", Some(cur), b"v4"))
+    assert_eq(as_text(client.get("slow/cas").unwrap()), "v4")
+
+    server.close()
+  }
+  for e in state.errors {
+    println("fake-s3 handler error: \{e}")
+  }
+  assert_eq(state.errors.length(), 0)
+  // 全部请求处理完后在飞请求归零
+  assert_eq(state.current_inflight, 0)
 }

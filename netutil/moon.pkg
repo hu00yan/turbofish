@@ -1,0 +1,25 @@
+supported_targets = "+native"
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/types",
+  "moonbitlang/core/encoding/utf8",
+} for "wbtest"
+
+options(
+  targets: {
+    "reuseport_http.mbt": [ "native", "llvm" ],
+    "reuseport_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

@@ -1,0 +1,28 @@
+// uring：Linux io_uring（raw syscall）+ macOS/POSIX pread worker pool 的异步文件
+// IO 完成引擎。整个包依赖 native 运行时与真实 fd/线程，只在 native/llvm 编译。
+//
+// 硬边界：C worker 线程只碰 C malloc 的 buffer 与 C 侧槽位，绝不持有 MoonBit
+// 对象（native 运行时堆对象不可跨线程）。数据由主线程用 tf_uring_copy_result
+// 拷回 MoonBit Bytes。
+
+supported_targets = "+native"
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/raw_fd",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/raw_fd",
+} for "wbtest"
+
+options(
+  targets: {
+    "uring.mbt": [ "native", "llvm" ],
+    "uring_wbtest.mbt": [ "native", "llvm" ],
+  },
+  "native-stub": [ "uring.c" ],
+)

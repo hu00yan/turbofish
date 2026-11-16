@@ -14,7 +14,7 @@ fn abs_f64(x : Double) -> Double {
 
 ///|
 /// 混合操作序列（延迟确定性测试的驱动器）。
-fn drive_mixed_ops(s : SimStore) -> Unit {
+async fn drive_mixed_ops(s : SimStore) -> Unit {
   s.put("ns/_meta/namespace.json", b"m")
   s.put("ns/_segments/seg0/rows/id.bin", Bytes::make(4096, b'\x05'))
   s.put("ns/_segments/seg0/fts/postings.bin", Bytes::make(70000, b'\x06'))
@@ -27,7 +27,7 @@ fn drive_mixed_ops(s : SimStore) -> Unit {
 }
 
 ///|
-test "billing exact: 1000 S3 GETs = $0.0004" {
+async test "billing exact: 1000 S3 GETs = $0.0004" {
   let s = SimStore::new(SimConfig::aws_default(1U))
   for i in 0..<1000 {
     s.put("ns/_segments/seg\{i}/rows/id.bin", Bytes::make(10, b'\x01'))
@@ -47,7 +47,7 @@ test "billing exact: 1000 S3 GETs = $0.0004" {
 }
 
 ///|
-test "billing exact: 1000 PUTs = $0.005; CAS failure also billed" {
+async test "billing exact: 1000 PUTs = $0.005; CAS failure also billed" {
   let s = SimStore::new(SimConfig::aws_default(2U))
   s.reset_cost()
   for i in 0..<1000 {
@@ -68,7 +68,7 @@ test "billing exact: 1000 PUTs = $0.005; CAS failure also billed" {
 }
 
 ///|
-test "billing exact: 1000 LISTs = $0.0025; DELETE default rate zero" {
+async test "billing exact: 1000 LISTs = $0.0025; DELETE default rate zero" {
   let s = SimStore::new(SimConfig::aws_default(3U))
   s.put("ns/_segments/seg0/rows/id.bin", Bytes::make(8, b'\x03'))
   s.reset_cost()
@@ -90,7 +90,7 @@ test "billing exact: 1000 LISTs = $0.0025; DELETE default rate zero" {
 }
 
 ///|
-test "resident & NVMe hits incur no GET bill" {
+async test "resident & NVMe hits incur no GET bill" {
   let s = SimStore::new(SimConfig::aws_default(4U))
   s.put("ns/_meta/namespace.json", b"meta") // meta → 内存常驻档
   s.put("ns/_segments/seg0/rows/id.bin", Bytes::make(100, b'\x04')) // rows → write-through 进 NVMe
@@ -107,7 +107,7 @@ test "resident & NVMe hits incur no GET bill" {
 }
 
 ///|
-test "latency determinism: same seed identical, different seed differs" {
+async test "latency determinism: same seed identical, different seed differs" {
   let s1 = SimStore::new(SimConfig::aws_default(42U))
   let s2 = SimStore::new(SimConfig::aws_default(42U))
   drive_mixed_ops(s1)
@@ -121,7 +121,7 @@ test "latency determinism: same seed identical, different seed differs" {
 }
 
 ///|
-test "lognormal sampling: p50 within 20% of config, p99/p50 ratio in [2, 4.5]" {
+async test "lognormal sampling: p50 within 20% of config, p99/p50 ratio in [2, 4.5]" {
   // sigma = 0.47 ⇒ 理论 p99/p50 = exp(0.47 * z99)，Irwin-Hall z99 ≈ 2.10 ⇒ ≈ 2.7
   let samples = sample_lognormal_seq(2024U, 10000, 30000.0, 0.47)
   let sorted = samples.copy()
@@ -134,7 +134,7 @@ test "lognormal sampling: p50 within 20% of config, p99/p50 ratio in [2, 4.5]" {
 }
 
 ///|
-test "three-tier: resident mem_us exact, cold read, NVMe warm, cold(), prime_nvme()" {
+async test "three-tier: resident mem_us exact, cold read, NVMe warm, cold(), prime_nvme()" {
   let s = SimStore::new(SimConfig::aws_default(5U))
   s.put("ns/_meta/namespace.json", b"meta")
   s.put("ns/_segments/seg0/rows/id.bin", Bytes::make(1000, b'\x07'))
@@ -198,7 +198,7 @@ test "three-tier: resident mem_us exact, cold read, NVMe warm, cold(), prime_nvm
 }
 
 ///|
-test "LRU: capacity for 2 objects, third insert evicts least-recently-used" {
+async test "LRU: capacity for 2 objects, third insert evicts least-recently-used" {
   let base = SimConfig::aws_default(6U)
   let cfg : SimConfig = { ..base, nvme_capacity_bytes: 250 } // 恰好装 2 个 100B 对象
   let s = SimStore::new(cfg)
@@ -225,7 +225,7 @@ test "LRU: capacity for 2 objects, third insert evicts least-recently-used" {
 }
 
 ///|
-test "get_range: cold range billed once with range-length bytes, repeat hits" {
+async test "get_range: cold range billed once with range-length bytes, repeat hits" {
   let s = SimStore::new(SimConfig::aws_default(7U))
   let key = "ns/_segments/seg0/fts/postings.bin"
   s.put(key, Bytes::make(1000, b'\x09'))
@@ -268,7 +268,7 @@ test "get_range: cold range billed once with range-length bytes, repeat hits" {
 }
 
 ///|
-test "put_if_match CAS semantics match MemStore" {
+async test "put_if_match CAS semantics match MemStore" {
   let s = SimStore::new(SimConfig::aws_default(8U))
   // 期望不存在时才能写入
   assert_eq(s.put_if_match("head", None, b"v1"), true)
@@ -291,7 +291,7 @@ test "put_if_match CAS semantics match MemStore" {
 }
 
 ///|
-test "storage_monthly_bill: known bytes x 0.023 / 2^30 exact" {
+async test "storage_monthly_bill: known bytes x 0.023 / 2^30 exact" {
   let s = SimStore::new(SimConfig::aws_default(9U))
   s.put("ns/_segments/segA/rows/id.bin", Bytes::make(1048576, b'\x0a')) // 1 MiB
   assert_eq(s.total_object_bytes(), 1048576)
@@ -303,7 +303,7 @@ test "storage_monthly_bill: known bytes x 0.023 / 2^30 exact" {
 }
 
 ///|
-test "prime_nvme prefers small objects; oversized object never cached" {
+async test "prime_nvme prefers small objects; oversized object never cached" {
   let base = SimConfig::aws_default(10U)
   let cfg : SimConfig = { ..base, nvme_capacity_bytes: 150 }
   let s = SimStore::new(cfg)
@@ -334,7 +334,7 @@ test "prime_nvme prefers small objects; oversized object never cached" {
 }
 
 ///|
-test "egress billing is separate from request bill" {
+async test "egress billing is separate from request bill" {
   let base = SimConfig::aws_default(12U)
   let cfg : SimConfig = { ..base, egress_enabled: true }
   let s = SimStore::new(cfg)
@@ -353,7 +353,7 @@ test "egress billing is separate from request bill" {
 }
 
 ///|
-test "concurrency makespan models parallel fetches" {
+async test "concurrency makespan models parallel fetches" {
   let base = SimConfig::aws_default(20U)
   let cfg : SimConfig = { ..base, concurrency: 4, nvme_capacity_bytes: 0 }
   let s = SimStore::new(cfg)
@@ -380,7 +380,7 @@ test "concurrency makespan models parallel fetches" {
 }
 
 ///|
-test "latency injection: jitter/spike/retry deterministic" {
+async test "latency injection: jitter/spike/retry deterministic" {
   let base = SimConfig::aws_default(30U)
   let cfg : SimConfig = {
     ..base,
@@ -391,7 +391,7 @@ test "latency injection: jitter/spike/retry deterministic" {
     retry_probability: 0.5,
     retry_p50_us: 10000.0,
   }
-  let mk = fn() -> SimStore {
+  let mk = async fn() -> SimStore {
     let s = SimStore::new(cfg)
     s.put("warm", b"x")
     s.reset_cost()
@@ -422,7 +422,7 @@ test "latency injection: jitter/spike/retry deterministic" {
 }
 
 ///|
-test "egress billing: enabled S3 read adds separate bill_egress" {
+async test "egress billing: enabled S3 read adds separate bill_egress" {
   let base = SimConfig::aws_default(77U)
   let cfg : SimConfig = { ..base, egress_enabled: true }
   let s = SimStore::new(cfg)
@@ -443,7 +443,7 @@ test "egress billing: enabled S3 read adds separate bill_egress" {
 }
 
 ///|
-test "fault injection: put/get/list/delete failures are counted and observable" {
+async test "fault injection: put/get/list/delete failures are counted and observable" {
   let base = SimConfig::aws_default(78U)
   let cfg : SimConfig = {
     ..base,
@@ -468,7 +468,7 @@ test "fault injection: put/get/list/delete failures are counted and observable" 
 }
 
 ///|
-test "turbopuffer scan bill: 1.28GB minimum and $1/PB above it" {
+async test "turbopuffer scan bill: 1.28GB minimum and $1/PB above it" {
   assert_eq(abs_f64(tpu_scan_bill(0) - 1.28e-6) < 1.0e-18, true)
   assert_eq(abs_f64(tpu_scan_bill(1024) - 1.28e-6) < 1.0e-18, true)
   let two_gb = 2000000000L
@@ -477,7 +477,7 @@ test "turbopuffer scan bill: 1.28GB minimum and $1/PB above it" {
 }
 
 ///|
-test "resident disabled: _meta/ falls through to S3 (s3_gets grows)" {
+async test "resident disabled: _meta/ falls through to S3 (s3_gets grows)" {
   let s = SimStore::new(SimConfig::aws_default(50U))
   s.put("ns/_meta/namespace.json", b"meta")
   // resident enabled：内存档，不打 S3
@@ -511,7 +511,7 @@ test "resident disabled: _meta/ falls through to S3 (s3_gets grows)" {
 }
 
 ///|
-test "require_latency: aws_default passes, zero TTFB raises Corrupt" {
+async test "require_latency: aws_default passes, zero TTFB raises Corrupt" {
   let s = SimStore::new(SimConfig::aws_default(51U))
   assert_eq(SimConfig::aws_default(51U).latency_ready(), true)
   let ok = try {
@@ -539,8 +539,8 @@ test "require_latency: aws_default passes, zero TTFB raises Corrupt" {
 }
 
 ///|
-test "admit_all is a synonym for prime_nvme; label marks all-hot" {
-  let mk = fn() -> SimStore {
+async test "admit_all is a synonym for prime_nvme; label marks all-hot" {
+  let mk = async fn() -> SimStore {
     let base = SimConfig::aws_default(52U)
     let cfg : SimConfig = { ..base, nvme_capacity_bytes: 150 }
     let s = SimStore::new(cfg)
@@ -579,7 +579,7 @@ test "admit_all is a synonym for prime_nvme; label marks all-hot" {
 }
 
 ///|
-test "cache_stats: five fields incl nvme_hits sane around hits" {
+async test "cache_stats: five fields incl nvme_hits sane around hits" {
   let s = SimStore::new(SimConfig::aws_default(53U))
   let key = "ns/_segments/seg0/rows/id.bin"
   s.put(key, Bytes::make(100, b'\x01'))
@@ -613,7 +613,7 @@ test "cache_stats: five fields incl nvme_hits sane around hits" {
 }
 
 ///|
-test "resident disabled: put does not re-admit resident key into NVMe" {
+async test "resident disabled: put does not re-admit resident key into NVMe" {
   let s = SimStore::new(SimConfig::aws_default(54U))
   s.set_resident_enabled(false)
   s.reset_cost()
@@ -629,7 +629,7 @@ test "resident disabled: put does not re-admit resident key into NVMe" {
 }
 
 ///|
-test "multicloud profiles and Class A/B request accounting" {
+async test "multicloud profiles and Class A/B request accounting" {
   let s_r2 = SimStore::new(SimConfig::cloudflare_r2(60U))
   s_r2.put("ns/_parts/part1.cpt", Bytes::make(1024, b'\x01'))
   s_r2.put("ns/_manifest/manifest-1.json", Bytes::make(256, b'\x02'))
@@ -655,7 +655,7 @@ test "multicloud profiles and Class A/B request accounting" {
 }
 
 ///|
-test "cache remote delay factor injects S3-representative latency on cache hits" {
+async test "cache remote delay factor injects S3-representative latency on cache hits" {
   // 零远端延迟注入配置
   let s_local = SimStore::new(SimConfig::aws_default(61U))
   s_local.put("ns/_meta/namespace.json", b"local_meta")
@@ -679,7 +679,7 @@ test "cache remote delay factor injects S3-representative latency on cache hits"
 }
 
 ///|
-test "extreme tail latency injection: 1s long tail spikes properly simulated" {
+async test "extreme tail latency injection: 1s long tail spikes properly simulated" {
   let s_tail = SimStore::new(SimConfig::extreme_tail(999U))
   // 写入 100 个对象并清空缓存，执行 100 次冷读
   for i in 0..<100 {

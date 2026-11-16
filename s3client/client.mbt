@@ -667,3 +667,178 @@ pub async fn S3Client::list(
   }
   out
 }
+
+// ---------- @store.ObjectStore / @store.BatchStore ----------
+//
+// S3Client 天生就是异步网络客户端，因此它就是 `@store.ObjectStore` 的原生实现：
+// 单键方法直接复用上面的 async 实现（签名一一对应），批量方法（get_many /
+// get_range_many / put_many）用协程真并发执行——**不是顺序循环**：
+//
+// - 每个请求一个 task，`@async.Semaphore` 把同时在飞的请求数限制在
+//   `max_inflight`；底层连接槽位（slots）本身也是 max_inflight 条持久连接，
+//   两处限流一致，不会互相阻塞（无限嵌套等待）。
+// - 结果按**输入原下标**写入预分配数组：不压缩、不重排，缺失 key（404）
+//   的 None 停在原位，与单键 get / get_range 语义逐位一致（见 store/batch.mbt 契约）。
+// - 任一批次内请求失败（raise S3ClientError）会让 task group 整体失败并取消其余任务，
+//   调用方据此重试整批；不会静默吞掉错误。
+
+///|
+/// 并发批处理内核：为 `count` 个下标各起一个协程，同时在飞数 ≤ `max_inflight`。
+/// `job` 必须按原下标写回结果（由调用方预分配数组），这里不做任何重排。
+async fn S3Client::for_each_inflight(
+  self : S3Client,
+  count : Int,
+  job : async (Int) -> Unit,
+) -> Unit {
+  if count <= 0 {
+    return
+  }
+  let inflight = @async.Semaphore::Semaphore(self.max_inflight)
+  @async.with_task_group(fn (group) {
+    for i in 0..<count {
+      let idx = i
+      group.spawn_bg(async fn () {
+        inflight.acquire()
+        job(idx)
+        inflight.release()
+      })
+    }
+  })
+}
+
+///|
+impl @store.ObjectStore for S3Client with fn get(
+  self : S3Client,
+  key : String,
+) -> Bytes? {
+  self.get(key)
+}
+
+///|
+impl @store.ObjectStore for S3Client with fn put(
+  self : S3Client,
+  key : String,
+  value : Bytes,
+) -> Unit {
+  self.put(key, value)
+}
+
+///|
+/// 注意参数顺序：trait 是 `(key, expected, value)`，而 S3Client 自己的
+/// `put_if_match` 是 `(key, body, expected)`。二者相反，这里显式换位。
+impl @store.ObjectStore for S3Client with fn put_if_match(
+  self : S3Client,
+  key : String,
+  expected : String?,
+  value : Bytes,
+) -> Bool {
+  self.put_if_match(key, value, expected)
+}
+
+///|
+impl @store.ObjectStore for S3Client with fn get_range(
+  self : S3Client,
+  key : String,
+  offset : Int,
+  len : Int,
+) -> Bytes? {
+  self.get_range(key, offset, len)
+}
+
+///|
+impl @store.ObjectStore for S3Client with fn list(
+  self : S3Client,
+  prefix : String,
+) -> Array[String] {
+  self.list(prefix)
+}
+
+///|
+impl @store.ObjectStore for S3Client with fn delete(
+  self : S3Client,
+  key : String,
+) -> Unit {
+  self.delete(key)
+}
+
+///|
+impl @store.ObjectStore for S3Client with fn head_version(
+  self : S3Client,
+  key : String,
+) -> String? {
+  self.head_version(key)
+}
+
+///|
+/// ObjectStore 的批量整读：委托给 @store.BatchStore 的并发实现（同一套调度，
+/// 只保留一个实现，避免 ObjectStore / BatchStore 两份逻辑漂移）。
+impl @store.ObjectStore for S3Client with fn get_many(
+  self : S3Client,
+  keys : Array[String],
+) -> Array[Bytes?] {
+  @store.BatchStore::get_many(self, keys)
+}
+
+///|
+/// ObjectStore 的批量范围读：同样委托给 @store.BatchStore。
+impl @store.ObjectStore for S3Client with fn get_range_many(
+  self : S3Client,
+  ranges : Array[(String, Int, Int)],
+) -> Array[Bytes?] {
+  @store.BatchStore::get_range_many(self, ranges)
+}
+
+///|
+/// 真并发批量写入：n 个 PutObject 同时在飞（≤ max_inflight）。
+impl @store.ObjectStore for S3Client with fn put_many(
+  self : S3Client,
+  items : Array[(String, Bytes)],
+) -> Unit {
+  self.for_each_inflight(items.length(), async fn (i) {
+    let (key, value) = items[i]
+    self.put(key, value)
+  })
+}
+
+///|
+/// 真并发批量整读：n 个 GetObject 同时在飞（≤ max_inflight），结果按原下标写回。
+impl @store.BatchStore for S3Client with fn get_many(
+  self : S3Client,
+  keys : Array[String],
+) -> Array[Bytes?] {
+  let n = keys.length()
+  let out : Array[Bytes?] = Array(capacity=n)
+  for _ in 0..<n {
+    out.push(None)
+  }
+  self.for_each_inflight(n, async fn (i) {
+    let v = self.get(keys[i])
+    out[i] = v
+  })
+  out
+}
+
+///|
+/// 真并发批量范围读：元素为 (key, offset, len)，与单键 get_range 逐位一致。
+impl @store.BatchStore for S3Client with fn get_range_many(
+  self : S3Client,
+  ranges : Array[(String, Int, Int)],
+) -> Array[Bytes?] {
+  let n = ranges.length()
+  let out : Array[Bytes?] = Array(capacity=n)
+  for _ in 0..<n {
+    out.push(None)
+  }
+  self.for_each_inflight(n, async fn (i) {
+    let (key, offset, len) = ranges[i]
+    let v = self.get_range(key, offset, len)
+    out[i] = v
+  })
+  out
+}
+
+pub extend S3Client with @turbofish/store.ObjectStore::{
+  get_many,
+  get_range_many,
+  put_many,
+}

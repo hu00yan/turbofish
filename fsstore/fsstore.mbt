@@ -519,5 +519,5 @@ pub impl @store.BatchStore for FsStore with fn get_range_many(
   out
 }
 
-pub extend FsStore with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete}
+pub extend FsStore with @turbofish/store.ObjectStore::{put_if_match, put, list, get_range, get, delete, put_many}
 pub extend FsStore with @turbofish/store.BatchStore::{get_many, get_range_many}

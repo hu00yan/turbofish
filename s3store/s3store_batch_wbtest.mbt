@@ -1,7 +1,7 @@
 // S3Store 批量读契约测试：批量结果必须与逐项单发完全一致。
 
 ///|
-test "S3Store get_many 与逐个 get 完全一致（含缺失 key、重复 key、顺序）" {
+async test "S3Store get_many 与逐个 get 完全一致（含缺失 key、重复 key、顺序）" {
   let m = MockS3Transport::new("bucket")
   m.seed("a.txt", b"alpha")
   m.seed("b.txt", b"beta")
@@ -36,7 +36,7 @@ test "S3Store get_many 与逐个 get 完全一致（含缺失 key、重复 key�
 }
 
 ///|
-test "S3Store get_range_many 与逐个 get_range 完全一致（含 404 / 越界 / 空读）" {
+async test "S3Store get_range_many 与逐个 get_range 完全一致（含 404 / 越界 / 空读）" {
   let m = MockS3Transport::new("bucket")
   m.seed("data.bin", b"0123456789")
   m.seed("short.bin", b"abc")
@@ -72,7 +72,7 @@ test "S3Store get_range_many 与逐个 get_range 完全一致（含 404 / 越界
 }
 
 ///|
-test "S3Store 空批量返回空数组，不产生请求" {
+async test "S3Store 空批量返回空数组，不产生请求" {
   let m = MockS3Transport::new("bucket")
   let s = S3Store::new(
     "https://s3.us-east-1.amazonaws.com",

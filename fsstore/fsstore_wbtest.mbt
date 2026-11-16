@@ -13,7 +13,7 @@ fn fresh_root(prefix : String) -> String {
 ///|
 /// 测试收尾：删光本测试写入的全部对象（数据 + .ver sidecar + 索引项），
 /// 保证 pid 回收撞名时新运行也是干净起点
-fn cleanup_store(s : FsStore) -> Unit {
+async fn cleanup_store(s : FsStore) -> Unit {
   let keys = s.list("")
   for k in keys {
     s.delete(k)
@@ -21,7 +21,7 @@ fn cleanup_store(s : FsStore) -> Unit {
 }
 
 ///|
-test "put/get roundtrip + overwrite" {
+async test "put/get roundtrip + overwrite" {
   let s = FsStore::new(fresh_root("rw"))
   let data = b"hello turbofish"
   s.put("ns/a.bin", data)
@@ -39,7 +39,7 @@ test "put/get roundtrip + overwrite" {
 }
 
 ///|
-test "get_range: 区间读 + 越界截短 + 空区间" {
+async test "get_range: 区间读 + 越界截短 + 空区间" {
   let s = FsStore::new(fresh_root("range"))
   let data = Bytes::makei(100, i => (i % 251).to_byte())
   s.put("seg/rows/id.bin", data)
@@ -71,7 +71,7 @@ test "get_range: 区间读 + 越界截短 + 空区间" {
 }
 
 ///|
-test "list: 升序 + 前缀过滤（索引驱动）" {
+async test "list: 升序 + 前缀过滤（索引驱动）" {
   let s = FsStore::new(fresh_root("list"))
   s.put("ns/_segments/s2/meta.json", b"2")
   s.put("ns/_segments/s1/meta.json", b"1")
@@ -98,7 +98,7 @@ test "list: 升序 + 前缀过滤（索引驱动）" {
 }
 
 ///|
-test "list 排序与 MemStore 完全一致" {
+async test "list 排序与 MemStore 完全一致" {
   let f = FsStore::new(fresh_root("xsort"))
   let m = @store.MemStore::new()
   let keys = ["b/2", "a/1", "bbb", "a/0/x", "c"]
@@ -111,7 +111,7 @@ test "list 排序与 MemStore 完全一致" {
 }
 
 ///|
-test "delete: 数据 + 版本 sidecar + 索引项" {
+async test "delete: 数据 + 版本 sidecar + 索引项" {
   let s = FsStore::new(fresh_root("del"))
   s.put("a/b.bin", b"data")
   assert_eq(s.get("a/b.bin"), Some(b"data"))
@@ -130,7 +130,7 @@ test "delete: 数据 + 版本 sidecar + 索引项" {
 }
 
 ///|
-test "put_if_match: 与 MemStore 一致的 CAS 语义" {
+async test "put_if_match: 与 MemStore 一致的 CAS 语义" {
   let s = FsStore::new(fresh_root("cas"))
   // 新 key：expected=None 成功
   assert_eq(s.put_if_match("m/manifest.json", None, b"v1-body"), true)
@@ -154,7 +154,7 @@ test "put_if_match: 与 MemStore 一致的 CAS 语义" {
 }
 
 ///|
-test "put: 普通写也推进版本（与 MemStore put_raw 一致）" {
+async test "put: 普通写也推进版本（与 MemStore put_raw 一致）" {
   let s = FsStore::new(fresh_root("ver"))
   s.put("k.bin", b"1")
   s.put("k.bin", b"2")
@@ -165,7 +165,7 @@ test "put: 普通写也推进版本（与 MemStore put_raw 一致）" {
 }
 
 ///|
-test "sidecar 布局：数据按 key 落盘，版本在同目录 .{base}.ver" {
+async test "sidecar 布局：数据按 key 落盘，版本在同目录 .{base}.ver" {
   let root = fresh_root("layout")
   let s = FsStore::new(root)
   let data = b"payload"
@@ -194,7 +194,7 @@ fn expect_corrupt(key : String) -> Unit raise {
 }
 
 ///|
-test "check_key: 非法 key 全部 raise Corrupt" {
+async test "check_key: 非法 key 全部 raise Corrupt" {
   // 合法
   assert_eq(FsStore::check_key("a/b/c.bin"), "a/b/c.bin")
   assert_eq(FsStore::check_key("A9._-z"), "A9._-z")
@@ -221,7 +221,7 @@ test "check_key: 非法 key 全部 raise Corrupt" {
 }
 
 ///|
-test "trait 泛型调用：FsStore 可作为 ObjectStore 使用" {
+async test "trait 泛型调用：FsStore 可作为 ObjectStore 使用" {
   let s = FsStore::new(fresh_root("trait"))
   let data = b"generic"
   s.put("g/k.bin", data)
@@ -230,7 +230,7 @@ test "trait 泛型调用：FsStore 可作为 ObjectStore 使用" {
 }
 
 ///|
-test "BatchStore get_many：与逐个 get 逐位一致（含缺失 key，顺序不变）" {
+async test "BatchStore get_many：与逐个 get 逐位一致（含缺失 key，顺序不变）" {
   let s = FsStore::new(fresh_root("bget"))
   let a = Bytes::makei(64, i => i.to_byte())
   let b = Bytes::makei(64, i => (255 - i).to_byte())
@@ -254,7 +254,7 @@ test "BatchStore get_many：与逐个 get 逐位一致（含缺失 key，顺序�
 }
 
 ///|
-test "BatchStore get_range_many：与逐个 get_range 逐位一致（含缺失 key）" {
+async test "BatchStore get_range_many：与逐个 get_range 逐位一致（含缺失 key）" {
   let s = FsStore::new(fresh_root("brange"))
   let data = Bytes::makei(50, i => i.to_byte())
   s.put("seg/rows/id.bin", data)
@@ -280,7 +280,7 @@ test "BatchStore get_range_many：与逐个 get_range 逐位一致（含缺失 k
 }
 
 ///|
-fn[S : @store.ObjectStore] must_get(
+async fn[S : @store.ObjectStore] must_get(
   store : S,
   key : String,
 ) -> Bytes {

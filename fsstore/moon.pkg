@@ -6,6 +6,11 @@ import {
   "moonbitlang/core/json",
 }
 
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
 options(
   targets: {
     "ffi_native.mbt": [ "native" ],

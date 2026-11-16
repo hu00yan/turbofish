@@ -3,3 +3,15 @@ import {
   "turbofish/store",
   "moonbitlang/core/encoding/utf8",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "s3_wbtest.mbt": [ "native", "llvm" ],
+    "s3store_batch_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

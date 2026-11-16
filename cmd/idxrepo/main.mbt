@@ -92,13 +92,14 @@ fn env_int(key : String, fallback : Int) -> Int {
 }
 
 ///|
-fn err_msg(e : @core.SpndError) -> String {
+fn err_msg(e : Error) -> String {
   match e {
     @core.BadMagic(s) => "BadMagic(\{s})"
     @core.Truncated(s) => "Truncated(\{s})"
     @core.Corrupt(s) => "Corrupt(\{s})"
     @core.NotFound(s) => "NotFound(\{s})"
     @core.CommitConflict(s) => "CommitConflict(\{s})"
+    _ => "\{e}"
   }
 }
 
@@ -429,41 +430,104 @@ fn read_file(path : String, size : Int) -> String? {
 }
 
 ///|
-/// 计数 HTTP transport：委托 CurlTransport，transport 层计数 GET/PUT/字节。
-struct CountingTransport {
-  inner : @s3http.CurlTransport
+/// 计数存储包装：委托纯 MoonBit 异步 `@s3client.S3Client`，在方法层计数
+/// GET / PUT / 写入字节（替代旧的 `@s3http.CurlTransport` transport 计数）。
+pub struct CountingStore {
+  inner : @s3client.S3Client
   mut gets : Int
   mut puts : Int
   mut put_bytes : Int
 }
 
 ///|
-fn CountingTransport::new(inner : @s3http.CurlTransport) -> CountingTransport {
+fn CountingStore::new(inner : @s3client.S3Client) -> CountingStore {
   { inner, gets: 0, puts: 0, put_bytes: 0 }
 }
 
 ///|
-fn CountingTransport::reset(self : CountingTransport) -> Unit {
+fn CountingStore::reset(self : CountingStore) -> Unit {
   self.gets = 0
   self.puts = 0
   self.put_bytes = 0
 }
 
 ///|
-pub impl @s3store.HttpTransport for CountingTransport with fn execute(
-  self : CountingTransport,
-  http_method : String,
-  url : String,
-  headers : Array[(String, String)],
-  body : Bytes,
-) -> (Int, Array[(String, String)], Bytes) {
-  if http_method == "GET" {
-    self.gets += 1
-  } else if http_method == "PUT" {
-    self.puts += 1
-    self.put_bytes += body.length()
+pub impl @store.ObjectStore for CountingStore with get(self, key) {
+  self.gets += 1
+  @s3client.S3Client::get(self.inner, key)
+}
+
+///|
+pub impl @store.ObjectStore for CountingStore with put(self, key, bs) {
+  self.puts += 1
+  self.put_bytes += bs.length()
+  @s3client.S3Client::put(self.inner, key, bs)
+}
+
+///|
+pub impl @store.ObjectStore for CountingStore with put_if_match(
+  self,
+  key,
+  expected,
+  bs
+) {
+  self.puts += 1
+  self.put_bytes += bs.length()
+  @s3client.S3Client::put_if_match(self.inner, key, bs, expected)
+}
+
+///|
+pub impl @store.ObjectStore for CountingStore with get_range(
+  self,
+  key,
+  offset,
+  len
+) {
+  self.gets += 1
+  @s3client.S3Client::get_range(self.inner, key, offset, len)
+}
+
+///|
+pub impl @store.ObjectStore for CountingStore with list(self, prefix) {
+  @s3client.S3Client::list(self.inner, prefix)
+}
+
+///|
+pub impl @store.ObjectStore for CountingStore with delete(self, key) {
+  @s3client.S3Client::delete(self.inner, key)
+}
+
+///|
+pub impl @store.ObjectStore for CountingStore with head_version(self, key) {
+  @s3client.S3Client::head_version(self.inner, key)
+}
+
+// 便捷方法转发。
+pub extend CountingStore with @store.ObjectStore::{
+  get,
+  get_range,
+  put,
+  put_if_match,
+  list,
+  delete,
+  head_version,
+}
+
+///|
+/// 桶可用性探测（新版 MinIO 不自动建桶；失败只告警）。
+async fn CountingStore::bucket_ready(self : CountingStore) -> Bool {
+  let probe = try {
+    Ok(@s3client.S3Client::list(self.inner, ""))
+  } catch {
+    e => Err(e)
   }
-  self.inner.execute(http_method, url, headers, body)
+  match probe {
+    Ok(_) => true
+    Err(e) => {
+      println("  WARNING: bucket LIST failed: \{err_msg(e)}")
+      false
+    }
+  }
 }
 
 ///|
@@ -545,9 +609,9 @@ fn default_queries() -> Array[String] {
 ///|
 /// 单查询报告：BM25 + 向量各 runs 次「open + search」采样（GET 计数 + 延迟），
 /// 首轮结果打印 top-k（位置 = 相对路径:起始行-结束行）。
-fn run_query(
-  store : @s3store.S3Store[CountingTransport],
-  transport : CountingTransport,
+async fn run_query(
+  store : CountingStore,
+  transport : CountingStore,
   ns : String,
   q : String,
   qv : Array[Float],
@@ -556,7 +620,7 @@ fn run_query(
   runs : Int,
   locs : Map[UInt64, String],
   snips : Map[UInt64, String],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let bm_ts : Array[Double] = Array()
   let bm_gets : Array[Int] = Array()
   let mut bm_top : Array[@query.QueryResult] = Array()
@@ -623,7 +687,7 @@ fn run_query(
 }
 
 ///|
-fn run() -> Unit raise @core.SpndError {
+async fn run() -> Unit {
   let root = need_env("IDX_ROOT")
   let ns = env_or("IDX_NS", "idxrepo")
   let batch_size = env_int("IDX_BATCH", 2000)
@@ -646,17 +710,18 @@ fn run() -> Unit raise @core.SpndError {
   println(
     "  endpoint=\{endpoint} bucket=\{bucket} (MinIO 直连, 不经 toxiproxy)",
   )
-  let transport = CountingTransport::new(@s3http.CurlTransport::new())
-  let store = @s3store.S3Store::new(
+  let client = @s3client.S3Client::new(
     endpoint,
     bucket,
     region,
-    { access_key: access, secret_key: secret },
-    transport,
-    fn() { @s3http.now_amz_date() },
+    access,
+    secret,
+    max_inflight=16,
   )
-  if !store.create_bucket() {
-    println("  WARNING: create_bucket failed (status != 200/409)")
+  let transport = CountingStore::new(client)
+  let store = transport
+  if !store.bucket_ready() {
+    println("  WARNING: bucket not ready (create it first: mc mb ...)")
   }
   if fresh && !skip_build {
     let olds = store.list("\{ns}/")
@@ -800,7 +865,7 @@ fn run() -> Unit raise @core.SpndError {
 }
 
 ///|
-fn main {
+async fn main {
   try {
     run()
   } catch {

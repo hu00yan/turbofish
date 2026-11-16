@@ -18,7 +18,7 @@ fn make_test_docs(start_id : UInt64, count : Int, tag : String) -> Array[@core.D
 }
 
 ///|
-test "cmd/serve: zero-copy instant branching" {
+async test "cmd/serve: zero-copy instant branching" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(100U))
@@ -58,7 +58,7 @@ test "cmd/serve: zero-copy instant branching" {
 }
 
 ///|
-test "cmd/serve: write isolation between branches and source" {
+async test "cmd/serve: write isolation between branches and source" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(200U))
@@ -109,7 +109,7 @@ test "cmd/serve: write isolation between branches and source" {
 }
 
 ///|
-test "cmd/serve: delete isolation on branch" {
+async test "cmd/serve: delete isolation on branch" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(300U))
@@ -137,7 +137,7 @@ test "cmd/serve: delete isolation on branch" {
 }
 
 ///|
-test "cmd/serve: compaction on branch without affecting source" {
+async test "cmd/serve: compaction on branch without affecting source" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(400U))
@@ -173,7 +173,7 @@ test "cmd/serve: compaction on branch without affecting source" {
 }
 
 ///|
-test "cmd/serve: snapshot creation and instant restore" {
+async test "cmd/serve: snapshot creation and instant restore" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(500U))
@@ -212,7 +212,7 @@ test "cmd/serve: snapshot creation and instant restore" {
 }
 
 ///|
-test "cmd/serve: multi-tier branch inheritance (A -> B -> C)" {
+async test "cmd/serve: multi-tier branch inheritance (A -> B -> C)" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(600U))
@@ -254,7 +254,7 @@ test "cmd/serve: multi-tier branch inheritance (A -> B -> C)" {
 }
 
 ///|
-test "cmd/serve: branch error cases" {
+async test "cmd/serve: branch error cases" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(700U))
@@ -313,7 +313,7 @@ test "cmd/serve: branch error cases" {
 }
 
 ///|
-test "cmd/serve: snapshot error cases" {
+async test "cmd/serve: snapshot error cases" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(800U))
@@ -358,7 +358,7 @@ test "cmd/serve: snapshot error cases" {
 }
 
 ///|
-test "cmd/serve: zero-copy speed and object count guarantee" {
+async test "cmd/serve: zero-copy speed and object count guarantee" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(900U))
@@ -387,7 +387,7 @@ test "cmd/serve: zero-copy speed and object count guarantee" {
 }
 
 ///|
-test "cmd/serve: multiple snapshots and branching from restored state" {
+async test "cmd/serve: multiple snapshots and branching from restored state" {
   reset_coordinator_for_test()
   reset_branch_origins_for_test()
   let sim = @simstore.SimStore::new(@simstore.SimConfig::aws_default(1000U))

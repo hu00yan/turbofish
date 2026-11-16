@@ -24,7 +24,7 @@
 
 ///|
 /// trait 方法跨包点调用可能不解析，走本地泛型分发（同 query 包 wbtest 的做法）。
-fn[S : @store.ObjectStore] sim_store_list(
+async fn[S : @store.ObjectStore] sim_store_list(
   s : S,
   prefix : String,
 ) -> Array[String] {
@@ -33,7 +33,7 @@ fn[S : @store.ObjectStore] sim_store_list(
 
 ///|
 /// SimStore 当前对象数（结尾汇总用；在全部测量之后调用，不污染计量）。
-fn[S : @store.ObjectStore] sim_object_count(s : S) -> Int {
+async fn[S : @store.ObjectStore] sim_object_count(s : S) -> Int {
   sim_store_list(s, "").length()
 }
 
@@ -63,13 +63,13 @@ fn sim_pad(s : String, w : Int) -> String {
 
 ///|
 /// 执行第 i 条 SimStore 查询（vec/hybrid 用 nprobe=8，与 MemStore 成本口径一致）。
-fn[S : @store.ObjectStore] sim_one_query(
+async fn[S : @store.ObjectStore] sim_one_query(
   kind : CostKind,
   n : @query.Namespace[S],
   i : Int,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   match kind {
     KindBm25 => @query.bm25_search(n, bm25_qs[i], 10, None)
     KindVec => @query.vec_search(n, vec_qvs[i], 10, 8, None)
@@ -116,14 +116,14 @@ fn sim_summarize(
 /// 单类查询的两场景测量（每类 20 查询，与 MemStore 成本口径一致）：
 /// cold-data(warm-meta) = cold+reset 后每查询 open+search；all-hot = admit_all
 /// 全量预热后 open 一次再 reset、复用 namespace 仅 search。返回（cold, all-hot）汇总。
-fn sim_measure(
+async fn sim_measure(
   store_sim : @simstore.SimStore,
   ns : String,
   kind : CostKind,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
   tag : String,
-) -> (SimMeasure, SimMeasure) raise @core.SpndError {
+) -> (SimMeasure, SimMeasure) {
   let nq = bm25_qs.length()
   let kind_label = match kind {
     KindBm25 => "bm25"
@@ -191,7 +191,7 @@ fn sim_measure(
 ///|
 /// SimStore 场景主入口。MemStore 流程保持原样不动；
 /// 这里对 SimStore 独立 ingest 一次后做 sanity + 两场景测量 + 对照表。
-fn run_sim(
+async fn run_sim(
   store_mem : @store.MemStore,
   store_sim : @simstore.SimStore,
   ns : String,
@@ -200,7 +200,7 @@ fn run_sim(
   vec_gate_qvs : Array[Array[Float]],
   bm25_cost_qs : Array[String],
   vec_cost_qvs : Array[Array[Float]],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   // 性能结论前提：延迟注入必须开启；零延迟只允许用于正确性测试。
   store_sim.require_latency()
   // ---- a. SimStore ingest（train_centroids 种子固定，两次 ingest 中心一致）

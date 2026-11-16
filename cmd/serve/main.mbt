@@ -64,52 +64,95 @@ fn meta_key(key : String) -> String {
 }
 
 ///|
-/// 元数据服务使用独立的短连接 transport；只在冷启动加载元数据时使用，
-/// 热查询路径命中进程内缓存后不会再访问它。
-let meta_http : @s3http.CurlTransport = @s3http.CurlTransport::new()
+/// metad 客户端（纯 MoonBit 异步 HTTP，持久连接槽位池）。
+/// `SPND_META_URL` 为空时保持 None：所有元数据操作短路，行为与旧版一致
+/// （元数据仍然回源对象存储）。
+let meta_client : Ref[@meta.MetadClient?] = { val: None }
 
 ///|
-fn meta_get(key : String) -> Bytes? {
-  if meta_url.val == "" || !@meta.is_metadata_key(key) {
+/// 依当前 `meta_url` / `meta_prefix` 准备 metad 客户端（幂等）。
+fn init_meta_client() -> Unit {
+  if meta_url.val == "" {
+    meta_client.val = None
+    return
+  }
+  match meta_client.val {
+    Some(_) => ()
+    None =>
+      meta_client.val = Some(@meta.MetadClient::new(meta_url.val, max_inflight=8))
+  }
+}
+
+///|
+pub fn reset_meta_client_for_test() -> Unit {
+  match meta_client.val {
+    Some(c) => c.close()
+    None => ()
+  }
+  meta_client.val = None
+}
+
+///|
+fn meta_enabled() -> Bool {
+  meta_url.val != "" && meta_client.val is Some(_)
+}
+
+///|
+async fn meta_get(key : String) -> Bytes? {
+  if !meta_enabled() || !@meta.is_metadata_key(key) {
     return None
   }
-  let (status, _headers, body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
-    "GET",
-    meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
-    [],
-    b"",
-  )
-  if status == 200 {
-    Some(body)
-  } else {
-    None
+  match meta_client.val {
+    None => None
+    Some(c) =>
+      (c.get_kv(meta_key(key))) catch {
+        _ => None
+      }
   }
 }
 
 ///|
-fn meta_put(key : String, bs : Bytes) -> Unit {
-  if meta_url.val == "" || !@meta.is_metadata_key(key) {
+async fn meta_put(key : String, bs : Bytes) -> Unit {
+  if !meta_enabled() || !@meta.is_metadata_key(key) {
     return
   }
-  let (_status, _headers, _body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
-    "PUT",
-    meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
-    [],
-    bs,
-  )
+  match meta_client.val {
+    None => ()
+    Some(c) =>
+      (c.put_kv(meta_key(key), bs)) catch {
+        _ => ()
+      }
+  }
 }
 
 ///|
-fn meta_delete(key : String) -> Unit {
-  if meta_url.val == "" || !@meta.is_metadata_key(key) {
+async fn meta_delete(key : String) -> Unit {
+  if !meta_enabled() || !@meta.is_metadata_key(key) {
     return
   }
-  let (_status, _headers, _body) : (Int, Array[(String, String)], Bytes) = meta_http.execute(
-    "DELETE",
-    meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
-    [],
-    b"",
-  )
+  match meta_client.val {
+    None => ()
+    Some(c) =>
+      (c.delete_kv(meta_key(key))) catch {
+        _ => ()
+      }
+  }
+}
+
+///|
+/// 通知 metad 这个 namespace 变脏（紧凑合并由独立进程 cmd/compactd 消费）。
+async fn meta_mark_dirty(ns : String) -> Unit {
+  if !meta_enabled() {
+    return
+  }
+  match meta_client.val {
+    None => ()
+    Some(c) => {
+      let _ = (c.mark_dirty(ns)) catch {
+        _ => false
+      }
+    }
+  }
 }
 
 ///|
@@ -153,73 +196,171 @@ fn parse_int_str(s : String) -> Int? {
 }
 
 ///|
-/// 多后端存储包装：支持 fs:PATH、s3 与 sim (SimStore 仿真)。
+///
+/// 多后端存储包装：支持 fs:PATH、s3（纯 MoonBit 异步 S3Client）与 sim
+/// (SimStore 仿真)。所有后端都已实现 `@store.ObjectStore` 的 async 契约，
+/// 这里只做一层同步外观的委托（impl 体内直接 await-free 调用后端异步方法）。
 pub(all) enum AnyStore {
   FS(@fsstore.FsStore)
-  S3(@s3store.S3Store[@s3http.CurlTransport])
+  S3Async(@s3client.S3Client)
   Sim(@simstore.SimStore)
 }
 
+// ---------- io_uring 完成引擎（FsStore 读路径） ----------
+//
+// `SPND_FS_IO=uring`（native 默认）时，fs 后端的整读/范围读走完成引擎
+// （Linux 内核 io_uring，macOS 走 pread worker pool）；
+// `SPND_FS_IO=pread` 回退到 FsStore 自己的同步 POSIX 读。
+//
+// 写路径保持 FsStore::put：它还要原子 rename + `.ver` 版本 sidecar + 索引
+// 维护，语义不能被绕过（读路径才是随机 IO 的热点）。
+
 ///|
-fn raw_get(store : AnyStore, key : String) -> Bytes? {
+let fs_io_engine : Ref[@uring.UringEngine?] = { val: None }
+
+///|
+/// 当前 fs IO 模式："uring"（默认）或 "pread"。
+fn fs_io_mode() -> String {
+  let v = env_or("SPND_FS_IO", "uring").trim().to_lower()
+  if v == "pread" || v == "sync" || v == "direct" {
+    "pread"
+  } else {
+    "uring"
+  }
+}
+
+///|
+/// native 启动时准备完成引擎（幂等；失败则保持 None 并退回 pread）。
+async fn init_fs_io() -> Unit {
+  if fs_io_engine.val is Some(_) {
+    return
+  }
+  if fs_io_mode() == "pread" {
+    return
+  }
+  let eng = @uring.UringEngine::new() catch {
+    e => {
+      println("[serve] uring init failed, falling back to pread: \{e}")
+      return
+    }
+  }
+  fs_io_engine.val = Some(eng)
+}
+
+///|
+fn fs_io_backend() -> String {
+  match fs_io_engine.val {
+    Some(e) => e.backend_kind()
+    None => "pread"
+  }
+}
+
+///|
+async fn fs_read_path(
+  s : @fsstore.FsStore,
+  eng : @uring.UringEngine,
+  key : String,
+) -> Bytes? {
+  let path = (s.file_path(key)) catch {
+    _ => return @store.ObjectStore::get(s, key)
+  }
+  eng.read_file(path)
+}
+
+///|
+async fn fs_read_range_path(
+  s : @fsstore.FsStore,
+  eng : @uring.UringEngine,
+  key : String,
+  offset : Int,
+  len : Int,
+) -> Bytes? {
+  let path = (s.file_path(key)) catch {
+    _ => return s.get_range(key, offset, len)
+  }
+  eng.read_range(path, offset, len)
+}
+
+///|
+async fn raw_get(store : AnyStore, key : String) -> Bytes? {
   match store {
-    FS(s) => s.get(key)
-    S3(s) => s.get(key)
+    FS(s) =>
+      match fs_io_engine.val {
+        Some(eng) => fs_read_path(s, eng, key)
+        None => s.get(key)
+      }
+    S3Async(s) => @s3client.S3Client::get(s, key)
     Sim(s) => s.get(key)
   }
 }
 
 ///|
-fn raw_get_range(
+async fn raw_get_range(
   store : AnyStore,
   key : String,
   offset : Int,
   len : Int,
 ) -> Bytes? {
   match store {
-    FS(s) => s.get_range(key, offset, len)
-    S3(s) => s.get_range(key, offset, len)
+    FS(s) =>
+      match fs_io_engine.val {
+        Some(eng) => fs_read_range_path(s, eng, key, offset, len)
+        None => s.get_range(key, offset, len)
+      }
+    S3Async(s) => @s3client.S3Client::get_range(s, key, offset, len)
     Sim(s) => s.get_range(key, offset, len)
   }
 }
 
 ///|
-fn raw_list(store : AnyStore, prefix : String) -> Array[String] {
+async fn raw_list(store : AnyStore, prefix : String) -> Array[String] {
   match store {
     FS(s) => s.list(prefix)
-    S3(s) => s.list(prefix)
+    S3Async(s) => @s3client.S3Client::list(s, prefix)
     Sim(s) => s.list(prefix)
   }
 }
 
 ///|
-fn raw_head_version(store : AnyStore, key : String) -> String? {
+async fn raw_head_version(store : AnyStore, key : String) -> String? {
   match store {
     FS(s) => s.head_version(key)
-    S3(s) => s.head_version(key)
+    S3Async(s) => @s3client.S3Client::head_version(s, key)
     Sim(s) => s.head_version(key)
   }
 }
 
 ///|
-/// 批量读取内部存储（S3 走 multi，FS/Sim 走默认顺序 fallback）。
-fn raw_get_many(store : AnyStore, keys : Array[String]) -> Array[Bytes?] {
+/// 批量读取内部存储（S3 走连接池并发 multi，FS/Sim 走默认顺序 fallback）。
+async fn raw_get_many(store : AnyStore, keys : Array[String]) -> Array[Bytes?] {
   match store {
     FS(s) => @store.ObjectStore::get_many(s, keys)
-    S3(s) => @store.ObjectStore::get_many(s, keys)
+    S3Async(s) => {
+      // S3Client 的批量读走连接槽位池并发（ObjectStore impl 在 s3client 包内
+      // 私有，这里显式并发调用公开方法，语义与 get_many 一致）。
+      let jobs : Array[async () -> Bytes?] = Array(capacity=keys.length())
+      for k in keys {
+        let key = k
+        jobs.push(async fn () { @s3client.S3Client::get(s, key) })
+      }
+      @async.all(jobs)
+    }
     Sim(s) => @store.ObjectStore::get_many(s, keys)
   }
 }
 
 ///|
 /// 批量查 metad；只对 metadata key 发请求，未命中不视为错误。
-/// 这一步让冷查询的段 meta / 列元数据也走 multi，而不是逐 key 串行。
-fn meta_get_many(keys : Array[String]) -> Map[String, Bytes] {
+/// 这一步让冷查询的段 meta / 列元数据也走并发 multi，而不是逐 key 串行。
+async fn meta_get_many(keys : Array[String]) -> Map[String, Bytes] {
   let out : Map[String, Bytes] = Map([])
-  if meta_url.val == "" {
+  if !meta_enabled() {
     return out
   }
-  let reqs : Array[(String, String, Array[(String, String)], Bytes)] = Array()
+  let client = match meta_client.val {
+    Some(c) => c
+    None => return out
+  }
   let req_keys : Array[String] = Array()
   let seen : Set[String] = Set([])
   for key in keys {
@@ -227,30 +368,71 @@ fn meta_get_many(keys : Array[String]) -> Map[String, Bytes] {
       continue
     }
     seen.add(key)
-    reqs.push((
-      "GET",
-      meta_url.val + @meta.METAD_KV_PREFIX + meta_key(key),
-      [],
-      b"",
-    ))
     req_keys.push(key)
   }
-  if reqs.is_empty() {
+  if req_keys.is_empty() {
     return out
   }
-  let res : Array[(Int, Array[(String, String)], Bytes)] = meta_http.execute_many(
-    reqs,
-  )
-  if res.length() != req_keys.length() {
-    return out
+  let prefixed : Array[String] = Array(capacity=req_keys.length())
+  for k in req_keys {
+    prefixed.push(meta_key(k))
+  }
+  let res = (client.get_kv_many(prefixed)) catch {
+    _ => return out
   }
   for i in 0..<req_keys.length() {
-    let (status, _headers, body) = res[i]
-    if status == 200 {
-      out.set(req_keys[i], body)
+    match res[i] {
+      Some(bs) => out.set(req_keys[i], bs)
+      None => ()
     }
   }
   out
+}
+
+///|
+/// SlabV2 单文件段的内嵌 meta 组件读取。
+///
+/// `@build.ingest_l0_slab`（写路径默认入口）把六列 + 倒排 + **meta** 全部塞进
+/// 一个 `segment.slab` 对象，不再单独写 `_segments/{id}/meta.json`；而查询层
+/// 打开一个 namespace 时需要每段的 meta（row_count / min_id / partitions）。
+/// 存储层在这里补一个兼容读：`.../meta.json` 未命中且段是 L0 slab 段时，从
+/// slab 里切片还原。读到的结果会像其它 metadata key 一样被回填 metad。
+async fn slab_embedded_meta(store : AnyStore, key : String) -> Bytes? {
+  let suffix = "/_segments/"
+  let tail = "/meta.json"
+  if !key.has_suffix(tail) {
+    return None
+  }
+  let idx = match key.find(suffix) {
+    Some(i) => i
+    None => return None
+  }
+  let ns = key[:idx].to_owned()
+  let rest = key[idx + suffix.length():]
+  let seg_id = match rest.find("/") {
+    Some(j) => rest[:j].to_owned()
+    None => return None
+  }
+  if !@build.is_l0_slab_segment(seg_id) {
+    return None
+  }
+  let slab_key = @build.segment_slab_key(ns, seg_id)
+  let slab = match raw_get(store, slab_key) {
+    Some(bs) => bs
+    None => return None
+  }
+  let decoded = try {
+    Ok(@format.decode_slab_file(slab))
+  } catch {
+    _ => Err(())
+  }
+  match decoded {
+    Err(_) => None
+    Ok(pair) => {
+      let (_ver, index) = pair
+      index.get_slice(slab, "meta")
+    }
+  }
 }
 
 ///|
@@ -267,12 +449,21 @@ pub impl @store.ObjectStore for AnyStore with get(self, key) {
       }
       Some(bs)
     }
-    None => resolve_branch_get(self, key)
+    None =>
+      match slab_embedded_meta(self, key) {
+        Some(bs) => {
+          if @meta.is_metadata_key(key) {
+            meta_put(key, bs)
+          }
+          Some(bs)
+        }
+        None => resolve_branch_get(self, key)
+      }
   }
 }
 
 ///|
-/// 批量读：先并发查 metad，未命中的再按底层 S3 multi 批量回源，保持原下标。
+/// 批量读：先并发查 metad，未命中的再按底层后端批量回源，保持原下标。
 /// 对 metadata key 的回填仍走 meta_put；branch fallback 只对 miss 逐项处理。
 pub impl @store.ObjectStore for AnyStore with get_many(self, keys) {
   let out : Array[Bytes?] = Array(capacity=keys.length())
@@ -305,9 +496,18 @@ pub impl @store.ObjectStore for AnyStore with get_many(self, keys) {
         out[missing_idx[j]] = Some(bs)
       }
       None =>
-        match resolve_branch_get(self, key) {
-          Some(bs) => out[missing_idx[j]] = Some(bs)
-          None => ()
+        match slab_embedded_meta(self, key) {
+          Some(bs) => {
+            if @meta.is_metadata_key(key) {
+              meta_put(key, bs)
+            }
+            out[missing_idx[j]] = Some(bs)
+          }
+          None =>
+            match resolve_branch_get(self, key) {
+              Some(bs) => out[missing_idx[j]] = Some(bs)
+              None => ()
+            }
         }
     }
   }
@@ -318,7 +518,7 @@ pub impl @store.ObjectStore for AnyStore with get_many(self, keys) {
 pub impl @store.ObjectStore for AnyStore with put(self, key, bs) {
   match self {
     FS(s) => s.put(key, bs)
-    S3(s) => s.put(key, bs)
+    S3Async(s) => @s3client.S3Client::put(s, key, bs)
     Sim(s) => s.put(key, bs)
   }
   meta_put(key, bs)
@@ -333,7 +533,7 @@ pub impl @store.ObjectStore for AnyStore with put_if_match(
 ) {
   let ok = match self {
     FS(s) => s.put_if_match(key, expected, bs)
-    S3(s) => s.put_if_match(key, expected, bs)
+    S3Async(s) => @s3client.S3Client::put_if_match(s, key, bs, expected)
     Sim(s) => s.put_if_match(key, expected, bs)
   }
   if ok {
@@ -377,7 +577,7 @@ pub impl @store.ObjectStore for AnyStore with list(self, prefix) {
 pub impl @store.ObjectStore for AnyStore with delete(self, key) {
   match self {
     FS(s) => s.delete(key)
-    S3(s) => s.delete(key)
+    S3Async(s) => @s3client.S3Client::delete(s, key)
     Sim(s) => s.delete(key)
   }
   meta_delete(key)
@@ -392,13 +592,14 @@ pub impl @store.ObjectStore for AnyStore with head_version(self, key) {
 }
 
 ///|
+/// 构造存储后端。
+/// `SPND_STORE=fs:PATH`（默认）| `s3`（AWS_*/S3_* 环境变量）| `sim`。
 pub fn make_store() -> AnyStore raise @core.SpndError {
   let spec = env_or("SPND_STORE", "fs:/tmp/spnd-data")
   if spec.has_prefix("fs:") {
     return FS(@fsstore.FsStore::new(spec[3:].to_owned()))
   }
   if spec == "s3" {
-    let transport = @s3http.CurlTransport::new()
     let endpoint = env_or(
       "AWS_ENDPOINT_URL_S3",
       env_or("AWS_ENDPOINT_URL", env_or("S3_ENDPOINT", "http://127.0.0.1:9000")),
@@ -416,17 +617,15 @@ pub fn make_store() -> AnyStore raise @core.SpndError {
       "AWS_SECRET_ACCESS_KEY",
       env_or("S3_SECRET_KEY", "minioadmin"),
     )
-    return S3(
-      @s3store.S3Store::new(
+    let inflight = env_int("SPND_S3_MAX_INFLIGHT", 32, 1)
+    return S3Async(
+      @s3client.S3Client::new(
         endpoint,
         bucket,
         region,
-        {
-          access_key,
-          secret_key,
-        },
-        transport,
-        fn() { @s3http.now_amz_date() },
+        access_key,
+        secret_key,
+        max_inflight=inflight,
       ),
     )
   }
@@ -451,6 +650,7 @@ pub fn make_store() -> AnyStore raise @core.SpndError {
   }
   raise @core.Corrupt("SPND_STORE must be fs:PATH, s3, or sim, got \{spec}")
 }
+
 
 ///|
 /// 简单进程内 LRU：条目数与总权重双上限，超限时淘汰最久未使用的条目。
@@ -644,12 +844,14 @@ fn get_coordinator(store : AnyStore) -> @control.Coordinator[AnyStore] {
   match global_coordinator.val {
     Some(coord) => coord
     None => {
-      let worker_count_str = env_or("SPND_WORKERS", "4")
+      // 每进程单份 LRU：进程内不再复制 N 份 worker 缓存（多进程模式由
+      // SO_REUSEPORT 在进程间分摊）。SPND_QUERY_WORKERS 仅保留分片探测语义。
+      let worker_count_str = env_or("SPND_QUERY_WORKERS", "1")
       let count = match parse_int_str(worker_count_str) {
         Some(c) => if c < 1 { 1 } else { c }
-        None => 4
+        None => 1
       }
-      let cache_mb_str = env_or("SPND_WORKER_CACHE_MB", "64")
+      let cache_mb_str = env_or("SPND_CACHE_MB", "64")
       let cache_mb = match parse_int_str(cache_mb_str) {
         Some(m) => if m < 1 { 1 } else { m }
         None => 64
@@ -679,11 +881,11 @@ pub fn reset_coordinator_for_test() -> Unit {
 
 ///|
 /// 取得活跃的内存命名空间快照；已在内存中则零 I/O 返回，未加载时仅冷启动 open 一次。
-fn NamespaceState::get_query_ns(
+async fn NamespaceState::get_query_ns(
   self : NamespaceState,
   store : AnyStore,
   ns : String,
-) -> @query.Namespace[AnyStore] raise @core.SpndError {
+) -> @query.Namespace[AnyStore] {
   let n = match self.query_ns {
     Some(existing) => existing
     None => {
@@ -718,7 +920,7 @@ fn NamespaceState::get_query_ns(
 ///|
 /// 写、补丁、Compaction 提交后立即更新协调者节点的内存元数据与快照，
 /// 查询路径立即可见且无需发起任何 S3 元数据请求。
-fn NamespaceState::update_after_write(
+async fn NamespaceState::update_after_write(
   self : NamespaceState,
   store : AnyStore,
   ns : String,
@@ -947,10 +1149,10 @@ fn get_or_create_ns_state(
 }
 
 ///|
-fn get_or_load_ns_state(
+async fn get_or_load_ns_state(
   store : AnyStore,
   ns : String,
-) -> NamespaceState raise @core.SpndError {
+) -> NamespaceState {
   match active_ns.get(ns) {
     Some(state) => state
     None => {
@@ -982,219 +1184,106 @@ fn get_or_load_ns_state(
 }
 
 ///|
-/// 后台合并参数（全部可用环境变量覆盖）。阈值面向“很多小用户”：只处理脏
-/// namespace，每次 tick 限量，避免 O(active_ns) 扫描。
-struct CompactSettings {
-  interval_ms : Int64
-  max_per_tick : Int
-  seg_threshold : Int
-  delete_ratio : Double
-  idle_ms : Int64
-  max_rows : Int
-}
-
-///|
-fn compact_settings() -> CompactSettings {
-  {
-    interval_ms: env_int("SPND_COMPACT_INTERVAL_MS", 1000, 50).to_int64(),
-    max_per_tick: env_int("SPND_COMPACT_MAX_PER_TICK", 8, 1),
-    seg_threshold: env_int("SPND_COMPACT_SEG_THRESHOLD", 8, 1),
-    delete_ratio: env_int("SPND_COMPACT_DELETE_PCT", 20, 0).to_double() /
-    100.0,
-    idle_ms: env_int("SPND_COMPACT_IDLE_MS", 30000, 0).to_int64(),
-    max_rows: env_int("SPND_COMPACT_MAX_ROWS", 5000000, 0),
-  }
-}
-
-///|
-/// 待合并 namespace 的 FIFO 队列 + 去重集合。只由写入路径入队。
-let dirty_queue : Ref[Array[String]] = { val: [] }
-
-///|
-let dirty_head : Ref[Int] = { val: 0 }
-
-///|
-let dirty_set : Map[String, Bool] = Map([])
-
-///|
-fn mark_namespace_dirty(ns : String) -> Unit {
-  if dirty_set.contains(ns) {
-    return
-  }
-  dirty_set.set(ns, true)
-  dirty_queue.val.push(ns)
-}
-
-///|
-pub fn reset_dirty_for_test() -> Unit {
-  dirty_queue.val = []
-  dirty_head.val = 0
-  dirty_set.clear()
-}
-
-///|
-fn dirty_next() -> String? {
-  while dirty_head.val < dirty_queue.val.length() {
-    let ns = dirty_queue.val[dirty_head.val]
-    dirty_head.val = dirty_head.val + 1
-    if dirty_set.contains(ns) {
-      dirty_set.remove(ns)
-      return Some(ns)
-    }
-  }
-  if dirty_head.val > 0 {
-    dirty_queue.val = []
-    dirty_head.val = 0
-  }
-  None
-}
-
-///|
-fn deleted_ratio(state : NamespaceState) -> Double {
-  if state.manifest_num_docs <= 0 {
-    0.0
-  } else {
-    state.manifest_deleted.to_double() /
-    state.manifest_num_docs.to_double()
-  }
-}
-
-///|
-/// 这个 namespace 是否“将来可能”需要合并：段数 < 2 或超大 namespace 且删除
-/// 比例不高时不再入队，避免每 tick 反复空转。
-fn compact_would_ever(state : NamespaceState, s : CompactSettings) -> Bool {
-  if state.live_segments < 2 {
-    return false
-  }
-  let ratio = deleted_ratio(state)
-  if ratio >= s.delete_ratio {
-    return true
-  }
-  if s.max_rows > 0 && state.manifest_num_docs > s.max_rows {
-    return false
-  }
-  true
-}
-
-///|
-fn should_compact(
-  state : NamespaceState,
-  s : CompactSettings,
-  now : Int64,
-) -> Bool {
-  if !compact_would_ever(state, s) {
-    return false
-  }
-  if state.live_segments > s.seg_threshold {
-    return true
-  }
-  if deleted_ratio(state) >= s.delete_ratio {
-    return true
-  }
-  now - state.last_write_ms >= s.idle_ms
-}
-
-///|
-fn compact_namespace_state(
+/// 显式合并一个 namespace（`POST /compact` 用）：后台合并已经下线到独立进程
+/// `cmd/compactd`，serve 只保留一次同步合并入口以便运维手动触发。
+/// 失败只保留旧 head，绝不退化成 mtree 双写。
+///
+/// 返回合并后的新 head（无变化时返回旧 head）。
+async fn compact_namespace_state(
   store : AnyStore,
   state : NamespaceState,
   ns : String,
-) -> Unit raise @core.SpndError {
+) -> String {
   let cfg = cfg_for(store, ns, false, None, 0)
-  @build.compact(store, cfg, ns)
-  let head = match @store.read_head_pointer(store, ns) {
+  // 与 cmd/compactd 用同一个合并器：乐观 rebase（读 slab/legacy 两种段布局，
+  // CAS 发布新 manifest，不重传已上传的合并段）。
+  let merged = @build.compact_optimistic(store, cfg)
+  let head = match merged {
     Some(h) => h
-    None => @store.read_head(store, ns, "")
+    None =>
+      match @store.read_head_pointer(store, ns) {
+        Some(h) => h
+        None => @store.read_head(store, ns, "")
+      }
   }
   if head != "" {
     store.put(@store.head_pointer_key(ns), @utf8.encode(head))
     state.update_after_write(store, ns, head)
   }
-}
-
-///|
-/// 处理一轮脏 namespace，返回本轮实际取出的 namespace 数。
-/// compact 失败只记日志并保留旧 head，不影响写入。
-fn compact_dirty_once(
-  store : AnyStore,
-  now : Int64,
-  settings : CompactSettings,
-) -> Int {
-  let deferred : Array[String] = Array()
-  let mut processed = 0
-  while processed < settings.max_per_tick {
-    let ns = match dirty_next() {
-      Some(n) => n
-      None => break
-    }
-    processed = processed + 1
-    let state = match (try {
-      Some(get_or_load_ns_state(store, ns))
-    } catch {
-      e => {
-        println("[compactor] load state failed ns=\{ns}: \{err_msg(e)}")
-        None
-      }
-    }) {
-      Some(s) => s
-      None => {
-        deferred.push(ns)
-        continue
-      }
-    }
-    if should_compact(state, settings, now) {
-      let seg_before = state.live_segments
-      let ok = try {
-        compact_namespace_state(store, state, ns)
-        true
-      } catch {
-        e => {
-          println("[compactor] error compacting ns=\{ns}: \{err_msg(e)}")
-          false
-        }
-      }
-      if ok {
-        println(
-          "[compactor] ns=\{ns} segments \{seg_before} -> \{state.live_segments} rows=\{state.manifest_num_docs}",
-        )
-      } else {
-        deferred.push(ns)
-      }
-    } else if compact_would_ever(state, settings) {
-      // 例如还没到 idle 时间：留到下一轮，不在本 tick 内反复处理。
-      deferred.push(ns)
-    }
-  }
-  for ns in deferred {
-    mark_namespace_dirty(ns)
-  }
-  processed
-}
-
-///|
-async fn background_compactor_loop(store : AnyStore) -> Unit {
-  for ;; {
-    let settings = compact_settings()
-    @async.sleep(settings.interval_ms.to_int())
-    let now = @async.now()
-    let _ = compact_dirty_once(store, now, settings)
-  }
+  head
 }
 
 ///|
 /// 查询所读 segment 的小容量内存缓存（条目 + 字节上限，LRU 淘汰）。
+/// 每进程只有这一份（多进程模式下不再在进程内复制 N 份 worker 缓存），
+/// 字节上限由 `SPND_CACHE_MB`（默认 64）统一控制。
 let seg_cache : LruCache[SegmentCache] = LruCache::new(
   env_int("SPND_SEG_CACHE_MAX", 4096, 1),
-  env_mb("SPND_SEG_CACHE_MB", 128),
+  env_mb("SPND_CACHE_MB", 64),
   fn(sc : SegmentCache) -> Int { sc.weight() },
 )
 
 ///|
-fn[T : @store.ObjectStore] load_segment_cache(
-  store : T,
+/// 每段的完整 Doc 数组缓存（SlabV2 单文件段与 legacy 多文件段统一入口）。
+/// 属性补全/补丁命中时只读一次段对象，后续行走内存。
+let seg_docs_cache : LruCache[Array[@core.Doc]] = LruCache::new(
+  env_int("SPND_SEG_DOCS_CACHE_MAX", 1024, 1),
+  0,
+  fn(docs : Array[@core.Doc]) -> Int { docs.length() },
+)
+
+///|
+/// 读一段的全部行（自动派发 SlabV2 单文件 / Legacy 多文件布局），带进程内缓存。
+async fn load_seg_docs(
+  store : AnyStore,
   ns : String,
-  seg_id : String,
-) -> SegmentCache? raise @core.SpndError {
+  seg : @format.SegmentMeta,
+  preloaded : Array[Float]?,
+  preloaded_dim : Int,
+) -> Array[@core.Doc] {
+  match preloaded {
+    Some(_) =>
+      // 全局 IVF：向量不落段内，按代际链预读的 flat 数组重建（不缓存，
+      // 因为不同 manifest 的段坐标可能变化）。
+      @build.load_segment_docs(store, ns, seg, preloaded, preloaded_dim)
+    None =>
+      match seg_docs_cache.get(seg.id) {
+        Some(docs) => docs
+        None => {
+          let docs = @build.load_segment_docs(store, ns, seg, None, 0)
+          seg_docs_cache.set(seg.id, docs)
+          docs
+        }
+      }
+  }
+}
+
+///|
+/// 列缓存：legacy 段读 rows/*.bin，SlabV2 单文件段从段内六列还原。
+async fn load_segment_cache(
+  store : AnyStore,
+  ns : String,
+  seg : @format.SegmentMeta,
+) -> SegmentCache? {
+  let seg_id = seg.id
+  if @build.is_l0_slab_segment(seg_id) {
+    let docs = load_seg_docs(store, ns, seg, None, 0)
+    let ids : Array[UInt64] = Array(capacity=docs.length())
+    let texts : Array[String] = Array(capacity=docs.length())
+    let cats : Array[String] = Array(capacity=docs.length())
+    let tss : Array[Int64] = Array(capacity=docs.length())
+    let pubs : Array[Bool] = Array(capacity=docs.length())
+    for d in docs {
+      ids.push(d.id)
+      texts.push(d.text)
+      cats.push(d.category)
+      tss.push(d.ts)
+      pubs.push(d.public)
+    }
+    let sc : SegmentCache = { ids, texts, cats, tss, pubs }
+    seg_cache.set(seg_id, sc)
+    return Some(sc)
+  }
   let base = "\{ns}/_segments/\{seg_id}"
   let id_bs = match store.get("\{base}/rows/id.bin") {
     Some(b) => b
@@ -1254,10 +1343,210 @@ fn[T] doc_is_deleted(n : @query.Namespace[T], doc_id : UInt64) -> Bool {
 }
 
 ///|
-fn[T : @store.ObjectStore] lookup_doc_full(
-  store : T,
+/// 读一条全局 IVF 代（base 或 delta）的全部 part（含 pack 布局）。
+/// 返回 (dim, parts)；代不存在或没有 part 时返回 (0, [])。
+async fn read_global_gen_all(
+  store : AnyStore,
   ns : String,
-  n : @query.Namespace[T],
+  ver : String,
+) -> (Int, Array[@format.GlobalVecPart]) {
+  let meta_key = "\{ns}/vec/global/\{ver}/meta.json"
+  let meta_bs_opt = (store.get(meta_key)) catch {
+    _ => None
+  }
+  let meta_bs = match meta_bs_opt {
+    Some(bs) => bs
+    None => return (0, [])
+  }
+  let j = (@json.parse(@utf8.decode_lossy(meta_bs.exact_view()))) catch {
+    _ => return (0, [])
+  }
+  let m = match j {
+    Object(mm) => mm
+    _ => return (0, [])
+  }
+  let dim = match m.get("dim") {
+    Some(Number(d, ..)) => d.to_int()
+    _ => 0
+  }
+  let cids : Array[Int] = Array()
+  match m.get("cids") {
+    Some(Array(a)) =>
+      for x in a {
+        match x {
+          Number(d, ..) => cids.push(d.to_int())
+          _ => ()
+        }
+      }
+    _ => ()
+  }
+  let pack_size = match m.get("pack_size") {
+    Some(Number(d, ..)) => if d.to_int() < 1 { 1 } else { d.to_int() }
+    _ => 1
+  }
+  let parts : Array[@format.GlobalVecPart] = Array()
+  if cids.is_empty() {
+    return (dim, parts)
+  }
+  if pack_size <= 1 {
+    let keys : Array[String] = Array(capacity=cids.length())
+    for cid in cids {
+      keys.push("\{ns}/vec/global/\{ver}/part-\{cid}.bin")
+    }
+    let got = @store.ObjectStore::get_many(store, keys)
+    for i in 0..<got.length() {
+      match got[i] {
+        Some(bs) => {
+          let p = (@format.decode_global_part(bs)) catch {
+            _ => continue
+          }
+          parts.push(p)
+        }
+        None => ()
+      }
+    }
+  } else {
+    let packs : Set[Int] = Set([])
+    for cid in cids {
+      packs.add(cid / pack_size)
+    }
+    let pack_ids : Array[Int] = Array()
+    for p in packs {
+      pack_ids.push(p)
+    }
+    pack_ids.sort_by(fn(a, b) { a.compare(b) })
+    for pk in pack_ids {
+      let pkey = "\{ns}/vec/global/\{ver}/pack-\{pk}.bin"
+      let bs_opt = (store.get(pkey)) catch {
+        _ => None
+      }
+      let bs = match bs_opt {
+        Some(b) => b
+        None => continue
+      }
+      let idx = (@format.decode_global_pack_index(bs)) catch {
+        _ => continue
+      }
+      for item in idx {
+        let (_c, off, len) = item
+        let p = (@format.decode_global_part_at(bs, off, len)) catch {
+          _ => continue
+        }
+        parts.push(p)
+      }
+    }
+  }
+  (dim, parts)
+}
+
+///|
+/// manifest 钉住的全局 IVF 代际链 → `"{seg_idx}:{row}"` 的向量表。
+/// compact 会重建全量 base（段序随之重排），所以 base + deltas 的行坐标
+/// 始终与“当前 manifest 的段序”一致。
+let global_vec_table_cache : Ref[(String, Map[String, Array[Float]], Int)?] = {
+  val: None
+}
+
+///|
+async fn cached_global_vec_table(
+  store : AnyStore,
+  ns : String,
+  manifest : @format.ManifestData,
+) -> (Map[String, Array[Float]], Int) {
+  match global_vec_table_cache.val {
+    Some((mid, tbl, dim)) =>
+      if mid == manifest.id {
+        return (tbl, dim)
+      }
+    None => ()
+  }
+  let versions : Array[String] = Array()
+  match manifest.global_gen {
+    Some(g) => {
+      if g.base != "" {
+        versions.push(g.base)
+      }
+      for d in g.deltas {
+        versions.push(d)
+      }
+    }
+    None =>
+      match manifest.vec_global_version {
+        Some(v) => if v != "" {
+          versions.push(v)
+        }
+        None => ()
+      }
+  }
+  let tbl : Map[String, Array[Float]] = Map([])
+  let mut dim = 0
+  let seen : Set[String] = Set([])
+  for ver in versions {
+    if seen.contains(ver) {
+      continue
+    }
+    seen.add(ver)
+    let (vdim, parts) = (read_global_gen_all(store, ns, ver)) catch {
+      _ => (0, [])
+    }
+    if dim == 0 && vdim > 0 {
+      dim = vdim
+    }
+    for gp in parts {
+      for gi in 0..<gp.rows.length() {
+        let (si, ri) = gp.rows[gi]
+        let v : Array[Float] = Array(capacity=gp.dim)
+        let off = gi * gp.dim
+        for d in 0..<gp.dim {
+          v.push(gp.data[off + d])
+        }
+        tbl.set("\{si}:\{ri}", v)
+      }
+    }
+  }
+  global_vec_table_cache.val = Some((manifest.id, tbl, dim))
+  (tbl, dim)
+}
+
+///|
+/// 把某段整段向量拼成 flat 数组（全局 IVF 模式给 load_segment_docs 用）；
+/// 任何一行缺失都返回 None（宁可回退也不伪造向量）。
+fn flat_seg_vectors(
+  tbl : Map[String, Array[Float]],
+  s_idx : Int,
+  row_count : Int,
+  dim : Int,
+) -> Array[Float]? {
+  if dim <= 0 || row_count <= 0 {
+    return None
+  }
+  let out : Array[Float] = Array(capacity=row_count * dim)
+  for r in 0..<row_count {
+    match tbl.get("\{s_idx}:\{r}") {
+      Some(v) =>
+        if v.length() != dim {
+          return None
+        } else {
+          for x in v {
+            out.push(x)
+          }
+        }
+      None => return None
+    }
+  }
+  Some(out)
+}
+
+///|
+/// 取完整 Doc（含向量）。两条段布局统一走 `@build.load_segment_docs`：
+/// - SlabV2 单文件段（L0 delta / compact 输出）：六列打包在一个对象里；
+/// - legacy 多文件段：六列来自 `rows/*.bin`，向量来自 `vec/part-*`。
+/// 全局 IVF 单副本模式（段内不存向量）时先按代际链把整段向量预读成 flat
+/// 数组传进去，语义与 compact/query 的全局向量路径一致。
+async fn lookup_doc_full(
+  store : AnyStore,
+  ns : String,
+  n : @query.Namespace[AnyStore],
   doc_id : UInt64,
 ) -> @core.Doc? {
   if doc_is_deleted(n, doc_id) {
@@ -1271,100 +1560,42 @@ fn[T : @store.ObjectStore] lookup_doc_full(
       }
     None => ()
   }
+  let has_global = n.manifest.vec_global_version is Some(_) ||
+    n.manifest.global_gen is Some(_)
+  let mut vtbl : Map[String, Array[Float]] = Map([])
+  let mut gdim = 0
+  if has_global {
+    let (tbl, dim) = cached_global_vec_table(store, ns, n.manifest)
+    vtbl = tbl
+    gdim = dim
+  }
   let mut s_idx = n.manifest.segments.length() - 1
   while s_idx >= 0 {
     let seg = n.manifest.segments[s_idx]
     if doc_id >= seg.min_id && doc_id <= seg.max_id {
-      let sc = match seg_cache.get(seg.id) {
-        Some(sc) => Some(sc)
-        None => (load_segment_cache(store, ns, seg.id)) catch { _ => None }
+      let pre : Array[Float]? = if has_global {
+        flat_seg_vectors(vtbl, s_idx, seg.row_count, gdim)
+      } else {
+        None
       }
-      match sc {
-        Some(c) =>
-          for i in 0..<c.ids.length() {
-            if c.ids[i] == doc_id {
-              let text = if i < c.texts.length() { c.texts[i] } else { "" }
-              let category = if i < c.cats.length() { c.cats[i] } else { "" }
-              let ts = if i < c.tss.length() { c.tss[i] } else { 0L }
-              let public = if i < c.pubs.length() { c.pubs[i] } else { true }
-              let mut vec : Array[Float] = []
-              let vec_keys = store.list("\{ns}/_segments/\{seg.id}/vec/")
-              for pkey in vec_keys {
-                if pkey.has_prefix("\{ns}/_segments/\{seg.id}/vec/part-") &&
-                  pkey.has_suffix(".bin") {
-                  match store.get(pkey) {
-                    Some(bs) =>
-                      if !@format.is_pq_part(bs) &&
-                        !@format.is_pq_shared_part(bs) {
-                        let part = (@format.decode_part(bs)) catch {
-                          _ => continue
-                        }
-                        for pi in 0..<part.rows.length() {
-                          if part.rows[pi] == i {
-                            vec = Array(capacity=part.dim)
-                            let off = pi * part.dim
-                            for vj in 0..<part.dim {
-                              vec.push(part.data[off + vj])
-                            }
-                            break
-                          }
-                        }
-                        if !vec.is_empty() {
-                          break
-                        }
-                      }
-                    None => ()
-                  }
-                }
-              }
-              if vec.is_empty() {
-                let gvers = store.list("\{ns}/vec/global/")
-                for gv in gvers {
-                  if gv.has_suffix("/meta.json") {
-                    let vdir = gv[:gv.length() - 10]
-                    let gparts = store.list("\{vdir}/")
-                    for gpk in gparts {
-                      if gpk.has_prefix("\{vdir}/part-") &&
-                        gpk.has_suffix(".bin") {
-                        match store.get(gpk) {
-                          Some(bs) => {
-                            let gp = (@format.decode_global_part(bs)) catch {
-                              _ => continue
-                            }
-                            for gi in 0..<gp.rows.length() {
-                              let (si, ri) = gp.rows[gi]
-                              if si == s_idx && ri == i {
-                                vec = Array(capacity=gp.dim)
-                                let off = gi * gp.dim
-                                for vj in 0..<gp.dim {
-                                  vec.push(gp.data[off + vj])
-                                }
-                                break
-                              }
-                            }
-                            if !vec.is_empty() {
-                              break
-                            }
-                          }
-                          None => ()
-                        }
-                      }
-                    }
-                  }
-                  if !vec.is_empty() {
-                    break
-                  }
-                }
-              }
-              let doc : @core.Doc = { id: doc_id, text, category, ts, public, vector: vec }
-              match active_ns.get(ns) {
-                Some(state) => state.doc_full_cache.set(doc_id.to_string(), doc)
-                None => ()
-              }
-              return Some(doc)
+      let docs = (load_seg_docs(store, ns, seg, pre, gdim)) catch {
+        _ => []
+      }
+      for i in 0..<docs.length() {
+        if docs[i].id == doc_id {
+          let mut doc = docs[i]
+          if doc.vector.is_empty() {
+            match vtbl.get("\{s_idx}:\{i}") {
+              Some(v) => doc = { ..doc, vector: v }
+              None => ()
             }
           }
-        None => ()
+          match active_ns.get(ns) {
+            Some(state) => state.doc_full_cache.set(doc_id.to_string(), doc)
+            None => ()
+          }
+          return Some(doc)
+        }
       }
     }
     s_idx -= 1
@@ -1373,10 +1604,10 @@ fn[T : @store.ObjectStore] lookup_doc_full(
 }
 
 ///|
-fn[T : @store.ObjectStore] lookup_doc_attrs(
-  store : T,
+async fn lookup_doc_attrs(
+  store : AnyStore,
   ns : String,
-  n : @query.Namespace[T],
+  n : @query.Namespace[AnyStore],
   doc_id : UInt64,
 ) -> DocAttributes {
   if doc_is_deleted(n, doc_id) {
@@ -1396,7 +1627,7 @@ fn[T : @store.ObjectStore] lookup_doc_attrs(
     if doc_id >= seg.min_id && doc_id <= seg.max_id {
       let sc = match seg_cache.get(seg.id) {
         Some(sc) => Some(sc)
-        None => (load_segment_cache(store, ns, seg.id)) catch { _ => None }
+        None => (load_segment_cache(store, ns, seg)) catch { _ => None }
       }
       match sc {
         Some(c) =>
@@ -1491,7 +1722,7 @@ fn split_ns_path(path : String) -> (String, String)? {
 
 ///|
 /// namespace meta（优先从内存 active_ns 获取，缺失时从 store 读并缓存）。
-fn[T : @store.ObjectStore] ns_meta(
+async fn[T : @store.ObjectStore] ns_meta(
   store : T,
   ns : String,
 ) -> @format.NamespaceMeta? {
@@ -1528,8 +1759,9 @@ struct WriteReq {
   docs : Array[@core.Doc]
   deletes : Array[UInt64]
   tokenizer : @core.Tokenizer?
-  has_vector : Bool
   metric : String? // distance_metric 意图（cosine|euclidean）
+  /// 持久化语义：true = strict（默认，等刷盘后响应）；false = lazy（立即 200）
+  durability_lazy : Bool
 }
 
 ///|
@@ -1642,17 +1874,27 @@ fn parse_write(body : String) -> WriteReq raise @core.SpndError {
       }
     None => None
   }
-  { docs, deletes, tokenizer, has_vector, metric }
+  // durability：默认 strict（等组提交刷盘后响应）；"lazy" 立即 200。
+  let durability_lazy = match m.get("durability") {
+    Some(String("lazy")) => true
+    Some(String("strict")) => false
+    Some(String(other)) =>
+      raise @core.Corrupt("durability must be strict|lazy, got \{other}")
+    Some(_) => raise @core.Corrupt("durability must be a string")
+    None => false
+  }
+  let _ = has_vector
+  { docs, deletes, tokenizer, metric, durability_lazy }
 }
 
 ///|
-fn[T : @store.ObjectStore] cfg_for(
+async fn[T : @store.ObjectStore] cfg_for(
   store : T,
   ns : String,
   rows_have_vector : Bool,
   tok_override : @core.Tokenizer?,
   vector_dim : Int,
-) -> @build.BuildConfig raise @core.SpndError {
+) -> @build.BuildConfig {
   let cfg = @build.BuildConfig::single_copy(ns)
   match ns_meta(store, ns) {
     Some(meta) => {
@@ -2060,9 +2302,10 @@ async fn handle_query(
       "include_attributes and exclude_attributes are mutually exclusive",
     )
   }
-  // consistency 是历史兼容参数：只校验取值，不改变读路径（始终读进程内权威
-  // build 快照）。旧版本也从未据此切换实现，这里不新增未实现的承诺。
-  let _consistency = match m.get("consistency") {
+  // consistency：读请求默认读进程内权威 build 快照；`strong`（及
+  // `strong_nocache`）额外用 metad 的 bundle 对账一次 head（单次 RTT，
+  // 命中时服务端返回 304），保证跨进程立刻可见。
+  let consistency = match m.get("consistency") {
     Some(String(s)) =>
       if s == "strong" || s == "eventual" || s == "strong_nocache" {
         s
@@ -2074,6 +2317,9 @@ async fn handle_query(
   }
   // 协调者节点作为权威内存拥有者：直接使用活跃的 NamespaceState 快照，消除 S3 元数据轮询与 GET
   let state = get_or_load_ns_state(store, ns)
+  if consistency != "eventual" {
+    reconcile_head_with_metad(store, ns, state)
+  }
   let n = state.get_query_ns(store, ns)
   // 聚合 Count / Sum：与检索互斥
   if do_aggregation {
@@ -2161,6 +2407,376 @@ async fn handle_query(
   respond(conn, 200, Json::object(out).stringify())
 }
 
+// ---------- 写路径：每 namespace 组提交（Group Commit） ----------
+
+///|
+/// 一次写请求的提交结果。
+pub(all) enum WriteOutcome {
+  /// 严格模式：已刷盘，携带（本次写入行数, 新 head manifest id）。
+  Committed(Int, String)
+  /// lazy 模式：已进入当前批次立即返回，不保证已经持久化。
+  AckedLazy(Int)
+  /// 反压：namespace 的活跃 L0 批次已达上限（对应 HTTP 429）。
+  Backpressured
+}
+
+///|
+/// 全局组提交管理器：内部按 namespace 维护 pending 缓冲 / 等待者 / 计时器与
+/// 活跃 L0 批次计数，即「每个 namespace 一个组提交状态」。它必须在 serve 的
+/// task group 内创建（计时与刷盘协程挂在该 group 上）。
+/// wbtest 里保持 None 时写路径直接落盘，便于纯逻辑单测。
+let global_group_commit : Ref[@groupcommit.GroupCommitManager?] = { val: None }
+
+///|
+pub fn reset_group_commit_for_test() -> Unit {
+  global_group_commit.val = None
+}
+
+///|
+pub fn group_commit_installed_for_test() -> Bool {
+  global_group_commit.val is Some(_)
+}
+
+///|
+/// 组提交配置：25ms / 2048 行 / 8MB / 12 个活跃 L0 批次。
+/// （`GroupCommitConfig` 由 groupcommit 包导出为只读，统一用它的默认值。）
+fn group_commit_config() -> @groupcommit.GroupCommitConfig {
+  @groupcommit.GroupCommitConfig::default()
+}
+
+///|
+/// rows/deletes → 组提交 payload（JSON，可被 `parse_write` 原样解回）。
+fn encode_rows_body(
+  docs : Array[@core.Doc],
+  deletes : Array[UInt64],
+) -> String {
+  let rows : Array[Json] = Array(capacity=docs.length())
+  for d in docs {
+    let m : Map[String, Json] = Map([])
+    m.set("id", Json::number(d.id.to_double()))
+    m.set("text", Json::string(d.text))
+    m.set("category", Json::string(d.category))
+    m.set("ts", Json::number(d.ts.to_double()))
+    m.set("public", Json::boolean(d.public))
+    if !d.vector.is_empty() {
+      let v : Array[Json] = Array(capacity=d.vector.length())
+      for x in d.vector {
+        v.push(Json::number(x.to_double()))
+      }
+      m.set("vector", Json::array(v))
+    }
+    rows.push(Json::object(m))
+  }
+  let del : Array[Json] = Array(capacity=deletes.length())
+  for id in deletes {
+    del.push(Json::number(id.to_double()))
+  }
+  let root : Map[String, Json] = Map([])
+  root.set("rows", Json::array(rows))
+  root.set("deletes", Json::array(del))
+  Json::object(root).stringify()
+}
+
+///|
+/// 把本批写入后的进程内 ns state 与元数据对齐（缓存 + head）。
+async fn commit_ns_state(
+  store : AnyStore,
+  ns : String,
+  head : String,
+  docs : Array[@core.Doc],
+  deletes : Array[UInt64],
+  dim : Int,
+) -> Unit {
+  let state = get_or_create_ns_state(store, ns, dim)
+  if head != "" {
+    state.update_after_write(store, ns, head)
+  }
+  for d in docs {
+    state.doc_cache.set(d.id.to_string(), {
+      text: d.text,
+      category: d.category,
+      ts: d.ts,
+      public: d.public,
+    })
+    state.doc_full_cache.set(d.id.to_string(), d)
+  }
+  for id in deletes {
+    state.doc_cache.remove(id.to_string())
+    state.doc_full_cache.remove(id.to_string())
+  }
+}
+
+///|
+/// 直接落盘（没有组提交器时的单测路径）：一次 `ingest_l0_slab`。
+async fn direct_ingest(
+  store : AnyStore,
+  ns : String,
+  docs : Array[@core.Doc],
+  deletes : Array[UInt64],
+) -> String {
+  let mut dim = 0
+  if docs.length() > 0 {
+    dim = docs[0].vector.length()
+  }
+  let cfg = cfg_for(store, ns, dim > 0, None, dim)
+  let head = @build.ingest_l0_slab(store, cfg, docs, deletes)
+  store.put(@store.head_pointer_key(ns), @utf8.encode(head))
+  commit_ns_state(store, ns, head, docs, deletes, dim)
+  meta_mark_dirty(ns)
+  head
+}
+
+///|
+/// 组提交 flush_fn：把本批所有 payload 解码聚合，一次 `ingest_l0_slab` 落盘，
+/// 返回新的 head manifest id。成功后同步刷新进程内 ns state、head 指针与
+/// metad 元数据，并 `mark_dirty`（后台合并由 cmd/compactd 消费）。
+async fn flush_batch(
+  store : AnyStore,
+  ns : String,
+  payloads : Array[Bytes],
+) -> String {
+  let docs : Array[@core.Doc] = Array()
+  let deletes : Array[UInt64] = Array()
+  let mut dim = 0
+  for p in payloads {
+    let text = @utf8.decode_lossy(p.exact_view())
+    let parsed = try {
+      Ok(parse_write(text))
+    } catch {
+      e => Err(e)
+    }
+    match parsed {
+      Ok(w) => {
+        for d in w.docs {
+          if dim == 0 && !d.vector.is_empty() {
+            dim = d.vector.length()
+          }
+          docs.push(d)
+        }
+        for id in w.deletes {
+          deletes.push(id)
+        }
+      }
+      Err(_) => println("[serve] group commit: dropping malformed batch payload")
+    }
+  }
+  if docs.is_empty() && deletes.is_empty() {
+    // 空批：返回当前 head，避免无意义的 manifest 写入。
+    return match @store.read_head_pointer(store, ns) {
+      Some(h) => h
+      None => @store.read_head(store, ns, "")
+    }
+  }
+  let cfg = cfg_for(store, ns, dim > 0, None, dim)
+  let head = @build.ingest_l0_slab(store, cfg, docs, deletes)
+  store.put(@store.head_pointer_key(ns), @utf8.encode(head))
+  commit_ns_state(store, ns, head, docs, deletes, dim)
+  meta_mark_dirty(ns)
+  head
+}
+
+///|
+/// 提交一批写：有组提交器时按 durability 语义合并刷盘，否则直接落盘。
+async fn submit_batch(
+  store : AnyStore,
+  ns : String,
+  docs : Array[@core.Doc],
+  deletes : Array[UInt64],
+  durability_strict : Bool,
+) -> WriteOutcome {
+  let payload_text = encode_rows_body(docs, deletes)
+  let payload = @utf8.encode(payload_text)
+  let rows = docs.length() + deletes.length()
+  match global_group_commit.val {
+    None => {
+      let head = direct_ingest(store, ns, docs, deletes)
+      WriteOutcome::Committed(docs.length(), head)
+    }
+    Some(gc) => {
+      let res = (gc.submit(
+        ns,
+        rows,
+        payload.length(),
+        payload,
+        durability_strict=durability_strict,
+      )) catch {
+        @groupcommit.GroupCommitError::Backpressure(_) =>
+          return WriteOutcome::Backpressured
+        e => raise e
+      }
+      match res {
+        @groupcommit.AckedLazy => WriteOutcome::AckedLazy(docs.length())
+        @groupcommit.Flushed(h) => WriteOutcome::Committed(docs.length(), h)
+      }
+    }
+  }
+}
+
+// ---------- 多进程读写分离：写亲和路由 ----------
+
+///|
+/// worker 进程数（`SPND_WORKER_COUNT`，默认 1 = 单进程全兼容）。
+fn worker_count() -> Int {
+  env_int("SPND_WORKER_COUNT", 1, 1)
+}
+
+///|
+/// 本进程 worker id（`SPND_WORKER_ID`，默认 0；越界时回落 0）。
+fn worker_id() -> Int {
+  let n = worker_count()
+  let id = env_int("SPND_WORKER_ID", 0, 0)
+  if id >= n {
+    0
+  } else {
+    id
+  }
+}
+
+///|
+/// worker 内部端口基数（定向请求用，`SPND_INTERNAL_BASE_PORT`）。
+fn internal_base_port() -> Int {
+  env_int("SPND_INTERNAL_BASE_PORT", 19080, 1)
+}
+
+///|
+/// FNV-1a 64-bit（UTF-8 字节）。与 `cmd/supervise` 的
+/// `writer_owner_for_ns` 完全同源（纯函数副本，避免 serve 依赖 supervise）。
+pub fn fnv1a64(s : String) -> UInt64 {
+  let b = Buffer()
+  b.write_string_utf8(s)
+  let bs = b.to_bytes()
+  let mut h : UInt64 = 0xcbf29ce484222325UL
+  for i in 0..<bs.length() {
+    h = h ^ bs[i].to_uint64()
+    h = h * 0x100000001b3UL
+  }
+  h
+}
+
+///|
+/// namespace 的写者归属（确定性 FNV-1a 64 % worker_count）；`worker_count <= 1`
+/// 时恒为 0。任意进程都能算出同一结果，不需要额外协调。
+pub fn writer_owner_for_ns(ns : String, worker_count : Int) -> Int {
+  if worker_count <= 1 {
+    return 0
+  }
+  (fnv1a64(ns) % worker_count.to_uint64()).to_int()
+}
+
+///|
+/// worker 的内部端口 = base + worker_id（worker 间定向转发用）。
+pub fn worker_internal_port(base_internal_port : Int, worker_id : Int) -> Int {
+  if worker_id < 0 {
+    base_internal_port
+  } else {
+    base_internal_port + worker_id
+  }
+}
+
+///|
+/// 是否是需要写亲和的 action（必须落到 namespace 的 owner 进程）。
+fn is_write_action(action : String) -> Bool {
+  action == "write" || action == "patch" || action == "delete_by_filter"
+}
+
+///|
+/// 本进程要不要把该写请求转发给 owner。
+fn needs_forwarding(ns : String, action : String) -> Bool {
+  let n = worker_count()
+  if n <= 1 {
+    return false
+  }
+  if !is_write_action(action) {
+    return false
+  }
+  writer_owner_for_ns(ns, n) != worker_id()
+}
+
+///|
+/// 把写请求转发到 owner worker 的内部端口，透传状态码与响应体。
+async fn forward_to_owner(
+  ns : String,
+  action : String,
+  body : String,
+) -> (Int, String) {
+  let owner = writer_owner_for_ns(ns, worker_count())
+  let port = worker_internal_port(internal_base_port(), owner)
+  let bytes = @utf8.encode(body)
+  let headers : @http.Headers = Map([])
+  headers.set(
+    @http.CaseInsensitiveString("content-length"),
+    bytes.length().to_string(),
+  )
+  headers.set(
+    @http.CaseInsensitiveString("content-type"),
+    "application/json",
+  )
+  let client = @http.Client::Client("http://127.0.0.1:\{port}")
+  let res = try {
+    client.request(
+      @http.Post,
+      "/v1/namespaces/\{ns}/\{action}",
+      extra_headers=headers,
+    )
+    if bytes.length() > 0 {
+      client.write(bytes)
+    }
+    let resp = client.end_request()
+    let data = client.read_all()
+    Ok((resp.code, data.text()))
+  } catch {
+    e => Err(e)
+  }
+  client.close()
+  match res {
+    Ok(pair) => pair
+    Err(e) =>
+      (
+        502,
+        "{\"error\":\"forward to writer worker \{owner} failed: \{e}\"}",
+      )
+  }
+}
+
+///|
+/// `consistency=strong` 时用 metad 的 bundle 对账 head（单次 RTT）：
+/// 服务端 304 表示没变；否则用返回的 head 刷新进程内快照。
+async fn reconcile_head_with_metad(
+  store : AnyStore,
+  ns : String,
+  state : NamespaceState,
+) -> Unit {
+  if !meta_enabled() {
+    return
+  }
+  let client = match meta_client.val {
+    Some(c) => c
+    None => return
+  }
+  let known : String? = if state.build_head == "" {
+    None
+  } else {
+    Some(state.build_head)
+  }
+  let r = (client.get_bundle(ns, known_head=known)) catch {
+    _ => return
+  }
+  match r {
+    @meta.BundleResult::NotModified => ()
+    @meta.BundleResult::Bundle(head, _ns_json) =>
+      if head != "" && head != state.build_head {
+        let man = (store.get("\{ns}/_manifest/\{head}.json")) catch {
+          _ => None
+        }
+        match man {
+          Some(_) => state.update_after_write(store, ns, head)
+          None => ()
+        }
+      }
+  }
+}
+
+
 ///|
 async fn handle_write(
   store : AnyStore,
@@ -2183,47 +2799,38 @@ async fn handle_write(
       }
     None => ()
   }
-  let mut dim = 0
-  if w.docs.length() > 0 {
-    dim = w.docs[0].vector.length()
+  if w.docs.length() == 0 && w.deletes.is_empty() {
+    let out : Map[String, Json] = Map([])
+    out.set("ingested", Json::number(0.0))
+    out.set("head", Json::string(""))
+    respond(conn, 200, Json::object(out).stringify())
+    return
   }
-  let cfg = cfg_for(store, ns, w.has_vector, w.tokenizer, dim)
-  if w.docs.length() > 0 {
-    if ns_meta(store, ns) is Some(_) {
-      let _ = @build.ingest_delta_opts(store, cfg, w.docs, 8, true)
-    } else {
-      let _ = @build.ingest(store, cfg, w.docs)
+  // 记录新 namespace 的 tokenizer 意图（首次 write 时生效）
+  match w.tokenizer {
+    Some(t) => created_tokenizers.set(ns, t)
+    None => ()
+  }
+  // 写路径：交给每 namespace 组提交（strict 等刷盘后返回 head / lazy 立即 200 /
+  // 反压返回 429）。所有 rows+deletes 在同一 flush 里合并成一次 ingest_l0_slab。
+  let outcome = submit_batch(store, ns, w.docs, w.deletes, !w.durability_lazy)
+  match outcome {
+    WriteOutcome::Backpressured =>
+      respond(conn, 429, "{\"error\":\"backpressure\"}")
+    WriteOutcome::AckedLazy(n) => {
+      let out : Map[String, Json] = Map([])
+      out.set("ingested", Json::number(n.to_double()))
+      out.set("head", Json::string(""))
+      out.set("durability", Json::string("lazy"))
+      respond(conn, 200, Json::object(out).stringify())
+    }
+    WriteOutcome::Committed(n, head) => {
+      let out : Map[String, Json] = Map([])
+      out.set("ingested", Json::number(n.to_double()))
+      out.set("head", Json::string(head))
+      respond(conn, 200, Json::object(out).stringify())
     }
   }
-  if w.deletes.length() > 0 {
-    @build.delete_docs(store, cfg, w.deletes)
-  }
-  let build_head = match @store.read_head_pointer(store, ns) {
-    Some(h) => h
-    None => @store.read_head(store, ns, "")
-  }
-
-  // 写路径只走 build：不再同步推进 mtree 双写，也不再通知内存 compactor。
-  let state = get_or_create_ns_state(store, ns, dim)
-  if build_head != "" {
-    store.put(@store.head_pointer_key(ns), @utf8.encode(build_head))
-    state.update_after_write(store, ns, build_head)
-    mark_namespace_dirty(ns)
-  }
-  for d in w.docs {
-    state.doc_cache.set(d.id.to_string(), { text: d.text, category: d.category, ts: d.ts, public: d.public })
-    state.doc_full_cache.set(d.id.to_string(), d)
-  }
-  for id in w.deletes {
-    state.doc_cache.remove(id.to_string())
-    state.doc_full_cache.remove(id.to_string())
-  }
-
-  let head = build_head
-  let out : Map[String, Json] = Map([])
-  out.set("ingested", Json::number(w.docs.length().to_double()))
-  out.set("head", Json::string(head))
-  respond(conn, 200, Json::object(out).stringify())
 }
 
 ///|
@@ -2282,23 +2889,16 @@ fn parse_patch(body : String) -> Array[RowPatch] raise @core.SpndError {
 }
 
 ///|
-fn patch_rows_core(
+/// 读出被 patch 的旧行并把未给出的属性补全（保留原 vector）。
+async fn resolve_patches(
   store : AnyStore,
   ns : String,
   patches : Array[RowPatch],
-) -> (Int, String) raise @core.SpndError {
-  let state = get_or_load_ns_state(store, ns)
+) -> Array[@core.Doc] {
   if patches.is_empty() {
-    let head = if state.build_head != "" {
-      state.build_head
-    } else {
-      match @store.read_head_pointer(store, ns) {
-        Some(h) => h
-        None => @store.read_head(store, ns, "")
-      }
-    }
-    return (0, head)
+    return []
   }
+  let state = get_or_load_ns_state(store, ns)
   let n = state.get_query_ns(store, ns)
   let updated_docs : Array[@core.Doc] = Array()
   for patch in patches {
@@ -2331,32 +2931,69 @@ fn patch_rows_core(
       vector: existing.vector,
     })
   }
+  updated_docs
+}
 
-  let mut dim = 0
-  if updated_docs.length() > 0 {
-    dim = updated_docs[0].vector.length()
+///|
+/// 部分更新：读出旧行（补全未给出的属性）后走同一套组提交落盘。
+/// 返回（本次更新行数, 新 head）。空 patch 直接返回当前 head，不产生写入。
+pub async fn patch_rows_core(
+  store : AnyStore,
+  ns : String,
+  patches : Array[RowPatch],
+) -> (Int, String) {
+  match submit_patches(store, ns, patches, true) {
+    PatchOutcome::Backpressured =>
+      raise @core.CommitConflict("namespace \{ns} is under write backpressure")
+    PatchOutcome::Done(n, head, _) => (n, head)
   }
-  let cfg = cfg_for(store, ns, dim > 0, None, dim)
-  if state.meta is Some(_) || ns_meta(store, ns) is Some(_) {
-    let _ = @build.ingest_delta_opts(store, cfg, updated_docs, 8, true)
-  } else {
-    let _ = @build.ingest(store, cfg, updated_docs)
-  }
-  let build_head = match @store.read_head_pointer(store, ns) {
-    Some(h) => h
-    None => @store.read_head(store, ns, "")
-  }
+}
 
-  if build_head != "" {
-    store.put(@store.head_pointer_key(ns), @utf8.encode(build_head))
-    state.update_after_write(store, ns, build_head)
-    mark_namespace_dirty(ns)
+///|
+/// patch 提交结果（含 lazy 语义）。
+pub(all) enum PatchOutcome {
+  Done(Int, String, Bool)
+  Backpressured
+}
+
+///|
+/// 带 durability 语义的 patch 提交（HTTP 层用）。
+async fn submit_patches(
+  store : AnyStore,
+  ns : String,
+  patches : Array[RowPatch],
+  durability_strict : Bool,
+) -> PatchOutcome {
+  let updated_docs = resolve_patches(store, ns, patches)
+  if updated_docs.is_empty() {
+    return PatchOutcome::Done(0, "", false)
   }
-  for d in updated_docs {
-    state.doc_cache.set(d.id.to_string(), { text: d.text, category: d.category, ts: d.ts, public: d.public })
-    state.doc_full_cache.set(d.id.to_string(), d)
+  let outcome = submit_batch(store, ns, updated_docs, [], durability_strict)
+  match outcome {
+    WriteOutcome::Backpressured => PatchOutcome::Backpressured
+    WriteOutcome::AckedLazy(n) => PatchOutcome::Done(n, "", true)
+    WriteOutcome::Committed(n, head) => PatchOutcome::Done(n, head, false)
   }
-  (updated_docs.length(), build_head)
+}
+
+///|
+/// 读请求体里的 durability 字段（默认 strict）。
+fn parse_durability(body : String) -> Bool raise @core.SpndError {
+  let j = @json.parse(body) catch {
+    _ => return false
+  }
+  match j {
+    Object(m) =>
+      match m.get("durability") {
+        Some(String("lazy")) => true
+        Some(String("strict")) => false
+        Some(String(other)) =>
+          raise @core.Corrupt("durability must be strict|lazy, got \{other}")
+        Some(_) => raise @core.Corrupt("durability must be a string")
+        None => false
+      }
+    _ => false
+  }
 }
 
 ///|
@@ -2367,11 +3004,21 @@ async fn handle_patch(
   conn : @http.ServerConnection,
 ) -> Unit raise {
   let patches = parse_patch(body)
-  let (count, head) = patch_rows_core(store, ns, patches)
-  let out : Map[String, Json] = Map([])
-  out.set("patched", Json::number(count.to_double()))
-  out.set("head", Json::string(head))
-  respond(conn, 200, Json::object(out).stringify())
+  let wants_lazy = parse_durability(body)
+  let outcome = submit_patches(store, ns, patches, !wants_lazy)
+  match outcome {
+    PatchOutcome::Backpressured =>
+      respond(conn, 429, "{\"error\":\"backpressure\"}")
+    PatchOutcome::Done(count, head, was_lazy) => {
+      let out : Map[String, Json] = Map([])
+      out.set("patched", Json::number(count.to_double()))
+      out.set("head", Json::string(head))
+      if was_lazy {
+        out.set("durability", Json::string("lazy"))
+      }
+      respond(conn, 200, Json::object(out).stringify())
+    }
+  }
 }
 
 ///|
@@ -2387,6 +3034,10 @@ async fn handle_health(
   out.set("ns", Json::string(ns))
   out.set("num_docs", Json::number(live_count.to_double()))
   out.set("head", Json::string(n.manifest.id))
+  out.set("segments", Json::number(state.live_segments.to_double()))
+  out.set("manifest_num_docs", Json::number(state.manifest_num_docs.to_double()))
+  out.set("last_write_ms", Json::number(state.last_write_ms.to_double()))
+  out.set("deleted", Json::number(state.manifest_deleted.to_double()))
   out.set(
     "fts_tokenizer",
     match n.meta.fts_tokenizer {
@@ -2422,32 +3073,22 @@ async fn handle_health(
 }
 
 ///|
-fn delete_by_filter_core(
+async fn delete_by_filter_core(
   store : AnyStore,
   ns : String,
   filter : @query.Filter,
-) -> Int raise @core.SpndError {
+) -> Int {
   let state = get_or_load_ns_state(store, ns)
   let n = state.get_query_ns(store, ns)
   let ids = @query.matching_ids(n, filter)
   if ids.length() > 0 {
-    let cfg = cfg_for(store, ns, false, None, 0)
-    @build.delete_docs(store, cfg, ids)
-    let build_head = match @store.read_head_pointer(store, ns) {
-      Some(h) => h
-      None => @store.read_head(store, ns, "")
-    }
-    if build_head != "" {
-      state.build_head = build_head
-    }
-    if build_head != "" {
-      store.put(@store.head_pointer_key(ns), @utf8.encode(build_head))
-      state.update_after_write(store, ns, build_head)
-      mark_namespace_dirty(ns)
-    }
-    for id in ids {
-      state.doc_cache.remove(id.to_string())
-      state.doc_full_cache.remove(id.to_string())
+    // 删除也走组提交（同一 namespace 的 rows/deletes 会被合并成一次落盘）
+    let outcome = submit_batch(store, ns, [], ids, true)
+    match outcome {
+      WriteOutcome::Backpressured =>
+        raise @core.CommitConflict("namespace \{ns} is under write backpressure")
+      WriteOutcome::AckedLazy(_) => ()
+      WriteOutcome::Committed(_, _) => ()
     }
   }
   ids.length()
@@ -2479,11 +3120,11 @@ async fn handle_delete_by_filter(
 }
 
 ///|
-fn copy_namespace_data(
+async fn copy_namespace_data(
   store : AnyStore,
   ns : String,
   dest_ns : String,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   if dest_ns.length() == 0 {
     raise @core.Corrupt("destination cannot be empty")
   }
@@ -2584,6 +3225,18 @@ async fn dispatch(
       let is_health_get = action == "health" && req.meth is Get
       if !is_health_get && !check_auth(req) {
         respond(conn, 401, "{\"error\":\"Unauthorized\"}")
+        return
+      }
+
+      // 写亲和：/write、/patch、/delete_by_filter 落到非 owner 进程时，
+      // 透传到 owner worker 的内部端口（SPND_INTERNAL_BASE_PORT + owner），
+      // 由 owner 统一持锁/组提交，避免同 namespace 跨进程写竞争。
+      if needs_forwarding(ns, action) && req.meth is Post {
+        let body = (reader.read_all()).text() catch {
+          _ => ""
+        }
+        let (code, resp_body) = forward_to_owner(ns, action, body)
+        respond(conn, code, resp_body)
         return
       }
 
@@ -2813,23 +3466,13 @@ async fn dispatch(
           }
         }
         ("compact", Post) => {
-          try {
-            let state = get_or_load_ns_state(store, ns)
-            // 显式 compact 走 build 段合并（同时重建/复位全局 IVF 代际链）。
-            // 失败只会保留旧 head，不会退化成 mtree 双写。
-            compact_namespace_state(store, state, ns)
-            let new_head = match @store.read_head_pointer(store, ns) {
-              Some(h) => h
-              None => @store.read_head(store, ns, "")
+          let state = get_or_load_ns_state(store, ns) catch {
+            _ => {
+              respond(conn, 500, "{\"error\":\"compact failed\"}")
+              return
             }
-            if new_head != "" {
-              state.update_after_write(store, ns, new_head)
-            }
-            let out : Map[String, Json] = Map([])
-            out.set("ok", Json::boolean(true))
-            out.set("ns", Json::string(ns))
-            respond(conn, 200, Json::object(out).stringify())
-          } catch {
+          }
+          let new_head = (compact_namespace_state(store, state, ns)) catch {
             e => {
               let msg = match e {
                 @core.Corrupt(s) => "Corrupt(\{s})"
@@ -2840,8 +3483,14 @@ async fn dispatch(
                 _ => "\{e}"
               }
               respond(conn, 500, "{\"error\":\"compact failed: \{msg}\"}")
+              return
             }
           }
+          let out : Map[String, Json] = Map([])
+          out.set("ok", Json::boolean(true))
+          out.set("ns", Json::string(ns))
+          out.set("head", Json::string(new_head))
+          respond(conn, 200, Json::object(out).stringify())
         }
         (_, _) => respond(conn, 405, "{\"error\":\"method not allowed\"}")
       }
@@ -2851,35 +3500,101 @@ async fn dispatch(
 }
 
 ///|
+/// 存储后端的人类可读描述（启动日志用）。
+fn store_kind(store : AnyStore) -> String {
+  match store {
+    FS(_) => "fs"
+    S3Async(_) => "s3(async)"
+    Sim(_) => "sim"
+  }
+}
+
+///|
+/// serve 主入口。
+///
+/// 单进程（`SPND_WORKER_COUNT<=1`，默认）：一个 `@http.Server` 处理全部请求。
+/// 多进程（`SPND_WORKER_COUNT>1`）：每个 worker 在 `SPND_PORT` 上用
+/// `SO_REUSEPORT` 监听同一地址（内核按连接分发），并在
+/// `SPND_INTERNAL_BASE_PORT + SPND_WORKER_ID` 上开一个内部端口接收写亲和转发。
 async fn main {
   let port = env_or("SPND_PORT", "8080")
   meta_url.val = env_or("SPND_META_URL", "")
   meta_prefix.val = env_or("SPND_META_PREFIX", "")
+  init_meta_client()
+  init_fs_io()
   let store = make_store() catch {
     e => {
       println("store init failed: \{err_msg(e)}")
       return
     }
   }
-  let addr = @socket.Addr::parse("0.0.0.0:\{port}")
-  let server = @http.Server::Server(addr, reuse_addr=true)
-  println("turbofish serve on 0.0.0.0:\{port}")
-  @async.with_task_group(async fn (group) {
-    let _ = group.spawn(
-      async fn () {
-        background_compactor_loop(store)
+  let workers = worker_count()
+  let wid = worker_id()
+  let kind = store_kind(store)
+  @async.with_task_group(async fn (group : @async.TaskGroup[Unit]) {
+    // 组提交管理器：生命周期覆盖所有写入协程（内部按 namespace 分状态）
+    let gc = @groupcommit.GroupCommitManager::new(
+      group,
+      async fn (ns : String, payloads : Array[Bytes]) -> String {
+        flush_batch(store, ns, payloads)
       },
-      no_wait=true,
-      allow_failure=true,
+      config=group_commit_config(),
     )
-    server.run_forever(
-      async fn (req, reader, conn) {
-        dispatch(store, req, reader, conn) catch {
-          _ => respond(conn, 500, "{\"error\":\"internal error\"}")
+    global_group_commit.val = Some(gc)
+    let handler = async fn (
+      req : @http.Request,
+      reader : &@io.Reader,
+      conn : @http.ServerConnection,
+    ) -> Unit {
+      dispatch(store, req, reader, conn) catch {
+        e => {
+          println("[serve] request failed: \{e}")
+          respond(conn, 500, "{\"error\":\"internal error\"}")
         }
-      },
-    )
+      }
+    }
+    if workers <= 1 {
+      let addr = @socket.Addr::parse("0.0.0.0:\{port}")
+      let server = @http.Server::Server(addr, reuse_addr=true)
+      println(
+        "turbofish serve on 0.0.0.0:\{port} (store=\{kind}, fs_io=\{fs_io_backend()}, workers=1)",
+      )
+      server.run_forever(handler)
+    } else {
+      // 外部端口：SO_REUSEPORT，多进程共享同一监听地址、由内核负载均衡
+      let ext = @netutil.ReusePortServer::bind(
+        @socket.Addr::parse("0.0.0.0:\{port}"),
+        headers=Map([]),
+      )
+      let inner_port = worker_internal_port(internal_base_port(), wid)
+      let inner = @netutil.ReusePortServer::bind(
+        @socket.Addr::parse("127.0.0.1:\{inner_port}"),
+        reuse_port=false,
+        headers=Map([]),
+      )
+      println(
+        "turbofish serve worker \{wid}/\{workers} on 0.0.0.0:\{port} (internal :\{inner_port}, store=\{kind}, fs_io=\{fs_io_backend()})",
+      )
+      group.spawn_bg(
+        no_wait=true,
+        allow_failure=true,
+        async fn () {
+          inner.run_forever(handler)
+        },
+      )
+      ext.run_forever(handler)
+    }
   })
 }
 
-pub extend AnyStore with @turbofish/store.ObjectStore::{get, list, put}
+// 便捷方法转发：`store.get(...)`/`store.put(...)` 直接可用（不再依赖隐式提升）。
+pub extend AnyStore with @store.ObjectStore::{
+  get,
+  get_many,
+  get_range,
+  put,
+  put_if_match,
+  list,
+  delete,
+  head_version,
+}

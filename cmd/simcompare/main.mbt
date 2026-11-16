@@ -172,7 +172,7 @@ struct Cell {
 ///|
 /// 单次查询。`cp=None` 走 direct open（每次重新 open）；`cp=Some` 走控制面
 /// acquire/release（同一 Namespace 快照，pin 住到查询结束）。
-fn run_one(
+async fn run_one(
   store : @simstore.SimStore,
   ns : String,
   cls : String,
@@ -181,7 +181,7 @@ fn run_one(
   idx : Int,
   cp : @control.ControlPlane[@simstore.SimStore]?,
   reuse : @query.Namespace[@simstore.SimStore]?,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let (n, release_cp) = match reuse {
     Some(hot) => (hot, false)
     None =>
@@ -206,7 +206,7 @@ fn run_one(
 }
 
 ///|
-fn measure_tier(
+async fn measure_tier(
   store : @simstore.SimStore,
   cfg : @build.BuildConfig,
   cls : String,
@@ -216,7 +216,7 @@ fn measure_tier(
   n : Int,
   burn : Int,
   cp : @control.ControlPlane[@simstore.SimStore]?,
-) -> Cell raise @core.SpndError {
+) -> Cell {
   store.require_latency()
   if tier == TColdMetadata {
     run_one(store, cfg.ns, cls, bm25_qs, vec_qvs, 0, cp, None)
@@ -321,10 +321,10 @@ fn print_header() -> Unit {
 }
 
 ///|
-fn build_store(
+async fn build_store(
   cfg : @build.BuildConfig,
   docs : Array[@core.Doc],
-) -> @simstore.SimStore raise @core.SpndError {
+) -> @simstore.SimStore {
   let store = @simstore.SimStore::new(@simstore.SimConfig::aws_default(7U))
   store.require_latency()
   @build.ingest(store, cfg, docs)
@@ -332,7 +332,7 @@ fn build_store(
 }
 
 ///|
-fn main_impl() -> Unit raise @core.SpndError {
+async fn main_impl() -> Unit {
   let n = env_int("SIMCOMPARE_DOCS", 500)
   let samples = env_int("SIMCOMPARE_SAMPLES", 50)
   let burn = samples
@@ -473,7 +473,7 @@ fn cp_stats_line(
 }
 
 ///|
-fn main {
+async fn main {
   main_impl() catch {
     _ => println("simcompare failed")
   }

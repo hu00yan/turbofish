@@ -1,0 +1,26 @@
+supported_targets = "+native"
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "turbofish/build",
+  "turbofish/format",
+  "turbofish/store",
+  "turbofish/s3client",
+  "turbofish/fsstore",
+  "turbofish/simstore",
+  "turbofish/meta",
+  "turbofish/core",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
+}
+
+// 后台合并守护：纯 MoonBit 异步（metad 租约 + 乐观 rebase 合并），
+// 只在 native / llvm 编译，不依赖 libcurl。
+options(
+  "is-main": true,
+  targets: {
+    "main.mbt": [ "native", "llvm" ],
+  },
+)

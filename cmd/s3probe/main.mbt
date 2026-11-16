@@ -28,21 +28,14 @@ fn env_or(key : String, fallback : String) -> String {
 }
 
 ///|
-fn need_env(key : String) -> String raise @core.SpndError {
-  match @env.get_env_var(key) {
-    Some(v) => v
-    None => raise @core.Corrupt("missing env \{key}")
-  }
-}
-
-///|
-fn err_msg(e : @core.SpndError) -> String {
+fn err_msg(e : Error) -> String {
   match e {
     @core.BadMagic(s) => "BadMagic(\{s})"
     @core.Truncated(s) => "Truncated(\{s})"
     @core.Corrupt(s) => "Corrupt(\{s})"
     @core.NotFound(s) => "NotFound(\{s})"
     @core.CommitConflict(s) => "CommitConflict(\{s})"
+    _ => "\{e}"
   }
 }
 
@@ -95,7 +88,7 @@ const R2_CLASS_B_USD_PER_M : Double = 0.36
 ///   DELETE → DeleteObject（免费，单列）
 struct OpCounts {
   mut puts : Int
-  mut posts : Int
+  posts : Int
   mut lists : Int
   mut gets : Int
   mut heads : Int
@@ -131,28 +124,40 @@ fn OpCounts::class_b(self : OpCounts) -> Int {
 }
 
 ///|
-/// 计数 HTTP transport：委托 CurlTransport，并记录请求数/响应字节 +
-/// R2 Class A/B 计费口径的操作分类（cum_* 累计，reset 不清零）。
-struct CountingTransport {
-  inner : @s3http.CurlTransport
+/// 计数存储包装：委托纯 MoonBit 异步 `@s3client.S3Client`，在方法层计数
+/// （GET/PUT/LIST/HEAD/DELETE）并按 R2 Class A/B 口径分类。
+/// `cum` 是累计值（reset 不清零），`gets`/`head_reqs` 是可清零的窗口值。
+pub struct ProbeStore {
+  inner : @s3client.S3Client
   mut gets : Int
   mut head_reqs : Int
   cum : OpCounts
 }
 
+// 便捷方法转发。
+pub extend ProbeStore with @store.ObjectStore::{
+  get,
+  get_range,
+  put,
+  put_if_match,
+  list,
+  delete,
+  head_version,
+}
+
 ///|
-fn CountingTransport::new(inner : @s3http.CurlTransport) -> CountingTransport {
+fn ProbeStore::new(inner : @s3client.S3Client) -> ProbeStore {
   { inner, gets: 0, head_reqs: 0, cum: OpCounts::new() }
 }
 
 ///|
-fn CountingTransport::reset(self : CountingTransport) -> Unit {
+fn ProbeStore::reset(self : ProbeStore) -> Unit {
   self.gets = 0
   self.head_reqs = 0
 }
 
 ///|
-fn CountingTransport::cumulative(self : CountingTransport) -> OpCounts {
+fn ProbeStore::cumulative(self : ProbeStore) -> OpCounts {
   {
     puts: self.cum.puts,
     posts: self.cum.posts,
@@ -164,41 +169,85 @@ fn CountingTransport::cumulative(self : CountingTransport) -> OpCounts {
 }
 
 ///|
-pub impl @s3store.HttpTransport for CountingTransport with fn execute(
-  self : CountingTransport,
-  http_method : String,
-  url : String,
-  headers : Array[(String, String)],
-  body : Bytes,
-) -> (Int, Array[(String, String)], Bytes) {
-  match url.find("_heads") {
-    Some(_) => self.head_reqs += 1
-    None => ()
+/// 记录一次 GET（head log 读取单独计 head_reqs：冷启动 open 的探测面）。
+fn ProbeStore::note_get(self : ProbeStore, key : String) -> Unit {
+  self.gets += 1
+  self.cum.gets += 1
+  if key.contains("_heads") {
+    self.head_reqs += 1
   }
-  if http_method == "GET" {
-    self.gets += 1
-  }
-  // R2 计费分类（cumulative）
-  if http_method == "PUT" {
-    self.cum.puts += 1
-  } else if http_method == "POST" {
-    self.cum.posts += 1
-  } else if http_method == "DELETE" {
-    self.cum.deletes += 1
-  } else if http_method == "HEAD" {
-    self.cum.heads += 1
-  } else if http_method == "GET" {
-    // ListObjectsV2：GET /{bucket}?list-type=2&…（GET 桶根 + list-type 查询）
-    match url.find("list-type=") {
-      Some(_) => self.cum.lists += 1
-      None => self.cum.gets += 1
-    }
-  }
-  self.inner.execute(http_method, url, headers, body)
 }
 
 ///|
-/// 右对齐填充 ASCII 空格（成本表列对齐用；表内全是 ASCII）
+pub impl @store.ObjectStore for ProbeStore with get(self, key) {
+  self.note_get(key)
+  @s3client.S3Client::get(self.inner, key)
+}
+
+///|
+pub impl @store.ObjectStore for ProbeStore with put(self, key, bs) {
+  self.cum.puts += 1
+  @s3client.S3Client::put(self.inner, key, bs)
+}
+
+///|
+pub impl @store.ObjectStore for ProbeStore with put_if_match(
+  self,
+  key,
+  expected,
+  bs
+) {
+  self.cum.puts += 1
+  @s3client.S3Client::put_if_match(self.inner, key, bs, expected)
+}
+
+///|
+pub impl @store.ObjectStore for ProbeStore with get_range(
+  self,
+  key,
+  offset,
+  len
+) {
+  self.note_get(key)
+  @s3client.S3Client::get_range(self.inner, key, offset, len)
+}
+
+///|
+pub impl @store.ObjectStore for ProbeStore with list(self, prefix) {
+  self.cum.lists += 1
+  @s3client.S3Client::list(self.inner, prefix)
+}
+
+///|
+pub impl @store.ObjectStore for ProbeStore with delete(self, key) {
+  self.cum.deletes += 1
+  @s3client.S3Client::delete(self.inner, key)
+}
+
+///|
+pub impl @store.ObjectStore for ProbeStore with head_version(self, key) {
+  self.cum.heads += 1
+  @s3client.S3Client::head_version(self.inner, key)
+}
+
+///|
+/// 桶是否可用（新版 MinIO 不自动建桶，`create_bucket` 也非对象存储语义；
+/// 这里用一次 LIST 探测，失败只告警）。
+async fn ProbeStore::bucket_ready(self : ProbeStore) -> Bool {
+  let probe = try {
+    Ok(@s3client.S3Client::list(self.inner, ""))
+  } catch {
+    e => Err(e)
+  }
+  self.cum.lists += 1
+  match probe {
+    Ok(_) => true
+    Err(e) => {
+      println("  WARNING: bucket LIST failed: \{err_msg(e)}")
+      false
+    }
+  }
+}
 fn pad_right(s : String, w : Int) -> String {
   let n = s.length()
   if n >= w {
@@ -210,9 +259,6 @@ fn pad_right(s : String, w : Int) -> String {
   }
   out
 }
-
-///|
-/// 定点格式化（digits 位小数，四舍五入），避免 Double Show 的可变长度。
 fn fmt_dec(x : Double, digits : Int) -> String {
   if digits <= 0 {
     return (x + 0.5).to_int().to_string()
@@ -232,8 +278,6 @@ fn fmt_dec(x : Double, digits : Int) -> String {
   "\{(n / pi).to_int()}.\{fbuf}"
 }
 
-///|
-/// 输出单个场景的 R2 成本表：各操作次数 × 单价（$/1M）= 实际 $
 fn print_r2_cost_table(label : String, c : OpCounts) -> Unit {
   let rows : Array[(String, Int, Double, String)] = [
     ("PUT   Class A", c.puts, R2_CLASS_A_USD_PER_M, "$4.50/1M"),
@@ -263,6 +307,8 @@ fn print_r2_cost_table(label : String, c : OpCounts) -> Unit {
   )
 }
 
+
+
 ///|
 fn p50(ts : Array[Double]) -> Double {
   let c = ts.copy()
@@ -271,14 +317,14 @@ fn p50(ts : Array[Double]) -> Double {
 }
 
 ///|
-fn run_case(
-  store : @s3store.S3Store[CountingTransport],
-  transport : CountingTransport,
+async fn run_case(
+  store : ProbeStore,
+  transport : ProbeStore,
   label : String,
   docs : Array[@core.Doc],
   cfg : @build.BuildConfig,
   use_cache : Bool,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let ns = cfg.ns
   let c0 = transport.cumulative()
   transport.reset()
@@ -286,8 +332,8 @@ fn run_case(
   @build.ingest(store, cfg, docs)
   let ti2 = @bench.monotonic_clock_end(ti)
   let ingest_heads = transport.head_reqs
-  let cache : @query.MetadataCache[@s3store.S3Store[CountingTransport]] = @query.MetadataCache::new()
-  let open_one = fn() -> @query.Namespace[@s3store.S3Store[CountingTransport]] raise @core.SpndError {
+  let cache : @query.MetadataCache[ProbeStore] = @query.MetadataCache::new()
+  let open_one = async fn() -> @query.Namespace[ProbeStore] {
     if use_cache {
       @query.open_cached(cache, store, ns)
     } else {
@@ -339,28 +385,30 @@ fn run_case(
 }
 
 ///|
-fn run() -> Unit raise @core.SpndError {
+async fn run() -> Unit {
   let endpoint = env_or("S3_ENDPOINT", "http://127.0.0.1:19000")
   let bucket = env_or("S3_BUCKET", "seekpond")
   let region = env_or("S3_REGION", "us-east-1")
-  let access = need_env("S3_ACCESS_KEY")
-  let secret = need_env("S3_SECRET_KEY")
-  let transport = CountingTransport::new(@s3http.CurlTransport::new())
-  let store = @s3store.S3Store::new(
+  let access = env_or("S3_ACCESS_KEY", env_or("AWS_ACCESS_KEY_ID", "minioadmin"))
+  let secret = env_or(
+    "S3_SECRET_KEY",
+    env_or("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+  )
+  let client = @s3client.S3Client::new(
     endpoint,
     bucket,
     region,
-    { access_key: access, secret_key: secret },
-    transport,
-    fn() { @s3http.now_amz_date() },
+    access,
+    secret,
+    max_inflight=16,
   )
+  let transport = ProbeStore::new(client)
+  let store = transport
   let ns = "probe-\{@env.now()}"
-  println(
-    "== S3 probe: endpoint=\{endpoint} bucket=\{bucket} ns=\{ns} amz=\{@s3http.now_amz_date()}",
-  )
-  // 新版 MinIO 不自动建桶；create_bucket 幂等（已存在返回 409 也算成功）。
-  if !store.create_bucket() {
-    println("  WARNING: create_bucket failed (status != 200/409)")
+  println("== S3 probe: endpoint=\{endpoint} bucket=\{bucket} ns=\{ns} (async S3Client)")
+  // 新版 MinIO 不自动建桶；用一次 LIST 探测桶是否可用（失败只告警）。
+  if !store.bucket_ready() {
+    println("  WARNING: bucket not ready (create it first: mc mb ...)")
   }
   let k = "\{ns}/hello.txt"
   store.put(k, b"hello s3")
@@ -425,11 +473,17 @@ fn run() -> Unit raise @core.SpndError {
 }
 
 ///|
-fn main {
-  try {
+async fn main {
+  let r = try {
     run()
-    println("S3 PROBE OK")
+    true
   } catch {
-    e => println("S3 PROBE FAILED: \{err_msg(e)}")
+    e => {
+      println("S3 PROBE FAILED: \{err_msg(e)}")
+      false
+    }
+  }
+  if r {
+    println("S3 PROBE OK")
   }
 }

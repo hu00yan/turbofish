@@ -1,12 +1,17 @@
+#cfg(any(target="native", target="llvm"))
 import {
+  "moonbitlang/async",
   "turbofish/build",
   "turbofish/control",
   "turbofish/query",
   "turbofish/simstore",
   "turbofish/core",
-  "moonbitlang/core/env" @env,
+  "moonbitlang/core/env",
 }
 
 options(
   "is-main": true,
+  targets: {
+    "main.mbt": [ "native" ],
+  },
 )

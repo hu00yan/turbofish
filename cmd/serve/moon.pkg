@@ -1,3 +1,5 @@
+supported_targets = "+native"
+
 #cfg(any(target="native", target="llvm"))
 import {
   "moonbitlang/async",
@@ -8,11 +10,13 @@ import {
   "turbofish/format",
   "turbofish/query",
   "turbofish/store",
-  "turbofish/s3store",
-  "turbofish/s3http",
+  "turbofish/s3client",
   "turbofish/fsstore",
   "turbofish/simstore",
   "turbofish/meta",
+  "turbofish/groupcommit",
+  "turbofish/uring",
+  "turbofish/netutil",
   "turbofish/core",
   "turbofish/control",
   "moonbitlang/core/env",
@@ -20,6 +24,31 @@ import {
   "moonbitlang/core/encoding/utf8",
 }
 
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "turbofish/build",
+  "turbofish/format",
+  "turbofish/query",
+  "turbofish/store",
+  "turbofish/fsstore",
+  "turbofish/simstore",
+  "turbofish/meta",
+  "turbofish/groupcommit",
+  "turbofish/uring",
+  "turbofish/core",
+  "turbofish/control",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
+} for "wbtest"
+
+// serve 是 native-only：官方 async HTTP server + 自建 SO_REUSEPORT 监听 +
+// io_uring 完成引擎（native-stub）。不再链接 libcurl（metad/S3 都走纯
+// MoonBit 异步客户端）。
 options(
   "is-main": true,
   targets: {
@@ -28,10 +57,5 @@ options(
     "stub.mbt": [ "wasm", "wasm-gc", "js" ],
     "serve_wbtest.mbt": [ "native" ],
     "branch_wbtest.mbt": [ "native" ],
-  },
-  link: {
-    "native": {
-      "cc-link-flags": "-lcurl",
-    },
   },
 )

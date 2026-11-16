@@ -254,10 +254,10 @@ priv struct BatchStat {
 ///|
 /// 读 head manifest：head 用公开的 @store.read_head_state 取 _heads/ 最大 id，
 /// manifest JSON 用公开 @format.manifest_from_json 解析（不改 build 的私有 API）。
-fn read_head_manifest(
+async fn read_head_manifest(
   store : CountingStore,
   ns : String,
-) -> @format.ManifestData? raise @core.SpndError {
+) -> @format.ManifestData? {
   let (head, _newer) = @store.read_head_state(store, ns, "")
   if head == "" {
     return None
@@ -287,13 +287,13 @@ fn make_cfg(ns : String) -> @build.BuildConfig {
 ///|
 /// 跑一个策略的全部批次，返回逐批计量。
 /// `full=true` 每批都全量 ingest；`full=false` 首批 ingest，后续 ingest_delta。
-fn run_strategy(
+async fn run_strategy(
   full : Bool,
   ns : String,
   batches : Int,
   docs_per_batch : Int,
   all_docs : Array[@core.Doc],
-) -> Array[BatchStat] raise @core.SpndError {
+) -> Array[BatchStat] {
   let store = CountingStore::new(4242U)
   let cfg = make_cfg(ns)
   let stats : Array[BatchStat] = Array(capacity=batches)
@@ -387,7 +387,7 @@ fn compaction_batches(stats : Array[BatchStat]) -> String {
 }
 
 ///|
-fn run() -> Unit raise @core.SpndError {
+async fn run() -> Unit {
   // 名义配置是 10 批 × 2000 docs（dim=64 / segment_rows=500 / nlist=8）；
   // 默认跑 5 × 1000 以控制运行时（< 3 分钟），可用 env 覆盖回名义配置。
   let batches = env_int("SIM_DELTA_BATCHES", 5)
@@ -467,7 +467,7 @@ fn run() -> Unit raise @core.SpndError {
 }
 
 ///|
-fn main {
+async fn main {
   run() catch {
     _ => println("delta_bench failed (SpndError; see build/query logs for details)")
   }

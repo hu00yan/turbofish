@@ -1,20 +1,19 @@
+#cfg(any(target="native", target="llvm"))
 import {
+  "moonbitlang/async",
   "turbofish/core",
   "turbofish/build",
   "turbofish/query",
-  "turbofish/s3store",
-  "turbofish/s3http",
+  "turbofish/store",
+  "turbofish/s3client",
   "moonbitlang/core/env",
   "moonbitlang/core/bench",
 }
 
+// 真实 S3/MinIO 端到端探针（纯 MoonBit 异步 S3Client，不再链接 libcurl）。
 options(
   "is-main": true,
-  link: {
-    "native": {
-      // macOS 与 Linux 都用系统 libcurl（macOS 自带 /usr/lib/libcurl.4.dylib；
-      // Linux 需 libcurl4-openssl-dev）。不再依赖 Homebrew curl 的绝对路径。
-      "cc-link-flags": "-lcurl",
-    },
+  targets: {
+    "main.mbt": [ "native" ],
   },
 )

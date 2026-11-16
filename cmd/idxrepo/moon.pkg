@@ -1,23 +1,23 @@
+#cfg(any(target="native", target="llvm"))
 import {
+  "moonbitlang/async",
   "turbofish/core",
   "turbofish/build",
   "turbofish/query",
-  "turbofish/s3store",
-  "turbofish/s3http",
+  "turbofish/store",
+  "turbofish/s3client",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",
 }
 
+// idxrepo：把本地代码语料建到真实 S3/MinIO 上并跑查询基准。
+// 纯 MoonBit 异步 S3Client（不再链接 libcurl）。
 options(
   "is-main": true,
   targets: {
-    "idxfs_native.mbt": [ "native", "llvm" ],
+    "main.mbt": [ "native" ],
+    "idxfs_native.mbt": [ "native" ],
     "idxfs_stub.mbt": [ "js", "wasm", "wasm-gc" ],
   },
   "native-stub": [ "idxfs.c" ],
-  link: {
-    "native": {
-      "cc-link-flags": "-lcurl",
-    },
-  },
 )

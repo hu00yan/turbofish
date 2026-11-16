@@ -63,12 +63,12 @@ fn small_cfg(
 
 ///|
 /// 单条向量查询的 top-10 id 集合命中率（相对暴力）。
-fn recall_of(
+async fn recall_of(
   n : @query.Namespace[@store.MemStore],
   store : @store.MemStore,
   qv : Array[Float],
   nprobe : Int,
-) -> Double raise @core.SpndError {
+) -> Double {
   let want = vec_bruteforce(store, n.ns, n.manifest, qv, 10)
   let want_set : Set[UInt64] = Set([])
   for id in want {
@@ -86,12 +86,12 @@ fn recall_of(
 
 ///|
 /// 单条向量查询的 top-10 命中率（PQ 精排实验路径）。
-fn[S : @store.ObjectStore] recall_of_rerank(
+async fn[S : @store.ObjectStore] recall_of_rerank(
   n : @query.Namespace[S],
   store : @store.MemStore,
   qv : Array[Float],
   nprobe : Int,
-) -> Double raise @core.SpndError {
+) -> Double {
   let want = vec_bruteforce(store, n.ns, n.manifest, qv, 10)
   let want_set : Set[UInt64] = Set([])
   for id in want {
@@ -109,10 +109,10 @@ fn[S : @store.ObjectStore] recall_of_rerank(
 
 ///|
 /// 单条查询的冷读请求/字节（cold + reset 后 open+search）。
-fn cold_cost_query(
+async fn cold_cost_query(
   store : @store.MemStore,
-  run : () -> Unit raise @core.SpndError,
-) -> (Int, Int) raise @core.SpndError {
+  run : async () -> Unit,
+) -> (Int, Int) {
   store.cold()
   store.reset_cost()
   run()
@@ -124,7 +124,7 @@ fn cold_cost_query(
 /// C：量化收益（VF16 / VSq8 / VPq16）：recall@10 + 冷读 KB/查询。
 /// 用 10k docs、单段（segment_rows=10000），让 PQ 共享码本被摊薄；
 /// PQ 为 MVP 的纯 ADC（无 f16 精排），簇内精确 top-10 会被量化噪声重排。
-fn run_extra_quant(docs : Array[@core.Doc]) -> Unit raise @core.SpndError {
+async fn run_extra_quant(docs : Array[@core.Doc]) -> Unit {
   println(
     "== 量化收益（10000 docs, 768 维, 单段, nlist=16, 10 个向量查询）==",
   )
@@ -201,17 +201,17 @@ fn run_extra_quant(docs : Array[@core.Doc]) -> Unit raise @core.SpndError {
 
 ///|
 /// b：stats 跳过收益（off / seg-stats / seg+block-stats），同一批 filter 查询。
-fn run_extra_stats(
+async fn run_extra_stats(
   small : Array[@core.Doc],
   bm25_qs : Array[String],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   println(
     "== Stats 跳过收益（2000 docs, 4 段；同 filter 查询，冷读请求/KB）==",
   )
-  let mk = fn(
+  let mk = async fn(
     stats : Bool,
     block_stats : Bool,
-  ) -> @store.MemStore raise @core.SpndError {
+  ) -> @store.MemStore {
     let store = @store.MemStore::new()
     let ns = "r2s"
     let base = small_cfg(ns, 16, @build.VF16, 500)
@@ -238,19 +238,19 @@ fn run_extra_stats(
     let mut onb_req = 0
     let mut onb_kb = 0.0
     for q in bm25_qs {
-      let (r0, b0) = cold_cost_query(off, fn() raise @core.SpndError {
+      let (r0, b0) = cold_cost_query(off, async fn() {
         let nn = @query.open(off, "r2s")
         let _ = @query.bm25_search(nn, q, 10, Some(f))
       })
       off_req += r0
       off_kb += b0.to_double() / 1024.0
-      let (r1, b1) = cold_cost_query(on, fn() raise @core.SpndError {
+      let (r1, b1) = cold_cost_query(on, async fn() {
         let nn = @query.open(on, "r2s")
         let _ = @query.bm25_search(nn, q, 10, Some(f))
       })
       on_req += r1
       on_kb += b1.to_double() / 1024.0
-      let (r2, b2) = cold_cost_query(onb, fn() raise @core.SpndError {
+      let (r2, b2) = cold_cost_query(onb, async fn() {
         let nn = @query.open(onb, "r2s")
         let _ = @query.bm25_search(nn, q, 10, Some(f))
       })
@@ -294,11 +294,11 @@ fn run_extra_stats(
 ///|
 /// d：decode 缓存前后（同 bench 双跑）：冷缓存 = 每查询新 open，热缓存 = 复用
 /// 已 open 的 namespace（per-segment dir/doc_len/id/matcher 缓存命中）。
-fn run_extra_cache(
+async fn run_extra_cache(
   store : @store.MemStore,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   println(
     "== Decode 缓存收益（10k docs；冷缓存 vs 复用 namespace 的解码缓存）==",
   )
@@ -343,10 +343,10 @@ fn run_extra_cache(
 
 ///|
 /// IVF 性能：normalize_vecs=false vs true（cosine→dot，省掉每个候选的两次 norm）。
-fn extra_ivf_measure(
+async fn extra_ivf_measure(
   small : Array[@core.Doc],
   normalize : Bool,
-) -> (Double, Double, Double) raise @core.SpndError {
+) -> (Double, Double, Double) {
   let store = @store.MemStore::new()
   let ns = "r2ivf"
   let base = @build.BuildConfig::default(ns)
@@ -396,7 +396,7 @@ fn extra_ivf_measure(
 
 ///|
 /// IVF 性能对照：归一化写入 vs 旧路径（每次候选算 cosine + 两次 norm）。
-fn run_extra_ivf(small : Array[@core.Doc]) -> Unit raise @core.SpndError {
+async fn run_extra_ivf(small : Array[@core.Doc]) -> Unit {
   println(
     "== IVF 扫描性能（2000 docs, 768 维, nlist=16, nprobe=8, 20 查询 × 20 轮）==",
   )
@@ -415,10 +415,10 @@ fn run_extra_ivf(small : Array[@core.Doc]) -> Unit raise @core.SpndError {
 
 ///|
 /// f：进程级 metadata 缓存的 S3 收益（每查询 open vs open_cached）。
-fn run_extra_metadata(
+async fn run_extra_metadata(
   small : Array[@core.Doc],
   bm25_qs : Array[String],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   println(
     "== Metadata cache（2000 docs, 4 段；每查询 open vs open_cached）==",
   )
@@ -462,10 +462,10 @@ fn run_extra_metadata(
 
 ///|
 /// g：namespace 级全局 IVF 分区 vs per-segment（S3 请求数）。
-fn extra_global_measure(
+async fn extra_global_measure(
   docs : Array[@core.Doc],
   use_global : Bool,
-) -> (Double, Double, Int, Double) raise @core.SpndError {
+) -> (Double, Double, Int, Double) {
   let store = @store.MemStore::new()
   let ns = "r2g"
   let base = @build.BuildConfig::default(ns)
@@ -501,7 +501,7 @@ fn extra_global_measure(
 }
 
 ///|
-fn run_extra_global(docs : Array[@core.Doc]) -> Unit raise @core.SpndError {
+async fn run_extra_global(docs : Array[@core.Doc]) -> Unit {
   println(
     "== 全局 IVF 分区（10k docs, 5 段, nprobe=8, 10 个向量查询）==",
   )
@@ -520,12 +520,12 @@ fn run_extra_global(docs : Array[@core.Doc]) -> Unit raise @core.SpndError {
 
 ///|
 /// h：段级 FTS Bloom 对“不存在的 term”的请求剪枝。
-fn run_extra_bloom(small : Array[@core.Doc]) -> Unit raise @core.SpndError {
+async fn run_extra_bloom(small : Array[@core.Doc]) -> Unit {
   println(
     "== FTS Bloom（2000 docs, 4 段；查询不存在的 term，10 次冷查询）==",
   )
   let q = "zzzznotfound"
-  let mk = fn(bloom : Bool) -> @store.MemStore raise @core.SpndError {
+  let mk = async fn(bloom : Bool) -> @store.MemStore {
     let store = @store.MemStore::new()
     let ns = "r2bl"
     let base = small_cfg(ns, 16, @build.VF16, 500)
@@ -535,10 +535,10 @@ fn run_extra_bloom(small : Array[@core.Doc]) -> Unit raise @core.SpndError {
   }
   let off = mk(false)
   let on = mk(true)
-  let measure = fn(
+  let measure = async fn(
     store : @store.MemStore,
     label : String,
-  ) -> Unit raise @core.SpndError {
+  ) -> Unit {
     store.cold()
     store.reset_cost()
     for _ in 0..<10 {

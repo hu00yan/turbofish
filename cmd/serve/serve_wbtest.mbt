@@ -5,7 +5,7 @@
 // 4) 内存 LRU 缓存上限与淘汰。
 
 ///|
-test "cmd/serve: AnyStore with SimStore pluggability" {
+async test "cmd/serve: AnyStore with SimStore pluggability" {
   let sim_cfg = @simstore.SimConfig::aws_default(42U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -62,7 +62,7 @@ test "cmd/serve: LRU caches evict by entry and weight caps" {
 }
 
 ///|
-test "cmd/serve: namespace state has no write engine and reads stay on build segments" {
+async test "cmd/serve: namespace state has no write engine and reads stay on build segments" {
   let sim_cfg = @simstore.SimConfig::aws_default(801U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -142,7 +142,7 @@ test "cmd/serve: namespace state has no write engine and reads stay on build seg
 }
 
 ///|
-test "cmd/serve: build segment compaction preserves query results" {
+async test "cmd/serve: build segment compaction preserves query results" {
   let sim_cfg = @simstore.SimConfig::aws_default(802U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -202,7 +202,7 @@ test "cmd/serve: build segment compaction preserves query results" {
 }
 
 ///|
-test "cmd/serve: compact prunes caches for merged-away segments" {
+async test "cmd/serve: compact prunes caches for merged-away segments" {
   let sim_cfg = @simstore.SimConfig::aws_default(803U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -235,7 +235,7 @@ test "cmd/serve: compact prunes caches for merged-away segments" {
   let before = state.get_query_ns(store, ns)
   assert_eq(before.manifest.segments.length(), 2)
   assert_eq(before.cache.length(), 2)
-  compact_namespace_state(store, state, ns)
+  let _ = compact_namespace_state(store, state, ns)
   let after = state.get_query_ns(store, ns)
   assert_eq(after.manifest.segments.length(), 1)
   assert_eq(after.cache.length(), 1)
@@ -243,104 +243,160 @@ test "cmd/serve: compact prunes caches for merged-away segments" {
 }
 
 ///|
-test "cmd/serve: compact trigger uses segment/deleted/idle thresholds" {
+async test "cmd/serve: explicit compact is a no-op on a single-segment namespace" {
   let sim_cfg = @simstore.SimConfig::aws_default(803U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
-  let state = get_or_create_ns_state(store, "test_serve_trigger", 4)
-  let settings : CompactSettings = {
-    interval_ms: 1000L,
-    max_per_tick: 8,
-    seg_threshold: 8,
-    delete_ratio: 0.2,
-    idle_ms: 30000L,
-    max_rows: 5000000,
-  }
-  state.last_write_ms = 1000L
-  state.manifest_num_docs = 100
-  state.live_segments = 9
-  assert_eq(should_compact(state, settings, 1000L), true)
-
-  state.live_segments = 2
-  state.manifest_deleted = 25
-  assert_eq(should_compact(state, settings, 1000L), true)
-
-  state.manifest_deleted = 0
-  assert_eq(should_compact(state, settings, 2000L), false)
-  assert_eq(should_compact(state, settings, 32000L), true)
-
-  // 只有 1 段：永远不需要合并。
-  state.live_segments = 1
-  assert_eq(should_compact(state, settings, 32000L), false)
-}
-
-///|
-test "cmd/serve: background compactor only processes dirty namespaces" {
-  reset_dirty_for_test()
-  let sim_cfg = @simstore.SimConfig::aws_default(804U)
-  let sim = @simstore.SimStore::new(sim_cfg)
-  let store : AnyStore = Sim(sim)
-  let ns = "test_serve_dirty_compact"
+  let ns = "test_serve_compact_noop"
   let dim = 4
-  let cfg = { ..@build.BuildConfig::single_copy(ns), vector_dim: dim, segment_rows: 1 }
-  let docs : Array[@core.Doc] = [
+  let cfg = { ..@build.BuildConfig::single_copy(ns), vector_dim: dim }
+  @build.ingest(store, cfg, [
     {
       id: 1UL,
-      text: "dirty one",
+      text: "one segment only",
       vector: [1.0, 0.0, 0.0, 0.0],
-      category: "dirty",
+      category: "only",
       ts: 1L,
       public: true,
     },
-    {
-      id: 2UL,
-      text: "dirty two",
-      vector: [0.0, 1.0, 0.0, 0.0],
-      category: "dirty",
-      ts: 2L,
-      public: true,
-    },
-    {
-      id: 3UL,
-      text: "dirty three",
-      vector: [0.0, 0.0, 1.0, 0.0],
-      category: "dirty",
-      ts: 3L,
-      public: true,
-    },
-  ]
-  @build.ingest(store, cfg, docs)
-
-  let state = get_or_create_ns_state(store, ns, dim)
-  let head = match @store.read_head_pointer(store, ns) {
-    Some(h) => h
-    None => @store.read_head(store, ns, "")
-  }
-  state.update_after_write(store, ns, head)
-  assert_eq(state.live_segments, 3)
-  mark_namespace_dirty(ns)
-
-  let settings : CompactSettings = {
-    interval_ms: 1000L,
-    max_per_tick: 8,
-    seg_threshold: 2,
-    delete_ratio: 0.2,
-    idle_ms: 30000L,
-    max_rows: 5000000,
-  }
-  let processed = compact_dirty_once(store, @async.now(), settings)
-  assert_eq(processed, 1)
+  ])
+  let state = get_or_load_ns_state(store, ns)
+  let _head_before = state.build_head
+  let head_after = compact_namespace_state(store, state, ns)
+  // 单段合并不改变结果集（head 可以变，因为 compact 会重写段）；
+  // 后台调度已下线到 cmd/compactd，serve 只保留显式合并入口。
+  assert_true(head_after != "")
+  let n = state.get_query_ns(store, ns)
+  assert_eq(@query.count_docs(n, None), 1)
+  assert_eq(n.manifest.segments.length(), 1)
   assert_eq(state.live_segments, 1)
-  let after = @query.open(store, ns)
-  assert_eq(@query.count_docs(after, None), 3)
-  assert_eq(@query.bm25_search(after, "dirty", 10, None).length(), 3)
-  // 队列已空：不再扫描所有 active_ns。
-  assert_eq(compact_dirty_once(store, @async.now(), settings), 0)
-  reset_dirty_for_test()
 }
 
 ///|
-test "cmd/serve: Enriched query results payload contract" {
+async test "cmd/serve: meta client is absent without SPND_META_URL" {
+  reset_meta_client_for_test()
+  assert_false(meta_enabled())
+  reset_meta_client_for_test()
+  assert_false(meta_enabled())
+}
+
+///|
+async test "cmd/serve: group commit merges concurrent writes into few flushes" {
+  reset_group_commit_for_test()
+  // 直接构造组提交管理器 + mock flush_fn：验证「同 namespace 的并发小批
+  // 写入被合并成很少几次刷盘」这一契约（真实 flush 走 ingest_l0_slab）。
+  @async.with_task_group(async fn (group : @async.TaskGroup[Unit]) -> Unit {
+    let mut flushes = 0
+    let mut bytes_seen = 0
+    let mgr = @groupcommit.GroupCommitManager::new(
+      group,
+      async fn (ns : String, payloads : Array[Bytes]) -> String {
+        let _ = ns
+        flushes += 1
+        for p in payloads {
+          bytes_seen += p.length()
+        }
+        @async.sleep(5)
+        "head-\{flushes}"
+      },
+      config=@groupcommit.GroupCommitConfig::default(),
+    )
+    let tasks : Array[@async.Task[@groupcommit.SubmitResult]] = Array()
+    for i in 0..<10 {
+      let batch = encode_rows_body([
+        {
+          id: i.to_uint64() + 1UL,
+          text: "row \{i}",
+          vector: [1.0, 0.0, 0.0, 0.0],
+          category: "gc",
+          ts: i.to_int64(),
+          public: true,
+        },
+      ], [])
+      tasks.push(
+        group.spawn(async fn () {
+          mgr.submit("gcdemo", 1, batch.length(), @utf8.encode(batch))
+        }),
+      )
+    }
+    let heads : Array[String] = Array()
+    for t in tasks {
+      match t.wait() {
+        @groupcommit.Flushed(h) => heads.push(h)
+        @groupcommit.AckedLazy => fail("strict submit must return a head")
+      }
+    }
+    assert_eq(heads.length(), 10)
+    // 10 次严格提交被合并成 ≤ 2 次刷盘
+    let calls = mgr.flush_count()
+    assert_true(calls >= 1)
+    assert_true(calls <= 2)
+    assert_eq(mgr.flushed_rows(), 10)
+    assert_true(bytes_seen > 0)
+  })
+}
+
+///|
+async test "cmd/serve: durability lazy acks immediately, strict returns head" {
+  @async.with_task_group(async fn (group : @async.TaskGroup[Unit]) -> Unit {
+    let mgr = @groupcommit.GroupCommitManager::new(
+      group,
+      async fn (_ns : String, _payloads : Array[Bytes]) -> String {
+        @async.sleep(200)
+        "lazy-head"
+      },
+      config=@groupcommit.GroupCommitConfig::default(),
+    )
+    // lazy：不等待刷盘，立即返回 AckedLazy
+    let t0 = @async.now()
+    let lazy_res = mgr.submit("lazyns", 1, 8, b"payload", durability_strict=false)
+    let lazy_ms = @async.now() - t0
+    assert_true(lazy_res is @groupcommit.AckedLazy)
+    assert_true(lazy_ms < 200L)
+    // strict：阻塞到 flush_fn 完成，拿到 head
+    let strict_res = mgr.submit("lazyns2", 1, 8, b"payload")
+    match strict_res {
+      @groupcommit.Flushed(h) => assert_eq(h, "lazy-head")
+      @groupcommit.AckedLazy => fail("strict submit must return a head")
+    }
+  })
+}
+
+///|
+test "cmd/serve: writer ownership routing is deterministic and balanced" {
+  // 纯函数副本必须与 cmd/supervise 的 writer_owner_for_ns 完全同源
+  assert_eq(writer_owner_for_ns("ns1", 1), 0)
+  assert_eq(writer_owner_for_ns("ns1", 0), 0)
+  assert_eq(fnv1a64(""), 0xcbf29ce484222325UL)
+  assert_eq(fnv1a64("a"), 0xaf63dc4c8601ec8cUL)
+  assert_eq(fnv1a64("foobar"), 0x85944171f73967e8UL)
+  for n in [2, 4, 7] {
+    let seen : Array[Bool] = Array::make(n, false)
+    for i in 0..<200 {
+      let ns = "tenant-\{i}/ns-\{i * 3}"
+      let owner = writer_owner_for_ns(ns, n)
+      assert_eq(owner, writer_owner_for_ns(ns, n))
+      assert_true(owner >= 0 && owner < n)
+      seen[owner] = true
+    }
+    let mut used = 0
+    for s in seen {
+      if s {
+        used += 1
+      }
+    }
+    assert_true(used >= n / 2)
+  }
+  // 只有写 action 需要亲和转发
+  assert_true(is_write_action("write"))
+  assert_true(is_write_action("patch"))
+  assert_true(is_write_action("delete_by_filter"))
+  assert_true(!is_write_action("query"))
+  assert_eq(worker_internal_port(19080, 3), 19083)
+}
+
+///|
+async test "cmd/serve: Enriched query results payload contract" {
   let sim_cfg = @simstore.SimConfig::aws_default(200U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -549,7 +605,7 @@ test "cmd/serve: Prometheus metrics counters" {
 }
 
 ///|
-test "cmd/serve: delete_by_filter write path" {
+async test "cmd/serve: delete_by_filter write path" {
   let sim_cfg = @simstore.SimConfig::aws_default(300U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -623,7 +679,7 @@ test "cmd/serve: delete_by_filter write path" {
 }
 
 ///|
-test "cmd/serve: namespace copy and branch" {
+async test "cmd/serve: namespace copy and branch" {
   let sim_cfg = @simstore.SimConfig::aws_default(400U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -656,7 +712,7 @@ test "cmd/serve: namespace copy and branch" {
 }
 
 ///|
-test "cmd/serve: sum_field aggregation" {
+async test "cmd/serve: sum_field aggregation" {
   let sim_cfg = @simstore.SimConfig::aws_default(500U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -704,7 +760,7 @@ test "cmd/serve: sum_field aggregation" {
 }
 
 ///|
-test "cmd/serve: partial update patch_rows without resending vector" {
+async test "cmd/serve: partial update patch_rows without resending vector" {
   let sim_cfg = @simstore.SimConfig::aws_default(600U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -809,7 +865,7 @@ test "cmd/serve: partial update patch_rows without resending vector" {
 }
 
 ///|
-test "cmd/serve: coordinator authoritative in-memory metadata with zero S3 calls on warm query" {
+async test "cmd/serve: coordinator authoritative in-memory metadata with zero S3 calls on warm query" {
   let sim_cfg = @simstore.SimConfig::aws_default(700U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -909,7 +965,7 @@ test "cmd/serve: coordinator authoritative in-memory metadata with zero S3 calls
 }
 
 ///|
-test "cmd/serve: cold-start warms all segments and subsequent queries across all segments make zero S3 calls" {
+async test "cmd/serve: cold-start warms all segments and subsequent queries across all segments make zero S3 calls" {
   let sim_cfg = @simstore.SimConfig::aws_default(701U)
   let sim = @simstore.SimStore::new(sim_cfg)
   let store : AnyStore = Sim(sim)
@@ -967,7 +1023,7 @@ test "cmd/serve: cold-start warms all segments and subsequent queries across all
 }
 
 ///|
-test "cmd/serve: 3-tier coordinator and worker pool cache dispatching" {
+async test "cmd/serve: 3-tier coordinator and worker pool cache dispatching" {
   reset_coordinator_for_test()
   let sim_cfg = @simstore.SimConfig::aws_default(999U)
   let sim = @simstore.SimStore::new(sim_cfg)

@@ -1,14 +1,21 @@
+#cfg(any(target="native", target="llvm"))
 import {
+  "moonbitlang/async",
   "turbofish/build",
   "turbofish/core",
   "turbofish/format",
   "turbofish/simstore",
   "turbofish/store",
   "moonbitlang/core/encoding/utf8",
-  "moonbitlang/core/env" @env,
+  "moonbitlang/core/env",
   "moonbitlang/core/json",
 }
 
+// 存储/查询栈已全面 async（native event loop），bench 工具也随之只在
+// native / llvm 编译。
 options(
   "is-main": true,
+  targets: {
+    "main.mbt": [ "native" ],
+  },
 )

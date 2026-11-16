@@ -50,7 +50,7 @@ fn is_inheritable_path(rel : String) -> Bool {
 }
 
 ///|
-fn get_origin_ns(store : AnyStore, ns : String) -> String? {
+async fn get_origin_ns(store : AnyStore, ns : String) -> String? {
   match branch_origins.get(ns) {
     Some(orig) => Some(orig)
     None => {
@@ -72,7 +72,7 @@ fn get_origin_ns(store : AnyStore, ns : String) -> String? {
 }
 
 ///|
-fn resolve_branch_get(store : AnyStore, key : String) -> Bytes? {
+async fn resolve_branch_get(store : AnyStore, key : String) -> Bytes? {
   let (ns, rel) = split_key_ns(key)
   if ns == "" || !is_inheritable_path(rel) {
     return None
@@ -96,7 +96,7 @@ fn resolve_branch_get(store : AnyStore, key : String) -> Bytes? {
 }
 
 ///|
-fn resolve_branch_get_range(
+async fn resolve_branch_get_range(
   store : AnyStore,
   key : String,
   offset : Int,
@@ -125,7 +125,7 @@ fn resolve_branch_get_range(
 }
 
 ///|
-fn resolve_branch_head_version(store : AnyStore, key : String) -> String? {
+async fn resolve_branch_head_version(store : AnyStore, key : String) -> String? {
   let (ns, rel) = split_key_ns(key)
   if ns == "" || !is_inheritable_path(rel) {
     return None
@@ -149,7 +149,7 @@ fn resolve_branch_head_version(store : AnyStore, key : String) -> String? {
 }
 
 ///|
-fn resolve_branch_list(
+async fn resolve_branch_list(
   store : AnyStore,
   prefix : String,
   local_keys : Array[String],
@@ -193,12 +193,12 @@ fn resolve_branch_list(
 
 ///|
 /// 创建 zero-copy 分支：通过 S3 CAS 克隆 manifest 头指针，零拷贝底层数据段。
-pub fn create_branch(
+pub async fn create_branch(
   store : AnyStore,
   src_ns : String,
   branch_name : String,
   copy_metadata : Bool,
-) -> String raise @core.SpndError {
+) -> String {
   if branch_name.length() == 0 {
     raise @core.Corrupt("branch_name cannot be empty")
   }
@@ -338,11 +338,11 @@ pub fn create_branch(
 
 ///|
 /// 创建不可变快照：钉住当前 head manifest，防止被后续写或 compaction 修改。
-pub fn create_snapshot(
+pub async fn create_snapshot(
   store : AnyStore,
   ns : String,
   snapshot_name : String,
-) -> String raise @core.SpndError {
+) -> String {
   if snapshot_name.length() == 0 {
     raise @core.Corrupt("snapshot_name cannot be empty")
   }
@@ -379,11 +379,11 @@ pub fn create_snapshot(
 
 ///|
 /// 恢复快照：瞬间把 head 指针回滚到指定的不可变快照。
-pub fn restore_snapshot(
+pub async fn restore_snapshot(
   store : AnyStore,
   ns : String,
   snapshot_name : String,
-) -> String raise @core.SpndError {
+) -> String {
   if snapshot_name.length() == 0 {
     raise @core.Corrupt("snapshot_name cannot be empty")
   }
@@ -459,7 +459,7 @@ pub fn restore_snapshot(
 
 ///|
 /// 列出命名空间的所有快照名称。
-pub fn list_snapshots(store : AnyStore, ns : String) -> Array[String] {
+pub async fn list_snapshots(store : AnyStore, ns : String) -> Array[String] {
   let prefix = "\{ns}/_snapshots/"
   let keys = store.list(prefix)
   let result : Array[String] = Array(capacity=keys.length())

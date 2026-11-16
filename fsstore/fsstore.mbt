@@ -110,6 +110,18 @@ fn FsStore::data_path(self : FsStore, key : String) -> String {
 }
 
 ///|
+/// 数据文件的绝对路径（先按 FsStore 规则校验 key）。
+/// 供上层完成引擎（io_uring / pread worker pool）直接按路径读，
+/// 语义与 `ObjectStore::get` 完全一致；写路径仍走 `put`（需要原子 rename +
+/// `.ver` 版本 sidecar + 索引维护，不能绕过）。
+pub fn FsStore::file_path(
+  self : FsStore,
+  key : String,
+) -> String raise @core.SpndError {
+  self.data_path(FsStore::check_key(key))
+}
+
+///|
 /// 版本 sidecar 与数据文件同目录：key "a/b/c.bin" → "a/b/.c.bin.ver"。
 fn FsStore::ver_path(self : FsStore, key : String) -> String {
   let dir = dir_of(key)

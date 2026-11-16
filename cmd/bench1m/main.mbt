@@ -522,7 +522,7 @@ fn ctrl_stat(
 /// `cp=Some` ⇒ `acquire`（TTL 内命中缓存、pin 住快照）→ 查询 → `release`。
 /// acquire 返回的 Namespace 已被 pin，正常路径必须 release（MoonBit 无 finally，
 /// 失败路径会漏一次 pin；本基准不故意抛错）。
-fn run_one(
+async fn run_one(
   store : CountingStore,
   ns : String,
   cls : String,
@@ -531,7 +531,7 @@ fn run_one(
   idx : Int,
   nprobe : Int,
   cp : @control.ControlPlane[CountingStore]?,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let n = match cp {
     Some(c) => c.acquire(ns)
     None => @query.open(store, ns)
@@ -549,7 +549,7 @@ fn run_one(
 
 ///|
 /// 跑一个查询档位（`cold_meta=true` ⇒ cold-metadata；否则 warm-touched）。
-fn measure(
+async fn measure(
   store : CountingStore,
   ns : String,
   cls : String,
@@ -560,7 +560,7 @@ fn measure(
   burn : Int,
   nprobe : Int,
   cp : @control.ControlPlane[CountingStore]?,
-) -> Cell raise @core.SpndError {
+) -> Cell {
   store.inner.require_latency()
   let cold_each = cold_meta && env_int("BENCH_COLD_PER_QUERY", 1) != 0
   if cold_meta && !cold_each {
@@ -668,7 +668,7 @@ fn ctrl_row(r : CtrlRow) -> String {
 ///|
 /// 读 head manifest（公开 API：@store.read_head_state + @format.manifest_from_json），
 /// 输出 segments/num_docs/global_gen 状态。任何一步不可用都打印 key 是否存在，不抛错。
-fn manifest_line(store : CountingStore, ns : String) -> String {
+async fn manifest_line(store : CountingStore, ns : String) -> String {
   let (head, _newer) = @store.read_head_state(store, ns, "")
   if head == "" {
     return "none (no published head)"
@@ -701,7 +701,7 @@ fn manifest_line(store : CountingStore, ns : String) -> String {
 
 ///|
 /// `{ns}/vec/global/` 下的物理代目录数（含 grace 期内未回收的旧代）。
-fn global_version_count(store : CountingStore, ns : String) -> Int {
+async fn global_version_count(store : CountingStore, ns : String) -> Int {
   let prefix = "\{ns}/vec/global/"
   let seen : Set[String] = Set([])
   for key in store.list(prefix) {
@@ -862,7 +862,7 @@ fn exact_top10(
 /// - recall@10：逐 query 的 |top10 ∩ gt_top10| / 10，再按 query 平均。
 /// - 预计 GET/q：cold vec 实测 GET/q = C（nprobe=BENCH_NPROBE），
 ///   扣掉 N 个 part GET 得常数项 const=C-N，再按 const+nprobe 近似；仅近似值。
-fn run_recall(
+async fn run_recall(
   store : CountingStore,
   ns : String,
   vec_qvs : Array[Array[Float]],
@@ -874,7 +874,7 @@ fn run_recall(
   gt_ids : Array[UInt64],
   gt_vecs : Array[Float],
   dim : Int,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let gt_nprobe = nlist
   let probes = recall_probe_list(nprobe_cfg, nlist)
   let gts : Array[Set[UInt64]] = Array(capacity=nq)
@@ -956,7 +956,7 @@ fn run_recall(
 }
 
 ///|
-fn run() -> Unit raise @core.SpndError {
+async fn run() -> Unit {
   let docs_n = env_int("BENCH_DOCS", 50000)
   let dim = env_int("BENCH_DIM", 128)
   let batch_size = env_int("BENCH_BATCH", 1000)
@@ -1321,18 +1321,19 @@ fn run() -> Unit raise @core.SpndError {
 }
 
 ///|
-fn err_msg(e : @core.SpndError) -> String {
+fn err_msg(e : Error) -> String {
   match e {
     @core.BadMagic(s) => "BadMagic(\{s})"
     @core.Truncated(s) => "Truncated(\{s})"
     @core.Corrupt(s) => "Corrupt(\{s})"
     @core.NotFound(s) => "NotFound(\{s})"
     @core.CommitConflict(s) => "CommitConflict(\{s})"
+    _ => "\{e}"
   }
 }
 
 ///|
-fn main {
+async fn main {
   run() catch {
     e => println("bench1m failed: \{err_msg(e)}")
   }

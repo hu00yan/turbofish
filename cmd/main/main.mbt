@@ -6,13 +6,14 @@
 
 ///|
 /// 错误转可读字符串（SpndError 只 derive 了 Debug，跨包插值不可靠，手写展开）。
-fn err_msg(e : @core.SpndError) -> String {
+fn err_msg(e : Error) -> String {
   match e {
     @core.BadMagic(s) => "BadMagic(\{s})"
     @core.Truncated(s) => "Truncated(\{s})"
     @core.Corrupt(s) => "Corrupt(\{s})"
     @core.NotFound(s) => "NotFound(\{s})"
     @core.CommitConflict(s) => "CommitConflict(\{s})"
+    _ => "\{e}"
   }
 }
 
@@ -85,7 +86,7 @@ fn bench_bm25_score(
 /// BM25 暴力对照：整读 text/doc_len 列，逐行 tokenize 重算 tf/df，
 /// 与 bm25_search 完全相同的管线（per-segment top-k → 合并 → tombstone → top-k）。
 /// `keep` 为 id 谓词（过滤树对照用；段内截断**之前**应用，与 matcher 语义一致）。
-fn bm25_bruteforce(
+async fn bm25_bruteforce(
   store : @store.MemStore,
   ns : String,
   meta : @format.NamespaceMeta,
@@ -93,7 +94,7 @@ fn bm25_bruteforce(
   query : String,
   k : Int,
   keep : (UInt64) -> Bool,
-) -> Array[UInt64] raise @core.SpndError {
+) -> Array[UInt64] {
   let terms : Array[String] = Array()
   let seen : Set[String] = Set([])
   for t in @core.tokenize(query) {
@@ -255,13 +256,13 @@ fn bm25_bruteforce(
 ///|
 /// 向量暴力对照：整读每段 rows/vector.bin（f16 解码，与 part 文件同精度），
 /// 全量线性 cosine，排序后过滤 tombstone 取 top-k。
-fn vec_bruteforce(
+async fn vec_bruteforce(
   store : @store.MemStore,
   ns : String,
   man : @format.ManifestData,
   qv : Array[Float],
   k : Int,
-) -> Array[UInt64] raise @core.SpndError {
+) -> Array[UInt64] {
   let tomb : Set[UInt64] = Set([])
   for d in man.deleted {
     tomb.add(d)
@@ -314,13 +315,13 @@ fn vec_bruteforce(
 }
 
 ///|
-fn run_gates(
+async fn run_gates(
   store : @store.MemStore,
   cfg : @build.BuildConfig,
   docs : Array[@core.Doc],
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let ns = "bench"
   let n = @query.open(store, ns)
   // ---- gate 1: BM25 暴力对照
@@ -655,13 +656,13 @@ enum CostKind {
 
 ///|
 /// 执行第 i 条查询（vec/hybrid 用 nprobe=8 的典型探查数）。
-fn run_one_cost_query(
+async fn run_one_cost_query(
   kind : CostKind,
   n : @query.Namespace[@store.MemStore],
   i : Int,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   match kind {
     KindBm25 => @query.bm25_search(n, bm25_qs[i], 10, None)
     KindVec => @query.vec_search(n, vec_qvs[i], 10, 8, None)
@@ -672,13 +673,13 @@ fn run_one_cost_query(
 ///|
 /// 单类查询的成本测量：冷（cold+reset 后每查询 open+search）与
 /// 热（reset 后复用已 open 的 namespace 仅 search，缓存已热）。
-fn measure_type(
+async fn measure_type(
   store : @store.MemStore,
   label : String,
   kind : CostKind,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let ns = "bench"
   // 冷
   store.cold()
@@ -726,11 +727,11 @@ fn measure_type(
 
 ///|
 /// 三类查询各测冷/热成本。
-fn run_cost(
+async fn run_cost(
   store : @store.MemStore,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   measure_type(store, "bm25", KindBm25, bm25_qs, vec_qvs)
   measure_type(store, "vec", KindVec, bm25_qs, vec_qvs)
   measure_type(store, "hybrid", KindHybrid, bm25_qs, vec_qvs)
@@ -739,13 +740,13 @@ fn run_cost(
 ///|
 /// 单类查询的 native 延迟（缓存已热的"温服务"路径：复用 open 好的 namespace，
 /// 只测 search 计算）。每轮 20 条查询取均值 µs，rounds 轮样本排序后取分位。
-fn perf_one(
+async fn perf_one(
   n : @query.Namespace[@store.MemStore],
   kind : CostKind,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
   rounds : Int,
-) -> Array[Double] raise @core.SpndError {
+) -> Array[Double] {
   let ts : Array[Double] = Array()
   for _ in 0..<rounds {
     let t0 = @bench.monotonic_clock_start()
@@ -767,11 +768,11 @@ fn pct(arr : Array[Double], p : Double) -> Double {
 
 ///|
 /// 三类查询的 native 性能（内存模拟器 = 纯计算上限，不含真实 S3 RTT）。
-fn run_perf(
+async fn run_perf(
   store : @store.MemStore,
   bm25_qs : Array[String],
   vec_qvs : Array[Array[Float]],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let ns = "bench"
   let rounds = 50
   println(
@@ -801,7 +802,7 @@ fn run_perf(
 }
 
 ///|
-fn main {
+async fn main {
   println("== turbofish bench: seekpond/v1（BM25 + IVF + 过滤 + RRF）==")
   let rng = @core.Rng::new(42U)
   let cum = build_zipf_cum()

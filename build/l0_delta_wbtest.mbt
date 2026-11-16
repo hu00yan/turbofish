@@ -1,0 +1,337 @@
+// build/l0_delta_wbtest.mbt: L0 单文件 Delta Slab + 乐观 Rebase Compaction 白盒测试。
+//
+// 覆盖：
+// 1. 写放大预算：已初始化 namespace 下 200 条带向量文档 ≤ 5 次 PUT
+// 2. 乐观 rebase：compaction 期间并发插入的新段不丢，老文档也不丢
+// 3. 增删语义：仅 deletes 的批次只更新 roaring tombstone，被删 id 不再可见
+
+///|
+/// 包装 store：第一次写 manifest 时触发一次「并发写」（模拟 compaction 快照之后、
+/// CAS 发布之前前台 `ingest_l0_slab` 插入新段），之后透传。并发写直接打到
+/// inner，避免递归。`slab_puts` 记录合并段上传次数（用于断言「绝不重传大段」）。
+priv struct RebaseStore[S] {
+  inner : S
+  cfg : BuildConfig
+  pending : Array[@core.Doc]
+  mut armed : Bool
+  mut slab_puts : Int
+}
+
+///|
+fn[S] RebaseStore::new(
+  inner : S,
+  cfg : BuildConfig,
+  pending : Array[@core.Doc],
+) -> RebaseStore[S] {
+  { inner, cfg, pending, armed: true, slab_puts: 0 }
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn get(
+  self : RebaseStore[S],
+  key : String,
+) -> Bytes? {
+  self.inner.get(key)
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn put(
+  self : RebaseStore[S],
+  key : String,
+  value : Bytes,
+) -> Unit {
+  if key.has_suffix("segment.slab") {
+    self.slab_puts += 1
+  }
+  self.inner.put(key, value)
+  // 并发写发生在 compaction 已拍快照、尚未 CAS 发布的窗口里：制造一次 head 前移
+  if self.armed && key.contains("/_manifest/") {
+    self.armed = false
+    let _ = ingest_l0_slab(self.inner, self.cfg, self.pending, [])
+  }
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn put_if_match(
+  self : RebaseStore[S],
+  key : String,
+  expected : String?,
+  value : Bytes,
+) -> Bool {
+  self.inner.put_if_match(key, expected, value)
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn get_range(
+  self : RebaseStore[S],
+  key : String,
+  offset : Int,
+  len : Int,
+) -> Bytes? {
+  self.inner.get_range(key, offset, len)
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn list(
+  self : RebaseStore[S],
+  prefix : String,
+) -> Array[String] {
+  self.inner.list(prefix)
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn delete(
+  self : RebaseStore[S],
+  key : String,
+) -> Unit {
+  self.inner.delete(key)
+}
+
+///|
+impl[S : @store.ObjectStore] @store.ObjectStore for RebaseStore[S] with fn head_version(
+  self : RebaseStore[S],
+  key : String,
+) -> String? {
+  self.inner.head_version(key)
+}
+
+///|
+/// 单条 doc（用于模拟并发插入的晚到文档）。
+fn one_doc(
+  id : UInt64,
+  dim : Int,
+  text : String,
+  seed : UInt,
+) -> @core.Doc {
+  let rng = @core.Rng::new(seed)
+  let vec : Array[Float] = Array(capacity=dim)
+  for _ in 0..<dim {
+    vec.push(Float::from_double(rng.next_range(-1.0, 1.0)))
+  }
+  { id, text, vector: vec, category: "cat0", ts: 1700000000L, public: true }
+}
+
+///|
+/// 段内是否没有 `vector` 组件（全局 IVF 单副本模式）。
+async fn store_has_no_vector_component(
+  store : @store.MemStore,
+  ns : String,
+  seg : @format.SegmentMeta,
+) -> Bool {
+  let index = read_slab_index(store, ns, seg.id, seg.size_bytes)
+  index.get("vector") is None
+}
+
+///|
+/// manifest 视角下可见的 id（读每段六列并过滤 tombstone）。
+async fn[S : @store.ObjectStore] visible_ids(
+  store : S,
+  ns : String,
+  m : @format.ManifestData,
+) -> Array[UInt64] {
+  let tomb : Set[UInt64] = Set([])
+  for d in m.deleted {
+    tomb.add(d)
+  }
+  let out : Array[UInt64] = Array()
+  for seg in m.segments {
+    for d in load_segment_docs(store, ns, seg, None, 0) {
+      if !tomb.contains(d.id) {
+        out.push(d.id)
+      }
+    }
+  }
+  out
+}
+
+///|
+fn has_id(ids : Array[UInt64], id : UInt64) -> Bool {
+  for x in ids {
+    if x == id {
+      return true
+    }
+  }
+  false
+}
+
+///|
+async test "l0 slab: 200 docs within 5 puts" {
+  let mem = @store.MemStore::new()
+  let bs = @store.BudgetStore::new(mem, @store.IoBudget::unlimited())
+  let cfg = {
+    ..BuildConfig::default("l0budget"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  // 第一批负责初始化（namespace + schema + centroids），不计入预算
+  let _ = ingest_l0_slab(bs, cfg, mkdocs(1, 8, 1UL, 3U), [])
+  bs.reset()
+  let m1 = head_manifest_of(bs, "l0budget")
+  // 第二批：已初始化 namespace，500 条带向量文档（这里取 200 条以减少测试时间）
+  let mid = ingest_l0_slab(bs, cfg, mkdocs(200, 8, 2UL, 5U), [])
+  let puts = bs.tracker().puts
+  assert_eq(puts <= 5, true) // 实测 4 次（slab + manifest + head log + head 指针）
+  // 新段是单文件 slab，没有碎片对象
+  let m2 = head_manifest_of(bs, "l0budget")
+  assert_eq(m2.id, mid)
+  assert_eq(m2.segments.length(), 2)
+  assert_eq(m2.segments[1].row_count, 200)
+  assert_eq(is_l0_slab_segment(m2.segments[1].id), true)
+  let segp = "l0budget/_segments/\{m2.segments[1].id}"
+  assert_eq(mem.list("\{segp}/").length(), 1)
+  assert_eq(mem.head_version("\{segp}/segment.slab") is Some(_), true)
+  // 列回读一致
+  let docs = load_segment_docs(bs, "l0budget", m2.segments[1], None, 8)
+  assert_eq(docs.length(), 200)
+  assert_eq(docs[0].id, 2UL)
+  assert_eq(docs[199].id, 201UL)
+  assert_eq(docs[0].text, mkdocs(200, 8, 2UL, 5U)[0].text)
+  // 老段（m1）仍然在
+  assert_eq(m2.segments[0].id, m1.segments[0].id)
+}
+
+///|
+async test "l0 slab: optimistic rebase keeps concurrent segment" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0rebase"),
+    segment_rows: 4,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  // 3 个 L0 slab 段（12 行）
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(4, 8, 1UL, 11U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(4, 8, 100UL, 12U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(4, 8, 200UL, 13U), [])
+  let m3 = head_manifest_of(mem, "l0rebase")
+  assert_eq(m3.segments.length(), 3)
+  let old_ids = visible_ids(mem, "l0rebase", m3)
+  assert_eq(old_ids.length(), 12)
+  // compaction 期间并发插入第 4 段（doc_id = 99999）
+  let late = one_doc(99999UL, 8, "late arrival", 99U)
+  let hook = RebaseStore::new(mem, cfg, [late])
+  let new_id = compact_optimistic(hook, cfg)
+  assert_eq(new_id is Some(_), true)
+  let m_next = head_manifest_of(mem, "l0rebase")
+  // 合并段在前，并发新段原样保留在后
+  assert_eq(m_next.segments.length(), 2)
+  assert_eq(is_l0_slab_segment(m_next.segments[0].id), true)
+  assert_eq(m_next.segments[0].row_count, 12)
+  assert_eq(m_next.segments[1].min_id, 99999UL)
+  assert_eq(m_next.segments[1].max_id, 99999UL)
+  // 查询视角：老文档与并发写入的 99999 同时可见
+  let ids = visible_ids(mem, "l0rebase", m_next)
+  assert_eq(ids.length(), 13)
+  assert_eq(has_id(ids, 99999UL), true)
+  assert_eq(has_id(ids, 1UL), true)
+  assert_eq(has_id(ids, 203UL), true)
+  // 没有墓碑残留
+  assert_eq(m_next.deleted.length(), 0)
+  // 乐观 rebase：大段只上传一次（CAS 冲突后只重写 manifest，不重传段）
+  assert_eq(hook.slab_puts, 1)
+}
+
+///|
+async test "l0 slab: delete-only batch updates roaring tombstone" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0del"),
+    segment_rows: 8,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(6, 8, 1UL, 21U), [])
+  let m1 = head_manifest_of(mem, "l0del")
+  assert_eq(m1.deleted.length(), 0)
+  assert_eq(m1.deleted_roar, None)
+  assert_eq(m1.segments.length(), 1)
+  // 仅含 deletes 的批次：不新增段，只更新 tombstone 对象
+  let mid = ingest_l0_slab(mem, cfg, [], [2UL, 4UL])
+  let m2 = head_manifest_of(mem, "l0del")
+  assert_eq(m2.id, mid)
+  assert_eq(m2.segments.length(), 1)
+  assert_eq(m2.deleted.length(), 2)
+  assert_eq(m2.deleted[0], 2UL)
+  assert_eq(m2.deleted[1], 4UL)
+  let roar_id = match m2.deleted_roar {
+    Some(v) => v
+    None => fail("expected deleted_roar")
+  }
+  let reraw = must_get(mem, "l0del/_tombstones/\{roar_id}.roar")
+  let roar_ids = @format.decode_roaring(reraw)
+  assert_eq(roar_ids.length(), 2)
+  assert_eq(roar_ids[0], 2UL)
+  assert_eq(roar_ids[1], 4UL)
+  // 被删 id 不再可见，其余原样
+  let ids = visible_ids(mem, "l0del", m2)
+  assert_eq(ids.length(), 4)
+  assert_eq(has_id(ids, 2UL), false)
+  assert_eq(has_id(ids, 4UL), false)
+  assert_eq(has_id(ids, 1UL), true)
+  assert_eq(has_id(ids, 6UL), true)
+  // 再删一次：tombstone 合并去重升序
+  let _ = ingest_l0_slab(mem, cfg, [], [4UL, 5UL])
+  let m3 = head_manifest_of(mem, "l0del")
+  assert_eq(m3.deleted.length(), 3)
+  assert_eq(m3.deleted[0], 2UL)
+  assert_eq(m3.deleted[1], 4UL)
+  assert_eq(m3.deleted[2], 5UL)
+  let roar3 = match m3.deleted_roar {
+    Some(v) => v
+    None => fail("expected deleted_roar")
+  }
+  assert_eq(@format.decode_roaring(must_get(mem, "l0del/_tombstones/\{roar3}.roar")).length(), 3)
+}
+
+///|
+async test "l0 slab: global vec chain survives ingest and optimistic compact" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::single_copy("l0g"),
+    segment_rows: 4,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(4, 8, 1UL, 31U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(4, 8, 100UL, 32U), [])
+  let m2 = head_manifest_of(mem, "l0g")
+  assert_eq(m2.segments.length(), 2)
+  assert_eq(m2.vec_global_version is Some(_), true)
+  assert_eq(m2.global_gen is Some(_), true)
+  // slab 段不含向量列（向量只在 global part 里）
+  assert_eq(
+    is_l0_slab_segment(m2.segments[0].id) &&
+    store_has_no_vector_component(mem, "l0g", m2.segments[0]),
+    true,
+  )
+  let (gv2, dim2) = load_global_vec_rows(mem, "l0g", m2)
+  assert_eq(dim2, 8)
+  assert_eq(gv2.get(0).unwrap().length(), 4 * 8)
+  assert_eq(gv2.get(1).unwrap().length(), 4 * 8)
+  // 乐观 compaction：合并成 1 段 + 1 个全量新 base
+  let cid = compact_optimistic(mem, cfg)
+  assert_eq(cid is Some(_), true)
+  let m3 = head_manifest_of(mem, "l0g")
+  assert_eq(m3.segments.length(), 1)
+  assert_eq(m3.segments[0].row_count, 8)
+  assert_eq(m3.global_gen is None, true)
+  assert_eq(m3.vec_global_version, Some(m3.id))
+  let (gv3, dim3) = load_global_vec_rows(mem, "l0g", m3)
+  assert_eq(dim3, 8)
+  assert_eq(gv3.get(0).unwrap().length(), 8 * 8)
+  // 合并段的行都能从 global base 取回（列仍然可读）
+  let docs = load_segment_docs(
+    mem,
+    "l0g",
+    m3.segments[0],
+    gv3.get(0),
+    dim3,
+  )
+  assert_eq(docs.length(), 8)
+  assert_eq(docs[0].id, 1UL)
+}

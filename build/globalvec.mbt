@@ -22,11 +22,11 @@ pub const GLOBAL_GC_GRACE_MS : UInt64 = 60000UL
 
 ///|
 /// 读 global meta.json（不存在 raise NotFound）。
-fn[S : @store.ObjectStore] read_global_meta(
+async fn[S : @store.ObjectStore] read_global_meta(
   store : S,
   ns : String,
   ver : String,
-) -> Map[String, Json] raise @core.SpndError {
+) -> Map[String, Json] {
   let key = "\{ns}/vec/global/\{ver}/meta.json"
   let bs = match store.get(key) {
     Some(b) => b
@@ -127,14 +127,14 @@ fn global_gen_versions(m : @format.ManifestData) -> Array[String] {
 ///
 /// 返回 (meta, dim, parts)；代内没有 part 时 dim 回落为 `expected_dim`。
 /// 单副本语义下任何缺失都不允许静默跳过（跳过 = 丢行）。
-fn[S : @store.ObjectStore] read_global_gen_parts(
+async fn[S : @store.ObjectStore] read_global_gen_parts(
   store : S,
   ns : String,
   ver : String,
   manifest : @format.ManifestData?,
   expected_dim : Int,
   expect_base : String,
-) -> (Map[String, Json], Int, Array[@format.GlobalVecPart]) raise @core.SpndError {
+) -> (Map[String, Json], Int, Array[@format.GlobalVecPart]) {
   let gm = read_global_meta(store, ns, ver)
   let (kind, mbase) = global_meta_kind_base(gm)
   if kind == "delta" && expect_base != "" && mbase != expect_base {
@@ -246,11 +246,11 @@ fn[S : @store.ObjectStore] read_global_gen_parts(
 
 ///|
 /// 读 segment meta.json 的 vec_normalized 标志（旧数据缺省 false）。
-fn[S : @store.ObjectStore] segment_vec_normalized(
+async fn[S : @store.ObjectStore] segment_vec_normalized(
   store : S,
   ns : String,
   seg_id : String,
-) -> Bool raise @core.SpndError {
+) -> Bool {
   let key = "\{ns}/_segments/\{seg_id}/meta.json"
   let bs = match store.get(key) {
     Some(b) => b
@@ -274,11 +274,11 @@ fn normalize_one(v : Array[Float], dim : Int) -> Array[Float] {
 
 ///|
 /// 读 segment meta.json 的 partitions（cid 升序）。
-fn[S : @store.ObjectStore] segment_partitions(
+async fn[S : @store.ObjectStore] segment_partitions(
   store : S,
   ns : String,
   seg_id : String,
-) -> Array[Int] raise @core.SpndError {
+) -> Array[Int] {
   let key = "\{ns}/_segments/\{seg_id}/meta.json"
   let bs = match store.get(key) {
     Some(b) => b
@@ -333,7 +333,7 @@ fn assign_cid(v : Array[Float], cent : @format.Centroids, dim : Int) -> Int {
 /// - 新段向量直接从 `docs[new_ranges[j]]` 计算，不读盘；
 /// - `new_ranges[j]` 是第 j 个新段在 docs 中的 [start, end)；
 /// - `old_seg_count` 是旧段数量（新段 seg_idx = old_seg_count + j）。
-fn[S : @store.ObjectStore] rebuild_global_vec_parts(
+async fn[S : @store.ObjectStore] rebuild_global_vec_parts(
   store : S,
   cfg : BuildConfig,
   ns : String,
@@ -344,7 +344,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
   docs : Array[@core.Doc],
   new_ranges : Array[(Int, Int)],
   old_seg_count : Int,
-) -> Array[Int] raise @core.SpndError {
+) -> Array[Int] {
   let base = "\{ns}/vec/global/\{manifest.id}"
   let k = if cent.k() > 0 { cent.k() } else { 1 }
   let dim = if cent.dim > 0 { cent.dim } else { cfg.vector_dim }
@@ -534,7 +534,7 @@ fn[S : @store.ObjectStore] rebuild_global_vec_parts(
 /// - pack_size=P>1：按 cid/P 分相邻组，每组一个 `pack-{i}.bin`（SPNDGVPK，
 ///   见 @format.encode_global_pack；调用方在 meta.json 记 `"pack_size"`）。
 /// 返回 (cids 升序, 落盘总字节)。
-fn[S : @store.ObjectStore] put_global_parts(
+async fn[S : @store.ObjectStore] put_global_parts(
   store : S,
   dir : String,
   parts : Array[(Int, Bytes)],
@@ -543,21 +543,24 @@ fn[S : @store.ObjectStore] put_global_parts(
   let cids : Array[Int] = Array(capacity=parts.length())
   let mut bytes = 0
   if pack_size <= 1 {
+    let items : Array[(String, Bytes)] = Array(capacity=parts.length())
     for p in parts {
-      store.put("\{dir}/part-\{p.0}.bin", p.1)
+      items.push(("\{dir}/part-\{p.0}.bin", p.1))
       cids.push(p.0)
       bytes += p.1.length()
     }
+    store.put_many(items)
     return (cids, bytes)
   }
   // 打包：parts 升序 ⇒ 按 cid/P 分组后组内 cid 连续。
   let group : Array[(Int, Bytes)] = Array()
+  let items : Array[(String, Bytes)] = Array()
   let mut cur_pack = -1
   for p in parts {
     let pk = p.0 / pack_size
     if pk != cur_pack && group.length() > 0 {
       let bs = @format.encode_global_pack(group)
-      store.put("\{dir}/pack-\{cur_pack}.bin", bs)
+      items.push(("\{dir}/pack-\{cur_pack}.bin", bs))
       bytes += bs.length()
       group.clear()
     }
@@ -567,9 +570,10 @@ fn[S : @store.ObjectStore] put_global_parts(
   }
   if group.length() > 0 {
     let bs = @format.encode_global_pack(group)
-    store.put("\{dir}/pack-\{cur_pack}.bin", bs)
+    items.push(("\{dir}/pack-\{cur_pack}.bin", bs))
     bytes += bs.length()
   }
+  store.put_many(items)
   (cids, bytes)
 }
 
@@ -585,7 +589,7 @@ fn[S : @store.ObjectStore] put_global_parts(
 ///   `"kind":"delta"` 与 `"base": <旧 base 版本>`；`seg_ids` 只列本代覆盖的新段。
 ///
 /// 返回实际写出的 cid 列表。
-fn[S : @store.ObjectStore] write_global_delta_parts(
+async fn[S : @store.ObjectStore] write_global_delta_parts(
   store : S,
   cfg : BuildConfig,
   ns : String,
@@ -668,11 +672,11 @@ fn[S : @store.ObjectStore] write_global_delta_parts(
 ///|
 /// 立即 GC 旧代全局 IVF 分区：只保留 `keep_version`。这是显式维护入口；
 /// 正常写入路径用 `gc_global_versions_grace`，避免删掉 in-flight 查询的旧代。
-pub fn[S : @store.ObjectStore] gc_global_versions(
+pub async fn[S : @store.ObjectStore] gc_global_versions(
   store : S,
   ns : String,
   keep_version : String,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   gc_global_versions_grace(store, ns, keep_version, 0UL)
 }
 
@@ -698,12 +702,12 @@ fn global_version_of_key(prefix : String, key : String) -> String? {
 /// compact_global 把整条旧链折成一个新 base 时，旧 base + 全部 deltas 是
 /// 被**同一个**新 base 同时替代的，不能只看链内相邻代的创建时间，否则旧 base
 /// 可能在 in-flight 查询仍引用它时就被回收。
-pub fn[S : @store.ObjectStore] gc_global_versions_grace_keep(
+pub async fn[S : @store.ObjectStore] gc_global_versions_grace_keep(
   store : S,
   ns : String,
   keep_versions : Array[String],
   grace_ms : UInt64,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let keep : Set[String] = Set([])
   for v in keep_versions {
     keep.add(v)
@@ -833,22 +837,22 @@ pub fn[S : @store.ObjectStore] gc_global_versions_grace_keep(
 ///|
 /// 按时间 grace GC 旧代，只保留 `keep_version`。语义见
 /// `gc_global_versions_grace_keep`；本入口保持旧签名不变。
-pub fn[S : @store.ObjectStore] gc_global_versions_grace(
+pub async fn[S : @store.ObjectStore] gc_global_versions_grace(
   store : S,
   ns : String,
   keep_version : String,
   grace_ms : UInt64,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   gc_global_versions_grace_keep(store, ns, [keep_version], grace_ms)
 }
 
 ///|
 /// 一个 global 代的全部对象字节数（meta + parts）。用于 delta 链的合并阈值。
-fn[S : @store.ObjectStore] global_gen_bytes(
+async fn[S : @store.ObjectStore] global_gen_bytes(
   store : S,
   ns : String,
   ver : String,
-) -> Int raise @core.SpndError {
+) -> Int {
   // 新格式把 part 字节数写进 meta，阈值检查不再读整个 base。
   let gm = read_global_meta(store, ns, ver)
   match gm.get("bytes") {
@@ -874,11 +878,11 @@ fn[S : @store.ObjectStore] global_gen_bytes(
 ///   `vec_global_version = Some(new_id)`、`global_gen = None`、`parent = old.id`；
 /// - 复用 `rebuild_global_vec_parts` 读完整条旧链写 `vec/global/{new_id}`；
 /// - CAS 发布后用 grace GC 回收旧 base + deltas（新 base 保留），失败不破坏旧 head。
-pub fn[S : @store.ObjectStore] compact_global(
+pub async fn[S : @store.ObjectStore] compact_global(
   store : S,
   cfg : BuildConfig,
   ns : String,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let meta = match read_namespace(store, ns) {
     Some(m) => m
     None => raise @core.NotFound("namespace not found: \{ns}")
@@ -929,12 +933,12 @@ pub fn[S : @store.ObjectStore] compact_global(
 /// 阈值触发 `compact_global`：delta 数 >= `max_deltas`，或 delta 总字节 /
 /// base 字节 >= 0.3（base 为空时只要 delta 非空就触发）。无链 / 空链 no-op。
 /// 自动合并失败直接向上抛错（不静默吞掉）。
-pub fn[S : @store.ObjectStore] maybe_compact_global(
+pub async fn[S : @store.ObjectStore] maybe_compact_global(
   store : S,
   cfg : BuildConfig,
   ns : String,
   max_deltas : Int,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let meta = match read_namespace(store, ns) {
     Some(m) => m
     None => return

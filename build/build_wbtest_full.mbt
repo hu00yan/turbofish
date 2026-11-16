@@ -185,10 +185,10 @@ fn mkdocs(
 }
 
 ///|
-fn[S : @store.ObjectStore] must_get(
+async fn[S : @store.ObjectStore] must_get(
   store : S,
   key : String,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   match store.get(key) {
     Some(b) => b
     None => raise @core.NotFound("missing object: \{key}")
@@ -196,10 +196,10 @@ fn[S : @store.ObjectStore] must_get(
 }
 
 ///|
-fn[S : @store.ObjectStore] head_manifest_of(
+async fn[S : @store.ObjectStore] head_manifest_of(
   store : S,
   ns : String,
-) -> @format.ManifestData raise @core.SpndError {
+) -> @format.ManifestData {
   match read_namespace(store, ns) {
     Some(m) => load_manifest(store, ns, m.head_manifest)
     None => raise @core.NotFound("namespace missing: \{ns}")
@@ -208,10 +208,10 @@ fn[S : @store.ObjectStore] head_manifest_of(
 
 ///|
 /// 读 seg meta.json 的 partitions（cid 升序数组）。
-fn[S : @store.ObjectStore] seg_partitions(
+async fn[S : @store.ObjectStore] seg_partitions(
   store : S,
   segp : String,
-) -> Array[Int] raise @core.SpndError {
+) -> Array[Int] {
   let j = bytes_to_json(must_get(store, "\{segp}/meta.json"), "seg meta")
   let m : Map[String, Json] = match j {
     Object(m) => m
@@ -232,7 +232,7 @@ fn[S : @store.ObjectStore] seg_partitions(
 }
 
 ///|
-test "ingest small batch: objects complete and columns roundtrip" {
+async test "ingest small batch: objects complete and columns roundtrip" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "t1",
@@ -412,7 +412,7 @@ test "ingest small batch: objects complete and columns roundtrip" {
 }
 
 ///|
-test "second ingest appends and reuses centroids" {
+async test "second ingest appends and reuses centroids" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "t2",
@@ -508,7 +508,7 @@ test "second ingest appends and reuses centroids" {
 }
 
 ///|
-test "delete_docs merges and dedups tombstones" {
+async test "delete_docs merges and dedups tombstones" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "t3",
@@ -563,7 +563,7 @@ test "delete_docs merges and dedups tombstones" {
 }
 
 ///|
-test "train_centroids deterministic normalized and clamped" {
+async test "train_centroids deterministic normalized and clamped" {
   let docs = mkdocs(20, 8, 1UL, 42U)
   let c1 = train_centroids(docs, 4, 3, false)
   let c2 = train_centroids(docs, 4, 3, false)
@@ -585,7 +585,7 @@ test "train_centroids deterministic normalized and clamped" {
 }
 
 ///|
-test "delete_docs on missing namespace raises" {
+async test "delete_docs on missing namespace raises" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "ghost",
@@ -616,7 +616,7 @@ test "delete_docs on missing namespace raises" {
 }
 
 ///|
-test "delete_docs before first publish raises" {
+async test "delete_docs before first publish raises" {
   let store = WbStore::new()
   // 手工放一个 head_manifest 仍为占位 "" 的 namespace.json
   let meta : @format.NamespaceMeta = {
@@ -669,10 +669,10 @@ test "delete_docs before first publish raises" {
 
 ///|
 /// 读 seg meta.json 为 Map。
-fn[S : @store.ObjectStore] seg_meta_map(
+async fn[S : @store.ObjectStore] seg_meta_map(
   store : S,
   segp : String,
-) -> Map[String, Json] raise @core.SpndError {
+) -> Map[String, Json] {
   match bytes_to_json(must_get(store, "\{segp}/meta.json"), "seg meta") {
     Object(m) => m
     _ => raise @core.Corrupt("seg meta not object")
@@ -680,7 +680,7 @@ fn[S : @store.ObjectStore] seg_meta_map(
 }
 
 ///|
-test "stats, dense id, dict/bitmap encodings, sq8 and blockmax" {
+async test "stats, dense id, dict/bitmap encodings, sq8 and blockmax" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1",
@@ -774,7 +774,7 @@ test "stats, dense id, dict/bitmap encodings, sq8 and blockmax" {
 }
 
 ///|
-test "vec_storage pq16 writes SPNDPQP1 parts" {
+async test "vec_storage pq16 writes SPNDPQP1 parts" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1pq",
@@ -818,7 +818,7 @@ test "vec_storage pq16 writes SPNDPQP1 parts" {
 }
 
 ///|
-test "compact merges segments and physicalizes tombstones" {
+async test "compact merges segments and physicalizes tombstones" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1c",
@@ -880,7 +880,7 @@ test "compact merges segments and physicalizes tombstones" {
 }
 
 ///|
-test "CAS conflict: stale writer loses, build reports CommitConflict" {
+async test "CAS conflict: stale writer loses, build reports CommitConflict" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1cas",
@@ -920,7 +920,7 @@ test "CAS conflict: stale writer loses, build reports CommitConflict" {
 }
 
 ///|
-test "PQ reconstruction is close to normalized data" {
+async test "PQ reconstruction is close to normalized data" {
   // 200 行 × 16 维，两簇；训练后按 codes 重建，L2 误差应远小于簇间距
   let dim = 16
   let n = 200
@@ -956,7 +956,7 @@ test "PQ reconstruction is close to normalized data" {
 }
 
 ///|
-test "PQ16 ADC ranking matches brute force on separable clusters" {
+async test "PQ16 ADC ranking matches brute force on separable clusters" {
   let dim = 32
   let n = 400
   let rng = @core.Rng::new(11U)
@@ -1029,7 +1029,7 @@ test "PQ16 ADC ranking matches brute force on separable clusters" {
 }
 
 ///|
-test "PQ16 ADC on 768-dim random clusters" {
+async test "PQ16 ADC on 768-dim random clusters" {
   let dim = 768
   let n = 400
   let rng = @core.Rng::new(21U)
@@ -1111,7 +1111,7 @@ test "PQ16 ADC on 768-dim random clusters" {
 }
 
 ///|
-test "normalize_vecs stores unit vectors and meta flag" {
+async test "normalize_vecs stores unit vectors and meta flag" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1n",
@@ -1157,7 +1157,7 @@ test "normalize_vecs stores unit vectors and meta flag" {
 }
 
 ///|
-test "delete_docs writes roaring tombstone object" {
+async test "delete_docs writes roaring tombstone object" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1r",
@@ -1196,7 +1196,7 @@ test "delete_docs writes roaring tombstone object" {
 }
 
 ///|
-test "blockstats stores 256-row ts min/max" {
+async test "blockstats stores 256-row ts min/max" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1bst",
@@ -1233,7 +1233,7 @@ test "blockstats stores 256-row ts min/max" {
 }
 
 ///|
-test "global vec parts merge segments" {
+async test "global vec parts merge segments" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1g",
@@ -1295,7 +1295,7 @@ test "global vec parts merge segments" {
 }
 
 ///|
-test "seg meta embeds FTS bloom" {
+async test "seg meta embeds FTS bloom" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1bl",
@@ -1341,7 +1341,7 @@ test "seg meta embeds FTS bloom" {
 }
 
 ///|
-test "compact global single-copy keeps one generation" {
+async test "compact global single-copy keeps one generation" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1gc",
@@ -1409,7 +1409,7 @@ test "compact global single-copy keeps one generation" {
 }
 
 ///|
-test "no-CAS store falls back to append-only head log" {
+async test "no-CAS store falls back to append-only head log" {
   let store = WbStore::new()
   store.cas_enabled = false
   let cfg : BuildConfig = {
@@ -1447,7 +1447,7 @@ test "no-CAS store falls back to append-only head log" {
 }
 
 ///|
-test "publish_head uses build baseline, not publish-time head" {
+async test "publish_head uses build baseline, not publish-time head" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1base",
@@ -1500,7 +1500,7 @@ test "publish_head uses build baseline, not publish-time head" {
 }
 
 ///|
-test "legacy namespace without head log can still publish" {
+async test "legacy namespace without head log can still publish" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1legacy",
@@ -1544,7 +1544,7 @@ test "legacy namespace without head log can still publish" {
 }
 
 ///|
-test "single-copy global parts store normalized vectors" {
+async test "single-copy global parts store normalized vectors" {
   let store = WbStore::new()
   let cfg = {
     ..BuildConfig::single_copy("b1norm"),
@@ -1563,7 +1563,7 @@ test "single-copy global parts store normalized vectors" {
     }
   }
   ingest(store, cfg, docs)
-  let check = fn(man : @format.ManifestData) -> Unit raise @core.SpndError {
+  let check = async fn(man : @format.ManifestData) -> Unit {
     let ver = match man.vec_global_version {
       Some(v) => v
       None => raise @core.Corrupt("expected global version")
@@ -1595,7 +1595,7 @@ test "single-copy global parts store normalized vectors" {
 }
 
 ///|
-test "compact rejects missing global part instead of zero-filling" {
+async test "compact rejects missing global part instead of zero-filling" {
   let store = WbStore::new()
   let cfg = {
     ..BuildConfig::single_copy("b1miss"),
@@ -1705,7 +1705,7 @@ impl @store.ObjectStore for ForkStore with fn head_version(
 }
 
 ///|
-test "publish rolls back fork when both writers passed pre-check" {
+async test "publish rolls back fork when both writers passed pre-check" {
   let inner = WbStore::new()
   let base : @format.ManifestData = {
     id: "manifest-0001",
@@ -1748,7 +1748,7 @@ test "publish rolls back fork when both writers passed pre-check" {
 }
 
 ///|
-test "gc grace anchors at replacement time, not creation time" {
+async test "gc grace anchors at replacement time, not creation time" {
   let store = WbStore::new()
   let cfg = {
     ..BuildConfig::single_copy("b1gca"),
@@ -1767,10 +1767,7 @@ test "gc grace anchors at replacement time, not creation time" {
     Some(v) => v
     None => fail("expected new global version")
   }
-  let set_created = fn(
-    ver : String,
-    ms : UInt64,
-  ) -> Unit raise @core.SpndError {
+  let set_created = async fn(ver : String, ms : UInt64) -> Unit {
     let m = read_global_meta(store, "b1gca", ver)
     m.set("created_ms", Json::number(ms.to_double()))
     store.put("b1gca/vec/global/\{ver}/meta.json", json_bytes(Json::object(m)))
@@ -1789,7 +1786,7 @@ test "gc grace anchors at replacement time, not creation time" {
 }
 
 ///|
-test "writer id token validation" {
+async test "writer id token validation" {
   assert_eq(valid_writer_token("w1-p2-000001"), true)
   assert_eq(valid_writer_token("bad/id"), false)
   assert_eq(valid_writer_token("bad_id"), false)
@@ -1803,11 +1800,11 @@ test "writer id token validation" {
 
 ///|
 /// 一个 global 代目录下所有 part 的行数之和（(seg_idx,row) 逐行解码）。
-fn[S : @store.ObjectStore] global_gen_rows(
+async fn[S : @store.ObjectStore] global_gen_rows(
   store : S,
   ns : String,
   ver : String,
-) -> Int raise @core.SpndError {
+) -> Int {
   let gm = read_global_meta(store, ns, ver)
   let mut total = 0
   for cid in global_meta_cids(gm) {
@@ -1821,7 +1818,7 @@ fn[S : @store.ObjectStore] global_gen_rows(
 
 ///|
 /// 一个 global 代目录下所有对象 key（升序），用于验证「旧代未被改写」。
-fn[S : @store.ObjectStore] global_gen_keys(
+async fn[S : @store.ObjectStore] global_gen_keys(
   store : S,
   ns : String,
   ver : String,
@@ -1860,7 +1857,7 @@ fn meta_of_kind_base(m : Map[String, Json]) -> (String, String, Array[String]) {
 }
 
 ///|
-test "ingest_delta appends one delta and leaves base untouched" {
+async test "ingest_delta appends one delta and leaves base untouched" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1dl",
@@ -1980,7 +1977,7 @@ test "ingest_delta appends one delta and leaves base untouched" {
 }
 
 ///|
-test "ingest_delta without old global writes full base" {
+async test "ingest_delta without old global writes full base" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1dl0",
@@ -2045,7 +2042,7 @@ test "ingest_delta without old global writes full base" {
 ///|
 /// 读一个 global 代的全部行，按 manifest 段顺序展平成 `vecs`
 /// （index = 段起始行号 + 段内行号；缺行为 None），同时返回 dim 与每段行数。
-fn[S : @store.ObjectStore] flat_global_vectors(
+async fn[S : @store.ObjectStore] flat_global_vectors(
   store : S,
   ns : String,
   ver : String,
@@ -2111,7 +2108,7 @@ fn assert_vec_dir(
 }
 
 ///|
-test "S2b ingest after ingest_delta keeps delta rows in new base" {
+async test "S2b ingest after ingest_delta keeps delta rows in new base" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1rb",
@@ -2202,7 +2199,7 @@ test "S2b ingest after ingest_delta keeps delta rows in new base" {
 }
 
 ///|
-test "S2b compact reads global delta chain and folds it into one base" {
+async test "S2b compact reads global delta chain and folds it into one base" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1cb",
@@ -2282,7 +2279,7 @@ test "S2b compact reads global delta chain and folds it into one base" {
 // ============================================================================
 
 ///|
-test "S3 ingest_delta auto compacts global chain at third delta" {
+async test "S3 ingest_delta auto compacts global chain at third delta" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1gc3",
@@ -2362,7 +2359,7 @@ test "S3 ingest_delta auto compacts global chain at third delta" {
 }
 
 ///|
-test "S3 compact_global folds one delta and no-ops on empty chain" {
+async test "S3 compact_global folds one delta and no-ops on empty chain" {
   let store = WbStore::new()
   let cfg : BuildConfig = {
     ns: "b1gcm",
@@ -2443,7 +2440,7 @@ test "S3 compact_global folds one delta and no-ops on empty chain" {
 }
 
 ///|
-test "S2b delete_docs preserves global delta chain" {
+async test "S2b delete_docs preserves global delta chain" {
   let store = WbStore::new()
   let cfg = {
     ..BuildConfig::single_copy("b1delchain"),

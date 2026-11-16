@@ -208,11 +208,11 @@ priv struct IngestBase {
 ///|
 /// 写新段 + 拼新 manifest 的公共基线（见 `IngestBase`）。语义与 `ingest` 原实现
 /// 完全相同（对象 key、写入顺序、id 生成顺序均不变）。
-fn[S : @store.ObjectStore] build_ingest_base(
+async fn[S : @store.ObjectStore] build_ingest_base(
   store : S,
   cfg : BuildConfig,
   docs : Array[@core.Doc],
-) -> IngestBase raise @core.SpndError {
+) -> IngestBase {
   // 头 manifest：head_manifest 为 ""（首次创建占位 / 上次发布中断）视为无 live manifest。
   // expected_head 必须保存**构建基线**，发布时用它做 compare-and-set；不能用发布
   // 时刻重新读到的 head（review P0-1）。
@@ -351,11 +351,11 @@ fn[S : @store.ObjectStore] build_ingest_base(
 ///
 /// global 模式（`global_vec_parts && VF16`）下重写**整代全量** base
 /// `vec/global/{new_id}`（`global_gen = None`）。追加写入请用 `ingest_delta`。
-pub fn[S : @store.ObjectStore] ingest(
+pub async fn[S : @store.ObjectStore] ingest(
   store : S,
   cfg : BuildConfig,
   docs : Array[@core.Doc],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let b = build_ingest_base(store, cfg, docs)
   let want_global = cfg.global_vec_parts && cfg.vec_storage == VF16
   let manifest : @format.ManifestData = {
@@ -414,24 +414,24 @@ pub fn[S : @store.ObjectStore] ingest(
 /// - 非 global 配置（`!global_vec_parts || VSq8/VPq16`）直接退回 `ingest`；
 /// - 发布用 `publish_head`，**不调用 GC**（旧代由后续 ingest/compact 的 grace
 ///   GC 或显式 `gc_global_versions` 回收）。
-pub fn[S : @store.ObjectStore] ingest_delta(
+pub async fn[S : @store.ObjectStore] ingest_delta(
   store : S,
   cfg : BuildConfig,
   docs : Array[@core.Doc],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   ingest_delta_opts(store, cfg, docs, 8, true)
 }
 
 ///|
 /// `ingest_delta` 的可配置版本：`max_deltas` 控制自动合并阈值，`auto_compact=false`
 /// 时只追加 delta，由调用方在批次结束后显式 `compact_global`（1M 基准用）。
-pub fn[S : @store.ObjectStore] ingest_delta_opts(
+pub async fn[S : @store.ObjectStore] ingest_delta_opts(
   store : S,
   cfg : BuildConfig,
   docs : Array[@core.Doc],
   max_deltas : Int,
   auto_compact : Bool,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   if !(cfg.global_vec_parts && cfg.vec_storage == VF16) {
     // 没有全局分区就没有 delta 可言：与 ingest 行为一致（全量写 + 全量 base）。
     ingest(store, cfg, docs)
@@ -534,11 +534,11 @@ pub fn[S : @store.ObjectStore] ingest_delta_opts(
 /// 逻辑删除（tombstone）：读头 manifest → deleted 合并 ids（去重、升序）→
 /// 写新 manifest（segments 与 centroid_version 不变，parent = 旧 manifest id）→
 /// CAS 发布头指针。不物理删除对象；namespace.json 的字段不更新。
-pub fn[S : @store.ObjectStore] delete_docs(
+pub async fn[S : @store.ObjectStore] delete_docs(
   store : S,
   cfg : BuildConfig,
   ids : Array[UInt64],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let meta = match read_namespace(store, cfg.ns) {
     Some(m) => m
     None => raise @core.NotFound("namespace not found: \{cfg.ns}")

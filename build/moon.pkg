@@ -2,7 +2,21 @@ import {
   "turbofish/core",
   "turbofish/store",
   "turbofish/format",
+  "moonbitlang/async",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "build_wbtest_full.mbt": [ "native", "llvm" ],
+    "slab_wbtest.mbt": [ "native", "llvm" ],
+    "l0_delta_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

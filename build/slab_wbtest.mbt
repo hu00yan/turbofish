@@ -31,7 +31,7 @@ fn make_test_docs() -> Array[@core.Doc] {
 }
 
 ///|
-test "build: write_segment_slab single-file layout and read back" {
+async test "build: write_segment_slab single-file layout and read back" {
   let store = @store.MemStore::new()
   let cfg = BuildConfig::default("slab_test")
   let cent : @format.Centroids = { dim: 4, data: [0.1, 0.2, 0.3, 0.4] }
@@ -111,7 +111,7 @@ test "build: write_segment_slab single-file layout and read back" {
 }
 
 ///|
-test "build: 1 Range request reads index header at fixed offset" {
+async test "build: 1 Range request reads index header at fixed offset" {
   let store = @store.MemStore::new()
   let cfg = BuildConfig::default("range_test")
   let cent : @format.Centroids = { dim: 4, data: [0.1, 0.2, 0.3, 0.4] }
@@ -148,7 +148,7 @@ test "build: 1 Range request reads index header at fixed offset" {
 }
 
 ///|
-test "build: 1 Range request reads index trailer at tail" {
+async test "build: 1 Range request reads index trailer at tail" {
   let store = @store.MemStore::new()
   let cfg = BuildConfig::default("tail_test")
   let cent : @format.Centroids = { dim: 4, data: [0.1, 0.2, 0.3, 0.4] }
@@ -181,7 +181,7 @@ test "build: 1 Range request reads index trailer at tail" {
 }
 
 ///|
-test "build: pluggable format switch LegacyMultiFile vs SlabV2" {
+async test "build: pluggable format switch LegacyMultiFile vs SlabV2" {
   let store = @store.MemStore::new()
   let cfg = BuildConfig::default("pluggable_test")
   let cent : @format.Centroids = { dim: 4, data: [0.1, 0.2, 0.3, 0.4] }

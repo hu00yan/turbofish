@@ -2,3 +2,15 @@ import {
   "moonbitlang/core/encoding/utf8",
   "turbofish/core",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "mem_wbtest.mbt": [ "native", "llvm" ],
+    "budget_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

@@ -602,11 +602,11 @@ pub fn assert_budget_violations(
 
 ///|
 /// 在指定预算作用域内执行动作，执行完毕后立即断言不超预算，并恢复原预算。
-pub fn[S, T] with_budget(
+pub async fn[S, T] with_budget(
   store : BudgetStore[S],
   budget : IoBudget,
-  action : () -> T raise Error,
-) -> T raise Error {
+  action : async () -> T,
+) -> T {
   let prev_budget = store.budget
   store.set_budget(budget)
   store.reset()
@@ -618,11 +618,11 @@ pub fn[S, T] with_budget(
 
 ///|
 /// 便捷包装底层存储并在临时预算下执行。
-pub fn[S, T] run_with_budget(
+pub async fn[S, T] run_with_budget(
   store : S,
   budget : IoBudget,
-  action : (BudgetStore[S]) -> T raise Error,
-) -> T raise Error {
+  action : async (BudgetStore[S]) -> T,
+) -> T {
   let bstore = BudgetStore::new(store, budget)
   let result = action(bstore)
   bstore.assert_within_budget()
@@ -799,7 +799,7 @@ pub impl[S : ObjectStore] BatchStore for BudgetStore[S] with fn get_range_many(
 
 ///|
 /// 显式方法导出（避免警告）
-pub fn[S : ObjectStore] BudgetStore::get(
+pub async fn[S : ObjectStore] BudgetStore::get(
   self : BudgetStore[S],
   key : String,
 ) -> Bytes? {
@@ -807,7 +807,7 @@ pub fn[S : ObjectStore] BudgetStore::get(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::put(
+pub async fn[S : ObjectStore] BudgetStore::put(
   self : BudgetStore[S],
   key : String,
   value : Bytes,
@@ -816,7 +816,7 @@ pub fn[S : ObjectStore] BudgetStore::put(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::put_if_match(
+pub async fn[S : ObjectStore] BudgetStore::put_if_match(
   self : BudgetStore[S],
   key : String,
   expected : String?,
@@ -826,7 +826,7 @@ pub fn[S : ObjectStore] BudgetStore::put_if_match(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::get_range(
+pub async fn[S : ObjectStore] BudgetStore::get_range(
   self : BudgetStore[S],
   key : String,
   offset : Int,
@@ -836,7 +836,7 @@ pub fn[S : ObjectStore] BudgetStore::get_range(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::list(
+pub async fn[S : ObjectStore] BudgetStore::list(
   self : BudgetStore[S],
   prefix : String,
 ) -> Array[String] {
@@ -844,7 +844,7 @@ pub fn[S : ObjectStore] BudgetStore::list(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::delete(
+pub async fn[S : ObjectStore] BudgetStore::delete(
   self : BudgetStore[S],
   key : String,
 ) -> Unit {
@@ -852,7 +852,7 @@ pub fn[S : ObjectStore] BudgetStore::delete(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::head_version(
+pub async fn[S : ObjectStore] BudgetStore::head_version(
   self : BudgetStore[S],
   key : String,
 ) -> String? {
@@ -860,7 +860,7 @@ pub fn[S : ObjectStore] BudgetStore::head_version(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::get_many(
+pub async fn[S : ObjectStore] BudgetStore::get_many(
   self : BudgetStore[S],
   keys : Array[String],
 ) -> Array[Bytes?] {
@@ -868,7 +868,15 @@ pub fn[S : ObjectStore] BudgetStore::get_many(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::get_range_many(
+pub async fn[S : ObjectStore] BudgetStore::put_many(
+  self : BudgetStore[S],
+  items : Array[(String, Bytes)],
+) -> Unit {
+  ObjectStore::put_many(self, items)
+}
+
+///|
+pub async fn[S : ObjectStore] BudgetStore::get_range_many(
   self : BudgetStore[S],
   ranges : Array[(String, Int, Int)],
 ) -> Array[Bytes?] {
@@ -877,10 +885,10 @@ pub fn[S : ObjectStore] BudgetStore::get_range_many(
 
 ///|
 /// 带超标即时抛出的校验读取方法
-pub fn[S : ObjectStore] BudgetStore::get_checked(
+pub async fn[S : ObjectStore] BudgetStore::get_checked(
   self : BudgetStore[S],
   key : String,
-) -> Bytes? raise @core.SpndError {
+) -> Bytes? {
   let prev_violations = self.tracker.violations.length()
   let res = ObjectStore::get(self, key)
   if self.tracker.violations.length() > prev_violations {
@@ -890,11 +898,11 @@ pub fn[S : ObjectStore] BudgetStore::get_checked(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::put_checked(
+pub async fn[S : ObjectStore] BudgetStore::put_checked(
   self : BudgetStore[S],
   key : String,
   value : Bytes,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let prev_violations = self.tracker.violations.length()
   ObjectStore::put(self, key, value)
   if self.tracker.violations.length() > prev_violations {
@@ -903,12 +911,12 @@ pub fn[S : ObjectStore] BudgetStore::put_checked(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::put_if_match_checked(
+pub async fn[S : ObjectStore] BudgetStore::put_if_match_checked(
   self : BudgetStore[S],
   key : String,
   expected : String?,
   value : Bytes,
-) -> Bool raise @core.SpndError {
+) -> Bool {
   let prev_violations = self.tracker.violations.length()
   let res = ObjectStore::put_if_match(self, key, expected, value)
   if self.tracker.violations.length() > prev_violations {
@@ -918,12 +926,12 @@ pub fn[S : ObjectStore] BudgetStore::put_if_match_checked(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::get_range_checked(
+pub async fn[S : ObjectStore] BudgetStore::get_range_checked(
   self : BudgetStore[S],
   key : String,
   offset : Int,
   len : Int,
-) -> Bytes? raise @core.SpndError {
+) -> Bytes? {
   let prev_violations = self.tracker.violations.length()
   let res = ObjectStore::get_range(self, key, offset, len)
   if self.tracker.violations.length() > prev_violations {
@@ -933,10 +941,10 @@ pub fn[S : ObjectStore] BudgetStore::get_range_checked(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::list_checked(
+pub async fn[S : ObjectStore] BudgetStore::list_checked(
   self : BudgetStore[S],
   prefix : String,
-) -> Array[String] raise @core.SpndError {
+) -> Array[String] {
   let prev_violations = self.tracker.violations.length()
   let res = ObjectStore::list(self, prefix)
   if self.tracker.violations.length() > prev_violations {
@@ -946,10 +954,10 @@ pub fn[S : ObjectStore] BudgetStore::list_checked(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::delete_checked(
+pub async fn[S : ObjectStore] BudgetStore::delete_checked(
   self : BudgetStore[S],
   key : String,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let prev_violations = self.tracker.violations.length()
   ObjectStore::delete(self, key)
   if self.tracker.violations.length() > prev_violations {
@@ -958,10 +966,10 @@ pub fn[S : ObjectStore] BudgetStore::delete_checked(
 }
 
 ///|
-pub fn[S : ObjectStore] BudgetStore::head_version_checked(
+pub async fn[S : ObjectStore] BudgetStore::head_version_checked(
   self : BudgetStore[S],
   key : String,
-) -> String? raise @core.SpndError {
+) -> String? {
   let prev_violations = self.tracker.violations.length()
   let res = ObjectStore::head_version(self, key)
   if self.tracker.violations.length() > prev_violations {

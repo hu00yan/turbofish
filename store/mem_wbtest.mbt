@@ -3,7 +3,7 @@
 // MemStore 行为测试：CAS、成本记账、缓存模型、范围读。
 
 ///|
-test "put_get_list_delete" {
+async test "put_get_list_delete" {
   let s = MemStore::new()
   s.put("ns/_meta/namespace.json", b"hello")
   s.put("ns/_manifest/manifest-01.json", b"world")
@@ -20,7 +20,7 @@ test "put_get_list_delete" {
 }
 
 ///|
-test "put_if_match CAS" {
+async test "put_if_match CAS" {
   let s = MemStore::new()
   // 期望不存在时才能写入
   assert_eq(s.put_if_match("head", None, b"v1"), true)
@@ -41,7 +41,7 @@ test "put_if_match CAS" {
 }
 
 ///|
-test "cost accounting cold vs warm" {
+async test "cost accounting cold vs warm" {
   let s = MemStore::new()
   s.put("ns/_segments/seg-01/rows/id.bin", Bytes::make(1000, b'\x00'))
   // 写入预热了缓存；冷查询前先清缓存
@@ -66,7 +66,7 @@ test "cost accounting cold vs warm" {
 }
 
 ///|
-test "get_range counts partial bytes" {
+async test "get_range counts partial bytes" {
   let s = MemStore::new()
   s.put("ns/_segments/seg-01/fts/postings.bin", Bytes::make(500, b'\x07'))
   s.cold()
@@ -90,7 +90,7 @@ test "get_range counts partial bytes" {
 }
 
 ///|
-test "classify" {
+async test "classify" {
   assert_eq(classify_key("ns/_meta/namespace.json"), "meta")
   assert_eq(classify_key("ns/_manifest/manifest-01.json"), "manifest")
   assert_eq(classify_key("ns/_centroids/centroids-01.bin"), "centroids")
@@ -100,7 +100,7 @@ test "classify" {
 }
 
 ///|
-test "head log append-only max and gc" {
+async test "head log append-only max and gc" {
   let s = MemStore::new()
   assert_eq(read_head(s, "ns", ""), "")
   write_head(s, "ns", "manifest-a")
@@ -115,7 +115,7 @@ test "head log append-only max and gc" {
 }
 
 ///|
-test "get_many 与逐个 get 逐位一致（含缺失 key，顺序不变）" {
+async test "get_many 与逐个 get 逐位一致（含缺失 key，顺序不变）" {
   let s1 = MemStore::new()
   let s2 = MemStore::new()
   let keys = ["ns/a.bin", "ns/missing.bin", "ns/b.bin"]
@@ -150,7 +150,7 @@ test "get_many 与逐个 get 逐位一致（含缺失 key，顺序不变）" {
 }
 
 ///|
-test "get_range_many 与逐个 get_range 逐位一致（含缺失 key）" {
+async test "get_range_many 与逐个 get_range 逐位一致（含缺失 key）" {
   let s1 = MemStore::new()
   let s2 = MemStore::new()
   let data = Bytes::makei(50, i => i.to_byte())

@@ -47,7 +47,7 @@ pub fn head_pointer_key(ns : String) -> String {
 
 ///|
 /// 读 head 指针；缺失/非法 utf8 返回 None（旧数据/写者未升级）。
-pub fn[S : ObjectStore] read_head_pointer(store : S, ns : String) -> String? {
+pub async fn[S : ObjectStore] read_head_pointer(store : S, ns : String) -> String? {
   match store.get(head_pointer_key(ns)) {
     Some(bs) =>
       // `try {..} catch`（而非 `try?`）：跨编译器版本可移植。
@@ -62,7 +62,7 @@ pub fn[S : ObjectStore] read_head_pointer(store : S, ns : String) -> String? {
 
 ///|
 /// 写 head 指针（普通 put；并发写者 last-writer-wins，详见 head_pointer_key 注释）。
-pub fn[S : ObjectStore] write_head_pointer(
+pub async fn[S : ObjectStore] write_head_pointer(
   store : S,
   ns : String,
   manifest_id : String,
@@ -74,7 +74,7 @@ pub fn[S : ObjectStore] write_head_pointer(
 /// 列举 `_heads/`，返回 (最大 id, 大于 floor 的所有 id)。没有记录时 max 回退到
 /// fallback（旧 namespace.json 的 head_manifest，兼容旧数据）。
 /// 发布路径用同一份 LIST 结果做 max 仲裁 + fork 检测，避免重复 LIST。
-pub fn[S : ObjectStore] read_head_state(
+pub async fn[S : ObjectStore] read_head_state(
   store : S,
   ns : String,
   fallback : String,
@@ -100,7 +100,7 @@ pub fn[S : ObjectStore] read_head_state(
 ///|
 /// 列举 `_heads/` 取最大 id；优先用 1 次 GET 探测 `_head_ptr`（0 LIST），
 /// 缺失时回退到列举 `_heads/` 或 fallback。
-pub fn[S : ObjectStore] read_head(
+pub async fn[S : ObjectStore] read_head(
   store : S,
   ns : String,
   fallback : String,
@@ -114,7 +114,7 @@ pub fn[S : ObjectStore] read_head(
 ///|
 /// 写一个新 head 记录（create-only；不支持条件创建的 store 退化为 put，
 /// 唯一 key 仍不会覆盖其他 writer 的记录）。
-pub fn[S : ObjectStore] write_head(
+pub async fn[S : ObjectStore] write_head(
   store : S,
   ns : String,
   manifest_id : String,
@@ -132,7 +132,7 @@ pub fn[S : ObjectStore] write_head(
 ///|
 /// 删除所有 id < keep_id 的 head 记录。并发写者写入更高的 id 时不会被删
 /// （它不在本次 list 结果里；即使出现，也 > keep_id）。
-pub fn[S : ObjectStore] gc_heads(
+pub async fn[S : ObjectStore] gc_heads(
   store : S,
   ns : String,
   keep_id : String,

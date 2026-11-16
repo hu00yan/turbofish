@@ -14,8 +14,8 @@
 /// 调用方不得用 `None` 区分 404 与 transient 错误。波次化接入时应把消费点
 /// 收敛到单一 wrapper，未来若需要错误通道再替换为 BatchResult。
 pub(open) trait BatchStore : ObjectStore {
-  fn get_many(Self, Array[String]) -> Array[Bytes?]
-  fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?]
+  async fn get_many(Self, Array[String]) -> Array[Bytes?]
+  async fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?]
 }
 
 ///|
@@ -69,6 +69,15 @@ pub impl BatchStore for MemStore with fn get_range_many(
     out.push(self.get_range(r.0, r.1, r.2))
   }
   out
+}
+
+impl ObjectStore with fn put_many(
+  self : Self,
+  items : Array[(String, Bytes)],
+) -> Unit {
+  for kv in items {
+    self.put(kv.0, kv.1)
+  }
 }
 
 pub extend MemStore with BatchStore::{get_many, get_range_many}

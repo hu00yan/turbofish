@@ -5,24 +5,23 @@
 
 ///|
 pub(open) trait ObjectStore {
-  fn get(Self, String) -> Bytes?
-  fn put(Self, String, Bytes) -> Unit
+  async fn get(Self, String) -> Bytes?
+  async fn put(Self, String, Bytes) -> Unit
   /// CAS 写入：expected 为 None 时要求 key 不存在；返回 true 表示写入成功。
-  fn put_if_match(Self, String, String?, Bytes) -> Bool
+  async fn put_if_match(Self, String, String?, Bytes) -> Bool
   /// 范围读 [offset, offset+len)，返回可能截短的 payload。
-  fn get_range(Self, String, Int, Int) -> Bytes?
+  async fn get_range(Self, String, Int, Int) -> Bytes?
   /// 返回 prefix 下所有 key，升序。
-  fn list(Self, String) -> Array[String]
-  fn delete(Self, String) -> Unit
+  async fn list(Self, String) -> Array[String]
+  async fn delete(Self, String) -> Unit
   /// 获取对象的当前版本/ETag（用于 CAS 条件写 put_if_match 的 expected 校验）
-  fn head_version(Self, String) -> String?
-  ///
+  async fn head_version(Self, String) -> String?
   /// 批量整读。默认顺序调用 `get`，返回与输入同长同序；`None` 保持在原下标。
-  /// S3Store 覆盖为真实批量传输；BatchStore 保留为显式能力 trait。
-  fn get_many(Self, Array[String]) -> Array[Bytes?] = _
-  ///
+  async fn get_many(Self, Array[String]) -> Array[Bytes?] = _
   /// 批量范围读。默认顺序调用 `get_range`，语义与单键完全一致。
-  fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?] = _
+  async fn get_range_many(Self, Array[(String, Int, Int)]) -> Array[Bytes?] = _
+  /// 批量写入。默认顺序调用 `put`；异步后端覆盖为并发上传。
+  async fn put_many(Self, Array[(String, Bytes)]) -> Unit = _
 }
 
 ///|

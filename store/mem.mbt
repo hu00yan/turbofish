@@ -331,11 +331,4 @@ pub fn MemStore::object_count(self : MemStore) -> Int {
 }
 
 ///|
-pub fn MemStore::head_version(self : MemStore, key : String) -> String? {
-  match self.versions.get(key) {
-    Some(v) => Some(version_string(v))
-    None => None
-  }
-}
-
-pub extend MemStore with ObjectStore::{put_if_match, put, list, get_range, get, delete}
+pub extend MemStore with ObjectStore::{put_if_match, put, list, get_range, get, delete, head_version, put_many}

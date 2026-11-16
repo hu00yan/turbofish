@@ -1,6 +1,6 @@
 // store/budget_wbtest.mbt: Shift-Left I/O Budget White-Box Tests
 
-test "IoBudget: presets and customization" {
+async test "IoBudget: presets and customization" {
   let p = Budget::point_read()
   assert_eq(p.max_gets, 1)
   assert_eq(p.max_puts, 0)
@@ -38,7 +38,7 @@ test "IoBudget: presets and customization" {
   assert_eq(custom.to_string().has_prefix("IoBudget("), true)
 }
 
-test "BudgetTracker: tracking, counting, reset, and clone" {
+async test "BudgetTracker: tracking, counting, reset, and clone" {
   let t = BudgetTracker::new()
   assert_eq(t.total_requests(), 0)
   assert_eq(t.total_bytes(), 0L)
@@ -73,7 +73,7 @@ test "BudgetTracker: tracking, counting, reset, and clone" {
   assert_eq(c.total_requests(), 5)
 }
 
-test "BudgetStore: pass-through correctness to MemStore" {
+async test "BudgetStore: pass-through correctness to MemStore" {
   let mem = MemStore::new()
   let bstore = BudgetStore::new(mem, Budget::unlimited())
 
@@ -130,7 +130,7 @@ test "BudgetStore: pass-through correctness to MemStore" {
   }
 }
 
-test "BudgetStore: point_read budget enforcement" {
+async test "BudgetStore: point_read budget enforcement" {
   let mem = MemStore::new()
   mem.put("p1", b"short content")
   let bstore = BudgetStore::new(mem, Budget::point_read())
@@ -167,7 +167,7 @@ test "BudgetStore: point_read budget enforcement" {
   assert_eq(caught, true)
 }
 
-test "BudgetStore: point_read bytes limit exceeded" {
+async test "BudgetStore: point_read bytes limit exceeded" {
   let mem = MemStore::new()
   // 构造 70KB 大小数据（超出 point_read 的 64KB 上限）
   let big_data = Bytes::make(70 * 1024, b'x')
@@ -196,7 +196,7 @@ test "BudgetStore: point_read bytes limit exceeded" {
   assert_eq(caught, true)
 }
 
-test "BudgetStore: head_probe budget enforcement" {
+async test "BudgetStore: head_probe budget enforcement" {
   let mem = MemStore::new()
   mem.put("ns/_head_ptr", b"manifest-001")
   let bstore = BudgetStore::new(mem, Budget::head_probe())
@@ -223,7 +223,7 @@ test "BudgetStore: head_probe budget enforcement" {
   assert_eq(caught, true)
 }
 
-test "BudgetStore: single_slab_read allows large single GET" {
+async test "BudgetStore: single_slab_read allows large single GET" {
   let mem = MemStore::new()
   let slab = Bytes::make(500 * 1024, b's') // 500KB
   mem.put("seg.slab", slab)
@@ -239,7 +239,7 @@ test "BudgetStore: single_slab_read allows large single GET" {
   assert_eq(bstore.has_violations(), true)
 }
 
-test "BudgetStore: write_batch deterministic put and byte bounds" {
+async test "BudgetStore: write_batch deterministic put and byte bounds" {
   let mem = MemStore::new()
   let wb_budget = Budget::write_batch(2, max_bytes_per_part=1000L)
   let bstore = BudgetStore::new(mem, wb_budget)
@@ -264,7 +264,7 @@ test "BudgetStore: write_batch deterministic put and byte bounds" {
   )
 }
 
-test "BudgetStore: checked methods raise @core.Corrupt immediately" {
+async test "BudgetStore: checked methods raise @core.Corrupt immediately" {
   let mem = MemStore::new()
   let bstore = BudgetStore::new(mem, Budget::point_read())
 
@@ -301,13 +301,13 @@ test "BudgetStore: checked methods raise @core.Corrupt immediately" {
   assert_eq(caught, true)
 }
 
-test "with_budget: scope isolation and assertion" {
+async test "with_budget: scope isolation and assertion" {
   let mem = MemStore::new()
   mem.put("k", b"val")
   let bstore = BudgetStore::new(mem, Budget::unlimited())
 
   // 作用域 1：在 point_read 预算下仅执行 1 次读
-  let res = with_budget(bstore, Budget::point_read(), () => {
+  let res = with_budget(bstore, Budget::point_read(), async fn() {
     let v = bstore.get("k")
     assert_eq(v, Some(b"val"))
     123
@@ -321,7 +321,7 @@ test "with_budget: scope isolation and assertion" {
   // 作用域 2：执行 2 次读超预算
   let mut caught = false
   try {
-    with_budget(bstore, Budget::point_read(), () => {
+    with_budget(bstore, Budget::point_read(), async fn() {
       let _ = bstore.get("k")
       let _ = bstore.get("k")
       ()
@@ -336,11 +336,11 @@ test "with_budget: scope isolation and assertion" {
   assert_eq(caught, true)
 }
 
-test "run_with_budget: wrap and execute" {
+async test "run_with_budget: wrap and execute" {
   let mem = MemStore::new()
   mem.put("k", b"val")
 
-  let out = run_with_budget(mem, Budget::point_read(), (bs) => {
+  let out = run_with_budget(mem, Budget::point_read(), async fn(bs) {
     let v = bs.get("k")
     assert_eq(v, Some(b"val"))
     "success"
@@ -350,7 +350,7 @@ test "run_with_budget: wrap and execute" {
   assert_eq(out, "success")
 }
 
-test "Budget::zero: assert 0 I/O" {
+async test "Budget::zero: assert 0 I/O" {
   let mem = MemStore::new()
   let bstore = BudgetStore::new(mem, Budget::zero())
 

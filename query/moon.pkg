@@ -7,3 +7,18 @@ import {
   "moonbitlang/core/math",
   "moonbitlang/core/env",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "batch_wbtest.mbt": [ "native", "llvm" ],
+    "pushdown_wbtest.mbt": [ "native", "llvm" ],
+    "query_wbtest.mbt": [ "native", "llvm" ],
+    "slab_wbtest.mbt": [ "native", "llvm" ],
+    "v1_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

@@ -122,7 +122,7 @@ pub fn[S] Coordinator::select_worker(
 
 ///|
 /// 调度向量查询任务至 Worker 执行。
-pub fn[S : @store.ObjectStore] Coordinator::dispatch_vector_query(
+pub async fn[S : @store.ObjectStore] Coordinator::dispatch_vector_query(
   self : Coordinator[S],
   tenant_id : String,
   n : @query.Namespace[S],
@@ -130,28 +130,28 @@ pub fn[S : @store.ObjectStore] Coordinator::dispatch_vector_query(
   top_k : Int,
   nprobe : Int,
   filter : @query.Filter?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let worker = self.select_worker(tenant_id)
   worker.execute_vector_query(n, qv, top_k, nprobe, filter)
 }
 
 ///|
 /// 调度 BM25 全文检索任务至 Worker 执行。
-pub fn[S : @store.ObjectStore] Coordinator::dispatch_bm25_query(
+pub async fn[S : @store.ObjectStore] Coordinator::dispatch_bm25_query(
   self : Coordinator[S],
   tenant_id : String,
   n : @query.Namespace[S],
   text : String,
   top_k : Int,
   filter : @query.Filter?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let worker = self.select_worker(tenant_id)
   worker.execute_bm25_query(n, text, top_k, filter)
 }
 
 ///|
 /// 调度混合检索任务至 Worker 执行。
-pub fn[S : @store.ObjectStore] Coordinator::dispatch_hybrid_query(
+pub async fn[S : @store.ObjectStore] Coordinator::dispatch_hybrid_query(
   self : Coordinator[S],
   tenant_id : String,
   n : @query.Namespace[S],
@@ -161,7 +161,7 @@ pub fn[S : @store.ObjectStore] Coordinator::dispatch_hybrid_query(
   nprobe : Int,
   filter : @query.Filter?,
   opts : @query.HybridOpts?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let worker = self.select_worker(tenant_id)
   worker.execute_hybrid_query(n, text, qv, top_k, nprobe, filter, opts)
 }

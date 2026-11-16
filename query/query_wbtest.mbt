@@ -16,12 +16,12 @@
 
 ///|
 /// wbtest 辅助：trait 方法跨包不能直接点调用，走泛型分发。
-fn[S : @store.ObjectStore] tput(s : S, key : String, val : Bytes) -> Unit {
+async fn[S : @store.ObjectStore] tput(s : S, key : String, val : Bytes) -> Unit {
   s.put(key, val)
 }
 
 ///|
-fn[S : @store.ObjectStore] tget_range(
+async fn[S : @store.ObjectStore] tget_range(
   s : S,
   key : String,
   off : Int,
@@ -53,7 +53,7 @@ fn seg_meta_json_bytes(
 
 ///|
 /// 构造 mini namespace 的全部对象。deleted 直接写进 manifest。
-fn make_test_store(deleted : Array[UInt64]) -> @store.MemStore {
+async fn make_test_store(deleted : Array[UInt64]) -> @store.MemStore {
   let s = @store.MemStore::new()
   let ns = "test"
   // namespace.json
@@ -274,7 +274,7 @@ fn approx(a : Double, b : Double, eps : Double) -> Bool {
 }
 
 ///|
-test "open binds meta and manifest snapshot" {
+async test "open binds meta and manifest snapshot" {
   let s = make_test_store([])
   let n = open(s, "test")
   assert_eq(n.meta.k1, 1.2)
@@ -293,7 +293,7 @@ test "open binds meta and manifest snapshot" {
 }
 
 ///|
-test "posting range read decodes same as full read_postings" {
+async test "posting range read decodes same as full read_postings" {
   let lists : Array[(String, Array[@format.Posting])] = [
     ("apple", [{ row: 0, tf: 2 }, { row: 3, tf: 1 }, { row: 10, tf: 4 }]),
     ("香蕉", [{ row: 1, tf: 1 }, { row: 7, tf: 3 }]),
@@ -322,7 +322,7 @@ test "posting range read decodes same as full read_postings" {
 }
 
 ///|
-test "bm25 hit, order and scores" {
+async test "bm25 hit, order and scores" {
   let s = make_test_store([])
   let n = open(s, "test")
   // "fox"：segA doc2(tf=2) id3 > segB doc0 id5 > segA doc0 id1
@@ -338,7 +338,7 @@ test "bm25 hit, order and scores" {
 }
 
 ///|
-test "bm25 miss returns empty" {
+async test "bm25 miss returns empty" {
   let s = make_test_store([])
   let n = open(s, "test")
   assert_eq(bm25_search(n, "zebra", 10, None).length(), 0)
@@ -348,7 +348,7 @@ test "bm25 miss returns empty" {
 }
 
 ///|
-test "bm25 multi-term and k truncation" {
+async test "bm25 multi-term and k truncation" {
   let s = make_test_store([])
   let n = open(s, "test")
   // "the fox"：命中 id1(id2 的 the), id2, id3(fox), id5(the+fox)
@@ -367,7 +367,7 @@ test "bm25 multi-term and k truncation" {
 }
 
 ///|
-test "bm25 cjk single-char query" {
+async test "bm25 cjk single-char query" {
   let s = make_test_store([])
   let n = open(s, "test")
   // "猫" 单字：segA id4 (N=4, df=1) > segB id6 (N=2, df=1)
@@ -376,7 +376,7 @@ test "bm25 cjk single-char query" {
 }
 
 ///|
-test "vec nprobe=all matches brute force" {
+async test "vec nprobe=all matches brute force" {
   let s = make_test_store([])
   let n = open(s, "test")
   let qv : Array[Float] = [10.0, 0.0]
@@ -406,7 +406,7 @@ test "vec nprobe=all matches brute force" {
 }
 
 ///|
-test "vec nprobe=1 restricts to nearest cluster" {
+async test "vec nprobe=1 restricts to nearest cluster" {
   let s = make_test_store([])
   let n = open(s, "test")
   let r = vec_search(n, [10.0, 0.0], 10, 1, None) // 只探 c0
@@ -417,7 +417,7 @@ test "vec nprobe=1 restricts to nearest cluster" {
 }
 
 ///|
-test "tombstone filters bm25 and vec results" {
+async test "tombstone filters bm25 and vec results" {
   let s = make_test_store([3UL])
   let n = open(s, "test")
   // bm25 "fox" 原为 [3,5,1] → 3 被删 → [5,1]
@@ -427,7 +427,7 @@ test "tombstone filters bm25 and vec results" {
 }
 
 ///|
-test "filter fstr fbool fi64" {
+async test "filter fstr fbool fi64" {
   let s = make_test_store([])
   let n = open(s, "test")
   // "the" 命中 id1(a) id2(b) id5(a)；category=a → [5,1]（id5 dl=2 分更高）
@@ -449,7 +449,7 @@ test "filter fstr fbool fi64" {
 }
 
 ///|
-test "hybrid rrf recomputable" {
+async test "hybrid rrf recomputable" {
   let s = make_test_store([])
   let n = open(s, "test")
   let qv : Array[Float] = [10.0, 0.0]
@@ -474,7 +474,7 @@ test "hybrid rrf recomputable" {
 ///|
 /// 构造 WAND 测试 store：单段 400 行，"hot" 覆盖全部行（4 个 block），
 /// "mid" 覆盖 100..299（2 个 block），"rare" 覆盖 0..9（1 个 block）。
-fn make_wand_store() -> @store.MemStore {
+async fn make_wand_store() -> @store.MemStore {
   let s = @store.MemStore::new()
   let ns = "wand"
   let nrows = 400
@@ -594,7 +594,7 @@ fn make_wand_store() -> @store.MemStore {
 }
 
 ///|
-test "WAND matches non-WAND and uses 4 blocks for hot" {
+async test "WAND matches non-WAND and uses 4 blocks for hot" {
   let s = make_wand_store()
   let n = open(s, "wand")
   let cs = ensure_seg(n, 0)
@@ -644,7 +644,7 @@ test "WAND matches non-WAND and uses 4 blocks for hot" {
 }
 
 ///|
-test "parse stats and seg_may_match" {
+async test "parse stats and seg_may_match" {
   let j = @utf8.encode(
     (
       #|{"id":"s","row_count":10,"min_id":1,"max_id":10,"partitions":[0],
@@ -686,6 +686,9 @@ test "parse stats and seg_may_match" {
     vec_info: None,
     block_stats: None,
     block_stats_tried: false,
+    slab_index: None,
+    slab_tried: false,
+    seg_seq: -1,
     matchers: Map([]),
     vec_parts: Map([]),
   }
@@ -740,7 +743,7 @@ test "parse stats and seg_may_match" {
 }
 
 ///|
-test "dict/bitmap filter matchers avoid expansion" {
+async test "dict/bitmap filter matchers avoid expansion" {
   let s = @store.MemStore::new()
   let cats : Array[String] = ["a", "b", "a", "c", "b"]
   let pubs : Array[Bool] = [true, false, true, false, true]
@@ -813,6 +816,9 @@ test "dict/bitmap filter matchers avoid expansion" {
     vec_info: None,
     block_stats: None,
     block_stats_tried: false,
+    slab_index: None,
+    slab_tried: false,
+    seg_seq: -1,
     matchers: Map([]),
     vec_parts: Map([]),
   }
@@ -839,7 +845,7 @@ test "dict/bitmap filter matchers avoid expansion" {
 }
 
 ///|
-test "PQ ADC ranks nearest code first" {
+async test "PQ ADC ranks nearest code first" {
   let codebooks : Array[Float] = Array(capacity=256)
   for j in 0..<256 {
     codebooks.push(Float::from_int(j))
@@ -865,7 +871,7 @@ test "PQ ADC ranks nearest code first" {
 }
 
 ///|
-test "roaring tombstone object filters results" {
+async test "roaring tombstone object filters results" {
   let s = make_test_store([])
   // 重写 manifest-01：deleted 留空，deleted_roar 指向 roaring 对象
   let man : @format.ManifestData = {
@@ -915,7 +921,7 @@ test "roaring tombstone object filters results" {
 }
 
 ///|
-test "blockstats ts filter only reads matching blocks" {
+async test "blockstats ts filter only reads matching blocks" {
   let s = make_test_store([])
   tput(
     s,
@@ -936,7 +942,7 @@ test "blockstats ts filter only reads matching blocks" {
 }
 
 ///|
-test "metadata cache hits and reloads on head change" {
+async test "metadata cache hits and reloads on head change" {
   let s = make_test_store([])
   let cache : MetadataCache[@store.MemStore] = MetadataCache::new()
   let n1 = open_cached(cache, s, "test")
@@ -989,12 +995,12 @@ test "metadata cache hits and reloads on head change" {
 }
 
 ///|
-fn[S : @store.ObjectStore] tget(s : S, key : String) -> Bytes? {
+async fn[S : @store.ObjectStore] tget(s : S, key : String) -> Bytes? {
   s.get(key)
 }
 
 ///|
-test "global IVF partition path matches per-segment" {
+async test "global IVF partition path matches per-segment" {
   let s = make_test_store([])
   let n0 = open(s, "test")
   // 从 mini store 的 per-segment part 合成两个全局 part（cid 0/1）
@@ -1069,7 +1075,7 @@ test "global IVF partition path matches per-segment" {
 }
 
 ///|
-test "missing global meta raises instead of silent empty" {
+async test "missing global meta raises instead of silent empty" {
   let s = make_test_store([])
   let n0 = open(s, "test")
   let meta2 : @format.NamespaceMeta = {
@@ -1092,7 +1098,7 @@ test "missing global meta raises instead of silent empty" {
 }
 
 ///|
-test "global meta missing cids raises instead of silent empty" {
+async test "global meta missing cids raises instead of silent empty" {
   let s = make_test_store([])
   let n0 = open(s, "test")
   let meta2 : @format.NamespaceMeta = {
@@ -1122,7 +1128,7 @@ test "global meta missing cids raises instead of silent empty" {
 // ---------------------------------------------------------------------------
 
 ///|
-fn[S : @store.ObjectStore] tdel(s : S, key : String) -> Unit {
+async fn[S : @store.ObjectStore] tdel(s : S, key : String) -> Unit {
   s.delete(key)
 }
 
@@ -1135,7 +1141,7 @@ fn[S : @store.ObjectStore] tdel(s : S, key : String) -> Unit {
 ///   - manifest-02：`global_gen = Some({base:"g-base", deltas:["g-delta"]})`，
 ///     `vec_global_version = Some("g-base")`，segments += seg-01C；
 ///   - namespace.json 也带 `vec_global_version = Some("g-base")`。
-fn make_delta_chain_store(deleted : Array[UInt64]) -> @store.MemStore raise {
+async fn make_delta_chain_store(deleted : Array[UInt64]) -> @store.MemStore {
   let s = make_test_store(deleted)
   let ns = "test"
   // seg-01C：新段（id 7,8）
@@ -1257,7 +1263,7 @@ fn make_delta_chain_store(deleted : Array[UInt64]) -> @store.MemStore raise {
 }
 
 ///|
-test "global delta chain merges base and delta rows" {
+async test "global delta chain merges base and delta rows" {
   let s = make_delta_chain_store([])
   let n = open(s, "test")
   assert_eq(n.manifest.global_gen is Some(_), true)
@@ -1287,7 +1293,7 @@ test "global delta chain merges base and delta rows" {
 }
 
 ///|
-test "global delta chain skips cid absent from delta meta" {
+async test "global delta chain skips cid absent from delta meta" {
   let s = make_delta_chain_store([])
   // delta 代只声明 cid 0，且真的没有 part-1：probe cid 1 时该代是合法空分区，
   // 不能报错，也不能让整次查询变空。
@@ -1315,7 +1321,7 @@ test "global delta chain skips cid absent from delta meta" {
 }
 
 ///|
-test "global delta chain missing delta meta raises NotFound" {
+async test "global delta chain missing delta meta raises NotFound" {
   let s = make_delta_chain_store([])
   let n0 = open(s, "test")
   let bad : @format.ManifestData = {
@@ -1338,7 +1344,7 @@ test "global delta chain missing delta meta raises NotFound" {
 }
 
 ///|
-test "global delta chain delta meta missing cids raises" {
+async test "global delta chain delta meta missing cids raises" {
   let s = make_delta_chain_store([])
   // delta 代 meta 在但缺 cids：不能当成空代静默跳过
   tput(s, "test/vec/global/g-delta/meta.json", @utf8.encode("{\"dim\":2}"))
@@ -1353,7 +1359,7 @@ test "global delta chain delta meta missing cids raises" {
 }
 
 ///|
-test "global delta chain applies tombstones across generations" {
+async test "global delta chain applies tombstones across generations" {
   let s = make_delta_chain_store([7UL])
   let n = open(s, "test")
   let ids = sorted_ids(vec_search(n, [10.0, 0.0], 10, 2, None))
@@ -1364,7 +1370,7 @@ test "global delta chain applies tombstones across generations" {
 }
 
 ///|
-test "warm query path has ZERO S3 calls and serves directly from memory" {
+async test "warm query path has ZERO S3 calls and serves directly from memory" {
   let s = make_delta_chain_store([7UL])
   let cache : MetadataCache[@store.MemStore] = MetadataCache::new()
   let n = open_cached(cache, s, "test")
@@ -1392,7 +1398,7 @@ test "warm query path has ZERO S3 calls and serves directly from memory" {
 }
 
 ///|
-test "warm_namespace preloads metadata, global parts load lazily" {
+async test "warm_namespace preloads metadata, global parts load lazily" {
   let s = make_delta_chain_store([7UL])
   let n = open(s, "test")
   warm_namespace(n)

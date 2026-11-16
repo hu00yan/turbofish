@@ -145,7 +145,7 @@ fn adc_score(dist : Double, euclidean : Bool) -> Double {
 ///|
 /// 单 segment 的向量候选：只读 partitions 里实际存在的 probed part；
 /// 返回 (seg_idx, row, score) 降序 top-k。
-fn[S : @store.ObjectStore] vec_segment(
+async fn[S : @store.ObjectStore] vec_segment(
   n : Namespace[S],
   seg_idx : Int,
   qv : Array[Float],
@@ -155,7 +155,7 @@ fn[S : @store.ObjectStore] vec_segment(
   filter : Filter?,
   pushdown : MatchedDocSet?,
   rerank : Bool,
-) -> Array[(Int, Int, Double)] raise @core.SpndError {
+) -> Array[(Int, Int, Double)] {
   let seg = n.manifest.segments[seg_idx]
   let cs = ensure_seg(n, seg_idx)
   let (should_skip, seg_bs) = match pushdown {
@@ -188,6 +188,30 @@ fn[S : @store.ObjectStore] vec_segment(
       None => None
     }
   }
+  // 批量预读本次 probe 缺失的分区（碎片段合并为 1 次 get_many，
+  // SlabV2 段合并为 1 次 get_range_many），随后按 probes 顺序打分。
+  let missing : Array[(String, CachedSeg, String)] = Array()
+  let missing_cids : Array[Int] = Array()
+  for cid in probes {
+    if !part_set.contains(cid) || cs.vec_parts.get(cid) is Some(_) {
+      continue
+    }
+    missing.push((seg.id, cs, "vec/part-\{cid}.bin"))
+    missing_cids.push(cid)
+  }
+  if !missing.is_empty() {
+    let loaded = seg_read_components_many(n, missing)
+    for i in 0..<missing_cids.length() {
+      let bs = match loaded[i] {
+        Some(x) => x
+        None =>
+          raise @core.NotFound(
+            seg_legacy_key(n.ns, seg.id, "vec/part-\{missing_cids[i]}.bin"),
+          )
+      }
+      cs.vec_parts.set(missing_cids[i], bs)
+    }
+  }
   let cands : Array[(Int, Double)] = Array()
   let pq_cands : Array[(Int, Double)] = Array()
   let mut has_pq = false
@@ -197,15 +221,10 @@ fn[S : @store.ObjectStore] vec_segment(
     }
     let bs = match cs.vec_parts.get(cid) {
       Some(x) => x
-      None => {
-        let key = "\{base}/vec/part-\{cid}.bin"
-        let x = match n.store.get(key) {
-          Some(v) => v
-          None => raise @core.NotFound(key)
-        }
-        cs.vec_parts.set(cid, x)
-        x
-      }
+      None =>
+        raise @core.NotFound(
+          seg_legacy_key(n.ns, seg.id, "vec/part-\{cid}.bin"),
+        )
     }
     if @format.is_pq_shared_part(bs) {
       let pq = @format.decode_pq_part_shared(bs)
@@ -317,7 +336,10 @@ fn[S : @store.ObjectStore] vec_segment(
             }
             let off = 16 + start_row * vdim * item
             let len = nrows * vdim * item
-            match n.store.get_range("\{base}/rows/vector.bin", off, len) {
+            match
+              seg_read_component_range(
+                n, seg.id, cs, "rows/vector.bin", off, len,
+              ) {
               Some(payload) => {
                 let data = @format.decode_vec_payload(
                   payload, dtype, vdim, nrows,
@@ -445,7 +467,7 @@ fn TopKHeap::to_results(self : TopKHeap) -> Array[QueryResult] {
 ///|
 /// 读一代全局分区并重分候选进 TopKHeap。
 /// 零堆对象分配：预解段元数据，候选打分就地 Min-Heap 置换。
-fn[S : @store.ObjectStore] collect_global_candidates(
+async fn[S : @store.ObjectStore] collect_global_candidates(
   n : Namespace[S],
   qv : Array[Float],
   qv_norm : Array[Float],
@@ -462,7 +484,7 @@ fn[S : @store.ObjectStore] collect_global_candidates(
   tomb : Set[UInt64],
   allowed_ids : Set[UInt64]?,
   heap : TopKHeap,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let nseg = n.manifest.segments.length()
   let ps = global_gen_pack_size(n, ver)
   if ps > 1 {
@@ -675,12 +697,157 @@ fn[S] score_global_part(
 }
 
 ///|
+/// L0 SlabV2 增量段的段新旧序（升序 = 旧 → 新）。
+/// 段元数据标注 `seg_seq` 时以它为准，否则用 manifest `segments` 下标（靠后 = 新）。
+async fn[S : @store.ObjectStore] slab_delta_seg_order(
+  n : Namespace[S],
+) -> Array[(Int, Int)] {
+  let nseg = n.manifest.segments.length()
+  let out : Array[(Int, Int)] = Array(capacity=nseg)
+  for si in 0..<nseg {
+    let cs = ensure_seg(n, si)
+    let key = if cs.seg_seq >= 0 { cs.seg_seq * 65536 + si } else { si }
+    out.push((key, si))
+  }
+  out.sort_by(fn(a, b) {
+    let c = a.0.compare(b.0)
+    if c != 0 {
+      c
+    } else {
+      a.1.compare(b.1)
+    }
+  })
+  out
+}
+
+///|
+/// L0 SlabV2 增量段向量扫描（全局 IVF 布局下的增量融合）。
+/// 已合入 Global IVF 的段在 slab 里没有 `rows/vector.bin` 组件，只读 packs；
+/// 未合入的 L0 单文件段自带该组件，这里整列解码后做精确 dot / l2sq 全扫。
+/// 结果按 doc id 归并：同一 id 出现在多个段时以 seg_seq / manifest 更靠后的段为准。
+async fn[S : @store.ObjectStore] vec_slab_delta_candidates(
+  n : Namespace[S],
+  qv : Array[Float],
+  qv_norm : Array[Float],
+  filter : Filter?,
+  pushdown : MatchedDocSet?,
+  tomb : Set[UInt64],
+  allowed_ids : Set[UInt64]?,
+) -> Map[UInt64, Double] {
+  let out : Map[UInt64, Double] = Map([])
+  let euclidean = n.meta.distance_metric == "euclidean"
+  for item in slab_delta_seg_order(n) {
+    let si = item.1
+    let seg = n.manifest.segments[si]
+    let cs = ensure_seg(n, si)
+    // 只处理 SlabV2 段；碎片段没有增量向量组件（旧布局由 per-segment part 覆盖）。
+    let has_vec = match ensure_slab_index(n, cs, seg.id) {
+      Some(index) => slab_entry_of(index, "rows/vector.bin") is Some(_)
+      None => false
+    }
+    if !has_vec {
+      continue
+    }
+    let mut skip = false
+    let mut seg_bs : BitSet? = None
+    match pushdown {
+      Some(p) =>
+        match p.seg_bitsets.get(seg.id) {
+          Some(bs) => if bs.is_empty() { skip = true } else { seg_bs = Some(bs) }
+          None => skip = true
+        }
+      None => if !seg_may_match(cs, filter) { skip = true }
+    }
+    if skip {
+      continue
+    }
+    let matcher : RowMatcher? = if seg_bs is Some(_) {
+      None
+    } else {
+      match filter {
+        Some(f) => Some(load_matcher(n, cs, seg.id, f))
+        None => None
+      }
+    }
+    let payload = match seg_read_component(n, seg.id, cs, "rows/vector.bin") {
+      Some(p) => p
+      None => continue
+    }
+    let decoded : Result[(Int, Array[Float]), Error] = try {
+      Ok(@format.decode_vec_col(payload))
+    } catch {
+      e => Err(e)
+    }
+    let (vdim, data) = match decoded {
+      Ok(x) => x
+      Err(_) => continue
+    }
+    if vdim <= 0 || vdim != qv.length() {
+      continue
+    }
+    let rows = data.length() / vdim
+    for row in 0..<rows {
+      let ok = match seg_bs {
+        Some(bs) => bs.get(row)
+        None =>
+          match matcher {
+            Some(m) => matcher_at(m, row)
+            None => true
+          }
+      }
+      if !ok {
+        continue
+      }
+      let id = row_id(n, cs, seg.id, row)
+      if tomb.contains(id) {
+        continue
+      }
+      match allowed_ids {
+        Some(aids) => if !aids.contains(id) { continue }
+        None => ()
+      }
+      let score = vec_score_of(
+        euclidean, cs.vec_normalized, qv, qv_norm, data, row * vdim, vdim,
+      )
+      out.set(id, score)
+    }
+  }
+  out
+}
+
+///|
+/// 归并 Base（Global IVF）候选与 L0 slab 增量候选：同 id 以增量段为准
+/// （LSM 语义：新段覆盖旧段），分数降序取 top-k。
+fn merge_slab_delta_results(
+  base : Array[QueryResult],
+  delta : Map[UInt64, Double],
+  k : Int,
+) -> Array[QueryResult] {
+  let scores : Map[UInt64, Double] = Map([])
+  for r in base {
+    scores.set(r.id, r.score)
+  }
+  for kv in delta.iter() {
+    scores.set(kv.0, kv.1)
+  }
+  let out : Array[QueryResult] = Array(capacity=scores.length())
+  for kv in scores.iter() {
+    out.push({ id: kv.0, score: kv.1 })
+  }
+  out.sort_by(fn(a, b) { b.score.compare(a.score) })
+  if out.length() > k {
+    out.truncate(k)
+  }
+  out
+}
+
+///|
 /// namespace 级全局 IVF 分区检索：rows 为 (seg_idx, row)。
 /// - `global_gen` 有值（delta 链）：按 `[base] + deltas` 逐代读 part。同一 cid
 ///   在 base 与 delta 都有 part 时两侧候选合并；某代没有该 cid 时跳过该代。
 /// - `global_gen` 为 None：保持旧单代路径（只读 `vec_global_version` 一代）。
 /// filter 在行级 matcher / pushdown bitset 应用；seg stats 仍用于跳过整段。
-fn[S : @store.ObjectStore] vec_global_search(
+async fn[S : @store.ObjectStore] vec_global_search(
   n : Namespace[S],
   qv : Array[Float],
   qv_norm : Array[Float],
@@ -689,7 +856,7 @@ fn[S : @store.ObjectStore] vec_global_search(
   filter : Filter?,
   pushdown : MatchedDocSet?,
   allowed_ids : Set[UInt64]?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   if k <= 0 {
     return []
   }
@@ -799,26 +966,26 @@ fn[S : @store.ObjectStore] vec_global_search(
 /// 1. 若携带 filter，先进行向量化列式下推预过滤，生成存活行 BitSet；
 /// 2. 若下推过滤命中数为 0，零开销直接短路返回空列表（跳过全部 probe 与点积）；
 /// 3. 在探针扫描中，仅对 surviving 候选行执行点积运算，获得 10x-20x 剪枝加速。
-pub fn[S : @store.ObjectStore] vec_search(
+pub async fn[S : @store.ObjectStore] vec_search(
   n : Namespace[S],
   qv : Array[Float],
   k : Int,
   nprobe : Int,
   filter : Filter?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   vec_search_with_pushdown(n, qv, k, nprobe, filter, None)
 }
 
 ///|
 /// 向量检索扩展入口：支持外部传入 allowed_ids 显式剪枝。
-pub fn[S : @store.ObjectStore] vec_search_with_pushdown(
+pub async fn[S : @store.ObjectStore] vec_search_with_pushdown(
   n : Namespace[S],
   qv : Array[Float],
   k : Int,
   nprobe : Int,
   filter : Filter?,
   allowed_ids : Set[UInt64]?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   if k <= 0 || qv.is_empty() {
     return []
   }
@@ -855,9 +1022,18 @@ pub fn[S : @store.ObjectStore] vec_search_with_pushdown(
   if n.manifest.global_gen is Some(_) ||
     n.manifest.vec_global_version is Some(_) ||
     n.meta.vec_global_version is Some(_) {
-    return vec_global_search(
+    // Global IVF Base 段读 packs；未合入 Global IVF 的 L0 SlabV2 增量段
+    // 从 `rows/vector.bin` 组件精确扫描，两侧候选按 doc id 归并。
+    let base = vec_global_search(
       n, qv, qv_norm, probes, k, filter, pushdown, allowed_ids,
     )
+    let delta = vec_slab_delta_candidates(
+      n, qv, qv_norm, filter, pushdown, tombstones_of(n), allowed_ids,
+    )
+    if delta.is_empty() {
+      return base
+    }
+    return merge_slab_delta_results(base, delta, k)
   }
   let tomb = tombstones_of(n)
   let cands : Array[(Int, Int, Double)] = Array()
@@ -887,26 +1063,26 @@ pub fn[S : @store.ObjectStore] vec_search_with_pushdown(
 ///|
 /// 向量检索（PQ + f16 精排实验路径）：ADC 取 top-50，再按 256 行块 get_range
 /// 读 rows/vector.bin 精排。仅用于评估；默认 `vec_search` 仍是纯 ADC。
-pub fn[S : @store.ObjectStore] vec_search_rerank(
+pub async fn[S : @store.ObjectStore] vec_search_rerank(
   n : Namespace[S],
   qv : Array[Float],
   k : Int,
   nprobe : Int,
   filter : Filter?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   vec_search_rerank_with_pushdown(n, qv, k, nprobe, filter, None)
 }
 
 ///|
 /// 精排检索扩展入口：支持外部传入 allowed_ids 显式剪枝。
-pub fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(
+pub async fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(
   n : Namespace[S],
   qv : Array[Float],
   k : Int,
   nprobe : Int,
   filter : Filter?,
   allowed_ids : Set[UInt64]?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   if n.manifest.global_gen is Some(_) ||
     n.manifest.vec_global_version is Some(_) ||
     n.meta.vec_global_version is Some(_) {
@@ -994,14 +1170,14 @@ pub fn HybridOpts::default() -> HybridOpts {
 
 ///|
 /// 混合检索（默认 RRF k=60、等权）。兼容旧签名。
-pub fn[S : @store.ObjectStore] hybrid_search(
+pub async fn[S : @store.ObjectStore] hybrid_search(
   n : Namespace[S],
   query : String,
   qv : Array[Float],
   k : Int,
   nprobe : Int,
   filter : Filter?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   hybrid_search_opts(n, query, qv, k, nprobe, filter, HybridOpts::default())
 }
 
@@ -1038,7 +1214,7 @@ fn minmax_norm(scores : Array[(UInt64, Double)]) -> Array[(UInt64, Double)] {
 
 ///|
 /// 混合检索：BM25 排名 + 向量排名 → RRF 或线性加权融合 → top-k。
-pub fn[S : @store.ObjectStore] hybrid_search_opts(
+pub async fn[S : @store.ObjectStore] hybrid_search_opts(
   n : Namespace[S],
   query : String,
   qv : Array[Float],
@@ -1046,7 +1222,7 @@ pub fn[S : @store.ObjectStore] hybrid_search_opts(
   nprobe : Int,
   filter : Filter?,
   opts : HybridOpts,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   if k <= 0 {
     return []
   }

@@ -217,13 +217,13 @@ pub(all) enum ColumnValues {
 
 ///|
 /// 读取并缓存 segment 的列数据。对于 dense id 段，直接按 min_id 合成数组，零 S3 I/O。
-fn[S : @store.ObjectStore] load_column_values(
+async fn[S : @store.ObjectStore] load_column_values(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   cache : Map[String, ColumnValues],
-) -> ColumnValues raise @core.SpndError {
+) -> ColumnValues {
   match cache.get(field) {
     Some(cv) => cv
     None => {
@@ -243,8 +243,9 @@ fn[S : @store.ObjectStore] load_column_values(
           return cv
         }
       }
-      let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
-      let bs = get_object(n.store, col_key)
+      let bs = seg_read_component_or_fail(
+        n, seg_id, cs, "rows/\{field}.bin",
+      )
       let cv = if @format.is_dict_col(bs) {
         let (dict, codes) = @format.decode_col_dict(bs)
         ColDict(dict, codes)
@@ -267,13 +268,13 @@ fn[S : @store.ObjectStore] load_column_values(
 
 ///|
 /// 单 segment 向量化/列式求值核心：将任意嵌套的 Filter AST 转化为 BitSet。
-fn[S : @store.ObjectStore] eval_filter_columnar_with_cache(
+async fn[S : @store.ObjectStore] eval_filter_columnar_with_cache(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   filter : Filter,
   cache : Map[String, ColumnValues],
-) -> BitSet raise @core.SpndError {
+) -> BitSet {
   let row_count = cs.row_count
   if row_count == 0 {
     return BitSet::new(0)
@@ -364,14 +365,14 @@ fn[S : @store.ObjectStore] eval_filter_columnar_with_cache(
 
 ///|
 /// 列式等值判断（Eq）。
-fn[S : @store.ObjectStore] eval_eq_columnar(
+async fn[S : @store.ObjectStore] eval_eq_columnar(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   v : FVal,
   cache : Map[String, ColumnValues],
-) -> BitSet raise @core.SpndError {
+) -> BitSet {
   let cv = load_column_values(n, cs, seg_id, field, cache)
   let bs = BitSet::new(cs.row_count)
   match (cv, v) {
@@ -448,14 +449,14 @@ fn[S : @store.ObjectStore] eval_eq_columnar(
 
 ///|
 /// 列式集合包含判断（In）。
-fn[S : @store.ObjectStore] eval_in_columnar(
+async fn[S : @store.ObjectStore] eval_in_columnar(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   vals : Array[FVal],
   cache : Map[String, ColumnValues],
-) -> BitSet raise @core.SpndError {
+) -> BitSet {
   let bs = BitSet::new(cs.row_count)
   if vals.is_empty() {
     return bs
@@ -578,7 +579,7 @@ fn[S : @store.ObjectStore] eval_in_columnar(
 
 ///|
 /// 列式范围比较（Lt, Lte, Gt, Gte）。
-fn[S : @store.ObjectStore] eval_cmp_columnar(
+async fn[S : @store.ObjectStore] eval_cmp_columnar(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
@@ -586,7 +587,7 @@ fn[S : @store.ObjectStore] eval_cmp_columnar(
   op : Int,
   v : FVal,
   cache : Map[String, ColumnValues],
-) -> BitSet raise @core.SpndError {
+) -> BitSet {
   let cv = load_column_values(n, cs, seg_id, field, cache)
   let bs = BitSet::new(cs.row_count)
   match (cv, v) {
@@ -652,14 +653,14 @@ fn[S : @store.ObjectStore] eval_cmp_columnar(
 
 ///|
 /// 列式通配符匹配（Glob）。
-fn[S : @store.ObjectStore] eval_glob_columnar(
+async fn[S : @store.ObjectStore] eval_glob_columnar(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   pat : String,
   cache : Map[String, ColumnValues],
-) -> BitSet raise @core.SpndError {
+) -> BitSet {
   let cv = load_column_values(n, cs, seg_id, field, cache)
   let bs = BitSet::new(cs.row_count)
   match cv {
@@ -688,12 +689,12 @@ fn[S : @store.ObjectStore] eval_glob_columnar(
 
 ///|
 /// 对指定 segment 进行向量化列式求值，返回命中的 BitSet。
-pub fn[S : @store.ObjectStore] eval_filter_columnar(
+pub async fn[S : @store.ObjectStore] eval_filter_columnar(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   filter : Filter,
-) -> BitSet raise @core.SpndError {
+) -> BitSet {
   let cache : Map[String, ColumnValues] = Map([])
   eval_filter_columnar_with_cache(n, cs, seg_id, filter, cache)
 }
@@ -705,10 +706,10 @@ pub fn[S : @store.ObjectStore] eval_filter_columnar(
 /// 2. 向量化列式求值 Filter AST，生成存活行 BitSet；
 /// 3. 原地消除已软删除 (tombstone) 文档；
 /// 4. 统计选择率并构建全局 allowed Doc ID Set。
-pub fn[S : @store.ObjectStore] eval_pushdown_filter(
+pub async fn[S : @store.ObjectStore] eval_pushdown_filter(
   n : Namespace[S],
   filter : Filter,
-) -> MatchedDocSet raise @core.SpndError {
+) -> MatchedDocSet {
   let total_docs = n.manifest.num_docs
   let tomb = tombstones_of(n)
   let seg_bitsets : Map[String, BitSet] = Map([])

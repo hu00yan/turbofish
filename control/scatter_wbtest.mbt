@@ -1,12 +1,12 @@
 // control/scatter_wbtest.mbt：分布式 Scatter-Gather 执行引擎白盒测试。
 
 ///|
-fn[S : @store.ObjectStore] wb_put(s : S, key : String, val : Bytes) -> Unit {
+async fn[S : @store.ObjectStore] wb_put(s : S, key : String, val : Bytes) -> Unit {
   s.put(key, val)
 }
 
 ///|
-test "TopKHeap: push, sift-down, capacity bound and ordering" {
+async test "TopKHeap: push, sift-down, capacity bound and ordering" {
   let heap = TopKHeap::new(3)
   assert_eq(heap.size, 0)
   assert_eq(heap.capacity, 3)
@@ -37,7 +37,7 @@ test "TopKHeap: push, sift-down, capacity bound and ordering" {
 }
 
 ///|
-test "TopKHeap: merge_candidates gathers partial worker results" {
+async test "TopKHeap: merge_candidates gathers partial worker results" {
   let heap = TopKHeap::new(4)
   let worker1_res : Array[@query.QueryResult] = [
     { id: 101UL, score: 0.95 },
@@ -64,7 +64,7 @@ test "TopKHeap: merge_candidates gathers partial worker results" {
 }
 
 ///|
-test "split_partitions: boundary and fair slice partitioning" {
+async test "split_partitions: boundary and fair slice partitioning" {
   // 空列表
   let s0 = split_partitions([], 3)
   assert_eq(s0.length(), 3)
@@ -109,7 +109,7 @@ test "split_partitions: boundary and fair slice partitioning" {
 
 ///|
 /// 构造包含 4 个 Centroid / 分区的多段 Global IVF 测试数据集。
-fn make_scatter_test_store() -> (@store.MemStore, String) {
+async fn make_scatter_test_store() -> (@store.MemStore, String) {
   let s = @store.MemStore::new()
   let ns = "scatter_test"
   let mid = "manifest-01"
@@ -247,7 +247,7 @@ fn make_scatter_test_store() -> (@store.MemStore, String) {
 }
 
 ///|
-test "Scatter-Gather: Result equality between single-worker sequential scan and multi-worker scatter-gather" {
+async test "Scatter-Gather: Result equality between single-worker sequential scan and multi-worker scatter-gather" {
   let (store, ns) = make_scatter_test_store()
   let qn = @query.open(store, ns)
 
@@ -298,7 +298,7 @@ test "Scatter-Gather: Result equality between single-worker sequential scan and 
 }
 
 ///|
-test "Scatter-Gather: Warm cache hit verification on multi-worker pool" {
+async test "Scatter-Gather: Warm cache hit verification on multi-worker pool" {
   let (store, ns) = make_scatter_test_store()
   let qn = @query.open(store, ns)
 
@@ -339,7 +339,7 @@ test "Scatter-Gather: Warm cache hit verification on multi-worker pool" {
 }
 
 ///|
-test "Scatter-Gather: Result equality with deleted documents (tombstones)" {
+async test "Scatter-Gather: Result equality with deleted documents (tombstones)" {
   let (store, ns) = make_scatter_test_store()
   // 在 manifest 中增加 deleted: [100UL]
   let mid = "manifest-01"
@@ -373,7 +373,7 @@ test "Scatter-Gather: Result equality with deleted documents (tombstones)" {
 }
 
 ///|
-test "Scatter-Gather: Various worker counts (3, 5, 8 workers) result equality" {
+async test "Scatter-Gather: Various worker counts (3, 5, 8 workers) result equality" {
   let (store, ns) = make_scatter_test_store()
   let qn = @query.open(store, ns)
 
@@ -406,7 +406,7 @@ test "Scatter-Gather: Various worker counts (3, 5, 8 workers) result equality" {
 }
 
 ///|
-test "Scatter-Gather: Edge cases (empty query, zero top_k, zero nprobe)" {
+async test "Scatter-Gather: Edge cases (empty query, zero top_k, zero nprobe)" {
   let (store, ns) = make_scatter_test_store()
   let qn = @query.open(store, ns)
   let coord = Coordinator::new(store, worker_count=2)

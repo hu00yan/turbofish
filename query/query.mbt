@@ -115,6 +115,12 @@ pub(all) struct CachedSeg {
   mut vec_info : (Int, Int, Int)? // rows/vector.bin 的 (dim, dtype, count)
   mut block_stats : (Int, Int, Array[(Int64, Int64)])? // (block_size, row_count, blocks)
   mut block_stats_tried : Bool
+  // SlabV2 单文件段：惰性探测 + 解码的组件索引（至多 1 次 Range GET）。
+  // None 且 slab_tried=true 表示该段没有 segment.slab（沿用碎片文件布局）。
+  mut slab_index : @format.SlabIndex?
+  mut slab_tried : Bool
+  // 可选：段元数据里的写入序（L0 delta 段新旧判定用；缺省按 manifest 顺序）。
+  mut seg_seq : Int
   matchers : Map[String, RowMatcher]
   vec_parts : Map[Int, Bytes]
 }
@@ -336,9 +342,9 @@ pub fn[S] open_cached_or_create(
 ///|
 /// 预热 Namespace：将 centroids、所有段 meta 与 id 列、tombstone、全局 IVF parts 全部预加载进内存。
 /// 段 meta 与 id 列按“缓存 miss 集合”一次性批量读取；已缓存的段不重复请求。
-pub fn[S : @store.ObjectStore] warm_namespace(
+pub async fn[S : @store.ObjectStore] warm_namespace(
   n : Namespace[S],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let _ = ensure_centroids(n)
   let seg_count = n.manifest.segments.length()
   // 1) 批量加载所有缺失的 meta.json。
@@ -358,13 +364,15 @@ pub fn[S : @store.ObjectStore] warm_namespace(
     }
   }
   if !need_ids.is_empty() {
-    let keys : Array[String] = Array(capacity=need_ids.length())
-    for id in need_ids {
-      keys.push("\{n.ns}/_segments/\{id}/rows/id.bin")
-    }
-    let results = @store.ObjectStore::get_many(n.store, keys)
+    let reqs : Array[(String, CachedSeg, String)] = Array(
+      capacity=need_ids.length(),
+    )
     for i in 0..<need_ids.length() {
-      let key = keys[i]
+      reqs.push((need_ids[i], need_cs[i], "rows/id.bin"))
+    }
+    let results = seg_read_components_many(n, reqs)
+    for i in 0..<need_ids.length() {
+      let key = seg_legacy_key(n.ns, need_ids[i], "rows/id.bin")
       let bs = match results[i] {
         Some(b) => b
         None => raise @core.NotFound(key)
@@ -383,11 +391,11 @@ pub fn[S : @store.ObjectStore] warm_namespace(
 /// 带进程级 metadata 缓存的 open：GET namespace.json 检查 head_manifest；
 /// 若 head 未变，直接复用旧 Namespace（保留 seg 解码缓存/centroids/tombstone）。
 /// 若 head 已变，加载新 manifest，并**继承旧 segment 缓存**（seg id 不可变）。
-pub fn[S : @store.ObjectStore] open_cached(
+pub async fn[S : @store.ObjectStore] open_cached(
   cache : MetadataCache[S],
   store : S,
   ns : String,
-) -> Namespace[S] raise @core.SpndError {
+) -> Namespace[S] {
   let now = @env.now()
   match cache.entries.get(ns) {
     Some(old) =>
@@ -482,10 +490,10 @@ pub fn[S : @store.ObjectStore] open_cached(
 
 ///|
 /// 打开 namespace：GET namespace.json + head manifest（一次查询绑定此快照）。
-pub fn[S : @store.ObjectStore] open(
+pub async fn[S : @store.ObjectStore] open(
   store : S,
   ns : String,
-) -> Namespace[S] raise @core.SpndError {
+) -> Namespace[S] {
   let meta_key = "\{ns}/_meta/namespace.json"
   let meta_bs = get_object(store, meta_key)
   let meta0 = @format.namespace_from_json(
@@ -518,18 +526,332 @@ pub fn[S : @store.ObjectStore] open(
   }
 }
 
+// ----------------------------------------------------------------------
+// SlabV2 单文件段读路径（L0 Delta Slab 透明融合读取）
+//
+// 约定：`{ns}/_segments/{seg}/segment.slab` 是 SlabV2 的单文件布局
+// （Header + 连续数据块 + Index Table [+ Trailer]，见 format/slab.mbt）。
+// 读路径对「碎片文件」与「单文件段」完全透明：
+// - 首次访问某段时用 1 次 Range GET 拉 Header(+Index) 解码出 SlabIndex，常驻
+//   CachedSeg（`slab_index` / `slab_tried`），后续组件读全部是精准 Range GET；
+// - Index 位于文件尾部时按 index_offset 补拉一次尾部切片解码；
+// - 段不存在 segment.slab 时沿用原有碎片文件路径（rows/*.bin、fts/*.bin）。
+// 所有路径（id/text/category/ts/public/doc_len/fts_dir/postings/vector）都收敛
+// 到 `seg_read_component` / `seg_read_component_range` 两个统一入口。
+// ----------------------------------------------------------------------
+
 ///|
-/// 块级 ts 统计（rows/blockstats.bin，266 行块）。不存在时返回 None。
-fn[S : @store.ObjectStore] seg_block_stats(
+/// Slab Index 预读长度（Header + Index 一次拉完；固定偏移布局足够）。
+const SLAB_INDEX_PREFETCH : Int = 4096
+
+///|
+/// Index 位于文件尾部时的补充预读长度（Index + Trailer；分区多的段也能一次拉完）。
+const SLAB_INDEX_TAIL_PREFETCH : Int = 65536
+
+///|
+/// SlabV2 单文件段的 key。
+fn seg_slab_key(ns : String, seg_id : String) -> String {
+  "\{ns}/_segments/\{seg_id}/segment.slab"
+}
+
+///|
+/// 碎片文件布局下的组件 key。
+fn seg_legacy_key(ns : String, seg_id : String, rel_path : String) -> String {
+  "\{ns}/_segments/\{seg_id}/\{rel_path}"
+}
+
+///|
+/// 自定义列在 slab 里的别名：`rows/{field}.bin` ↔ `{field}`。
+fn slab_alt_name(rel_path : String) -> String {
+  if !rel_path.has_prefix("rows/") || !rel_path.has_suffix(".bin") {
+    return ""
+  }
+  let rest = rel_path[5:].to_owned()
+  let parts = rest.split(".").collect()
+  if parts.is_empty() {
+    ""
+  } else {
+    parts[0].to_owned()
+  }
+}
+
+///|
+/// 去掉 `.bin` 后缀（slab 内组件名不带后缀：`vec/part-0`、`fts/dir`）。
+fn slab_strip_bin(name : String) -> String {
+  if name.has_suffix(".bin") && name.length() > 4 {
+    name[0:name.length() - 4].to_owned()
+  } else {
+    ""
+  }
+}
+
+///|
+/// 在 SlabIndex 中定位组件：先按原相对路径（format 侧已带常见归一化别名），
+/// 再按去 `.bin` 后缀的组件名，最后按 `rows/{field}.bin` → `{field}` 自定义列别名。
+fn slab_entry_of(
+  index : @format.SlabIndex,
+  rel_path : String,
+) -> @format.SlabEntry? {
+  match index.get(rel_path) {
+    Some(e) => Some(e)
+    None => {
+      let stripped = slab_strip_bin(rel_path)
+      let by_strip = if stripped != "" {
+        index.get(stripped)
+      } else {
+        None
+      }
+      match by_strip {
+        Some(e) => Some(e)
+        None => {
+          let alt = slab_alt_name(rel_path)
+          if alt != "" {
+            index.get(alt)
+          } else {
+            None
+          }
+        }
+      }
+    }
+  }
+}
+
+///|
+/// 由「从偏移 0 拉到的 header 切片」解码 SlabIndex；index 在尾部时返回 None
+/// （调用方补读尾部）。缺 magic / 截断一律 None（该段不是 SlabV2）。
+fn slab_index_of_header_bytes(bs : Bytes) -> @format.SlabIndex? {
+  let (_ver, io) = @format.decode_slab_header(bs) catch {
+    _ => return None
+  }
+  let off = io.to_int()
+  if off < 0 || off >= bs.length() {
+    return None
+  }
+  let idx = @format.decode_slab_index(bs, off) catch {
+    _ => return None
+  }
+  Some(idx)
+}
+
+///|
+/// 拉取并解码某段的 SlabIndex（index 在尾部时共 2 次 Range GET）。
+async fn[S : @store.ObjectStore] load_slab_index(
+  n : Namespace[S],
+  seg_id : String,
+) -> @format.SlabIndex? {
+  let key = seg_slab_key(n.ns, seg_id)
+  let hdr = match n.store.get_range(key, 0, SLAB_INDEX_PREFETCH) {
+    Some(b) => b
+    None => return None
+  }
+  match slab_index_of_header_bytes(hdr) {
+    Some(idx) => Some(idx)
+    None => {
+      // index 不在头部附近：按 header 里的 index_offset 补拉尾部切片。
+      let (_ver, index_offset) = @format.decode_slab_header(hdr) catch {
+        _ => return None
+      }
+      let off = index_offset.to_int()
+      if off <= 0 {
+        return None
+      }
+      match n.store.get_range(key, off, SLAB_INDEX_TAIL_PREFETCH) {
+        Some(tail) => {
+          let idx = @format.decode_slab_index(tail, 0) catch {
+            _ => return None
+          }
+          Some(idx)
+        }
+        None => None
+      }
+    }
+  }
+}
+
+///|
+/// 惰性探测 + 解码某段的 SlabIndex（结果常驻 CachedSeg）。
+async fn[S : @store.ObjectStore] ensure_slab_index(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> (Int, Int, Array[(Int64, Int64)])? raise @core.SpndError {
+) -> @format.SlabIndex? {
+  if cs.slab_tried {
+    return cs.slab_index
+  }
+  cs.slab_tried = true
+  let idx = load_slab_index(n, seg_id)
+  cs.slab_index = idx
+  idx
+}
+
+///|
+/// 统一组件读取入口：SlabV2 段按 SlabEntry 映射到 `segment.slab` 内的
+/// `(entry.offset, entry.length)` 精准 Range GET；碎片段读 `{rel_path}`。
+/// 组件不存在返回 None（调用方保留原有「可选对象」语义）。
+pub async fn[S : @store.ObjectStore] seg_read_component(
+  n : Namespace[S],
+  seg_id : String,
+  cseg : CachedSeg,
+  rel_path : String,
+) -> Bytes? {
+  match ensure_slab_index(n, cseg, seg_id) {
+    Some(index) =>
+      match slab_entry_of(index, rel_path) {
+        Some(e) =>
+          n.store.get_range(
+            seg_slab_key(n.ns, seg_id),
+            e.offset.to_int(),
+            e.length.to_int(),
+          )
+        None => n.store.get(seg_legacy_key(n.ns, seg_id, rel_path))
+      }
+    None => n.store.get(seg_legacy_key(n.ns, seg_id, rel_path))
+  }
+}
+
+///|
+/// 统一组件范围读入口：有 SlabIndex 时映射为
+/// `(entry.offset + off, len)`（组件内相对偏移 → 文件内绝对偏移）。
+pub async fn[S : @store.ObjectStore] seg_read_component_range(
+  n : Namespace[S],
+  seg_id : String,
+  cseg : CachedSeg,
+  rel_path : String,
+  off : Int,
+  len : Int,
+) -> Bytes? {
+  match ensure_slab_index(n, cseg, seg_id) {
+    Some(index) =>
+      match slab_entry_of(index, rel_path) {
+        Some(e) =>
+          n.store.get_range(
+            seg_slab_key(n.ns, seg_id),
+            e.offset.to_int() + off,
+            len,
+          )
+        None =>
+          n.store.get_range(seg_legacy_key(n.ns, seg_id, rel_path), off, len)
+      }
+    None => n.store.get_range(seg_legacy_key(n.ns, seg_id, rel_path), off, len)
+  }
+}
+
+///|
+/// 必需组件读：缺失按 NotFound 报错。
+pub async fn[S : @store.ObjectStore] seg_read_component_or_fail(
+  n : Namespace[S],
+  seg_id : String,
+  cseg : CachedSeg,
+  rel_path : String,
+) -> Bytes {
+  match seg_read_component(n, seg_id, cseg, rel_path) {
+    Some(bs) => bs
+    None => raise @core.NotFound(seg_legacy_key(n.ns, seg_id, rel_path))
+  }
+}
+
+///|
+/// 批量预读统一入口（碎片段走 1 次 `get_many`，slab 段走 1 次
+/// `get_range_many`；未探测过 slab 的段先合并成 1 次 `get_range_many` 探测）。
+/// 入参 = (seg_id, CachedSeg, 相对路径)，返回与入参同长同序，缺失保持 None。
+pub async fn[S : @store.ObjectStore] seg_read_components_many(
+  n : Namespace[S],
+  reqs : Array[(String, CachedSeg, String)],
+) -> Array[Bytes?] {
+  let out : Array[Bytes?] = Array(capacity=reqs.length())
+  for _ in 0..<reqs.length() {
+    out.push(None)
+  }
+  if reqs.is_empty() {
+    return out
+  }
+  // 1) 批量探测尚未判定布局的段（每段 1 次 Range GET，合并为一次调用）。
+  let probe_seg : Array[String] = Array()
+  let probe_cs : Array[CachedSeg] = Array()
+  let seen : Set[String] = Set([])
+  for r in reqs {
+    let (seg_id, cs, _) = r
+    if !cs.slab_tried && !seen.contains(seg_id) {
+      seen.add(seg_id)
+      probe_seg.push(seg_id)
+      probe_cs.push(cs)
+    }
+  }
+  if !probe_seg.is_empty() {
+    let ranges : Array[(String, Int, Int)] = Array(capacity=probe_seg.length())
+    for seg_id in probe_seg {
+      ranges.push((seg_slab_key(n.ns, seg_id), 0, SLAB_INDEX_PREFETCH))
+    }
+    let heads = @store.ObjectStore::get_range_many(n.store, ranges)
+    let need_tail : Array[Int] = Array()
+    for i in 0..<probe_seg.length() {
+      probe_cs[i].slab_tried = true
+      match heads[i] {
+        Some(hdr) =>
+          match slab_index_of_header_bytes(hdr) {
+            Some(idx) => probe_cs[i].slab_index = Some(idx)
+            None =>
+              // index 在尾部（或非 SlabV2）：走一次单键补读判定。
+              need_tail.push(i)
+          }
+        None => ()
+      }
+    }
+    for i in need_tail {
+      probe_cs[i].slab_index = load_slab_index(n, probe_seg[i])
+    }
+  }
+  // 2) 按布局分派：slab 段合并成一次 get_range_many，碎片段合并成一次 get_many。
+  let slab_ranges : Array[(String, Int, Int)] = Array()
+  let slab_pos : Array[Int] = Array()
+  let legacy_keys : Array[String] = Array()
+  let legacy_pos : Array[Int] = Array()
+  for i in 0..<reqs.length() {
+    let (seg_id, cs, rel_path) = reqs[i]
+    let entry = match cs.slab_index {
+      Some(index) => slab_entry_of(index, rel_path)
+      None => None
+    }
+    match entry {
+      Some(e) => {
+        slab_pos.push(i)
+        slab_ranges.push(
+          (seg_slab_key(n.ns, seg_id), e.offset.to_int(), e.length.to_int()),
+        )
+      }
+      None => {
+        legacy_pos.push(i)
+        legacy_keys.push(seg_legacy_key(n.ns, seg_id, rel_path))
+      }
+    }
+  }
+  if !slab_ranges.is_empty() {
+    let rs = @store.ObjectStore::get_range_many(n.store, slab_ranges)
+    for j in 0..<slab_pos.length() {
+      out[slab_pos[j]] = rs[j]
+    }
+  }
+  if !legacy_keys.is_empty() {
+    let rs = @store.ObjectStore::get_many(n.store, legacy_keys)
+    for j in 0..<legacy_pos.length() {
+      out[legacy_pos[j]] = rs[j]
+    }
+  }
+  out
+}
+
+///|
+/// 块级 ts 统计（rows/blockstats.bin，266 行块）。不存在时返回 None。
+async fn[S : @store.ObjectStore] seg_block_stats(
+  n : Namespace[S],
+  cs : CachedSeg,
+  seg_id : String,
+) -> (Int, Int, Array[(Int64, Int64)])? {
   if cs.block_stats_tried {
     return cs.block_stats
   }
   cs.block_stats_tried = true
-  match n.store.get("\{n.ns}/_segments/\{seg_id}/rows/blockstats.bin") {
+  match seg_read_component(n, seg_id, cs, "rows/blockstats.bin") {
     Some(bs) => {
       let (block_size, row_count, blocks) = @format.decode_blockstats(bs)
       let v = (block_size, row_count, blocks)
@@ -542,16 +864,15 @@ fn[S : @store.ObjectStore] seg_block_stats(
 
 ///|
 /// rows/vector.bin 头（dim, dtype, count），PQ 精排按块 get_range 前先读一次。
-fn[S : @store.ObjectStore] seg_vec_info(
+async fn[S : @store.ObjectStore] seg_vec_info(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> (Int, Int, Int)? raise @core.SpndError {
+) -> (Int, Int, Int)? {
   match cs.vec_info {
     Some(x) => Some(x)
     None => {
-      let key = "\{n.ns}/_segments/\{seg_id}/rows/vector.bin"
-      match n.store.get_range(key, 0, 16) {
+      match seg_read_component_range(n, seg_id, cs, "rows/vector.bin", 0, 16) {
         Some(hdr) =>
           match @format.vec_col_info(hdr) {
             (dim, dtype, count) => {
@@ -600,10 +921,10 @@ fn[T] global_gen_versions(
 /// `"pack_size"`（>1 = 该代分区分包，见 build/globalvec 的 pack 布局）。
 /// - meta 缺失 → NotFound（声明了代就必须能读到）；
 /// - `cids` 字段缺失 → Corrupt（`"cids":[]` 是合法空代，不能与字段缺失混淆）。
-fn[S : @store.ObjectStore] global_gen_cids(
+async fn[S : @store.ObjectStore] global_gen_cids(
   n : Namespace[S],
   ver : String,
-) -> Array[Int] raise @core.SpndError {
+) -> Array[Int] {
   match n.global_gen_cids.get(ver) {
     Some(c) => c
     None => {
@@ -655,10 +976,10 @@ fn[S] cache_global_gen_meta(
 
 ///|
 /// 批量预加载多代 global meta.json（只读缓存 miss 的代）。
-fn[S : @store.ObjectStore] prewarm_global_gen_cids(
+async fn[S : @store.ObjectStore] prewarm_global_gen_cids(
   n : Namespace[S],
   vers : Array[String],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let missing : Array[String] = Array(capacity=vers.length())
   for ver in vers {
     if n.global_gen_cids.get(ver) is None {
@@ -685,10 +1006,10 @@ fn[S : @store.ObjectStore] prewarm_global_gen_cids(
 
 ///|
 /// 单代分区 pack 大小（未加载过该代 meta 时返回 1；不影响已有 cids 缓存语义）。
-fn[S : @store.ObjectStore] global_gen_pack_size(
+async fn[S : @store.ObjectStore] global_gen_pack_size(
   n : Namespace[S],
   ver : String,
-) -> Int raise @core.SpndError {
+) -> Int {
   match n.global_gen_packs.get(ver) {
     Some(p) => p
     None => {
@@ -708,9 +1029,9 @@ fn[S : @store.ObjectStore] global_gen_pack_size(
 ///   的 cids 并集；任何一代缺 meta / 缺 cids 都显式报错（静默跳过会让该代行
 ///   永久不可见，表现为「查不到但也不报错」）。
 /// - `global_gen` 为 None：保持旧单代逻辑（`vec_global_version`）。
-fn[S : @store.ObjectStore] ensure_global_cids(
+async fn[S : @store.ObjectStore] ensure_global_cids(
   n : Namespace[S],
-) -> Array[Int]? raise @core.SpndError {
+) -> Array[Int]? {
   match n.vec_global_cids {
     Some(c) => return Some(c)
     None => ()
@@ -772,9 +1093,9 @@ fn[S : @store.ObjectStore] ensure_global_cids(
 ///|
 /// manifest.deleted → tombstone 集合（惰性缓存）。有 deleted_roar 时优先读
 /// roaring 对象；否则回退 manifest JSON 数组（旧数据兼容）。
-fn[S : @store.ObjectStore] tombstones_of(
+async fn[S : @store.ObjectStore] tombstones_of(
   n : Namespace[S],
-) -> Set[UInt64] raise @core.SpndError {
+) -> Set[UInt64] {
   match n.tombstones {
     Some(s) => s
     None => {
@@ -800,10 +1121,10 @@ fn[S : @store.ObjectStore] tombstones_of(
 
 ///|
 /// GET 整对象；缺失按 NotFound 报错。
-fn[S : @store.ObjectStore] get_object(
+async fn[S : @store.ObjectStore] get_object(
   store : S,
   key : String,
-) -> Bytes raise @core.SpndError {
+) -> Bytes {
   match store.get(key) {
     Some(bs) => bs
     None => raise @core.NotFound(key)
@@ -838,6 +1159,7 @@ priv struct SegMetaInfo {
   vec_normalized : Bool
   stats : SegStats?
   bloom : @format.Bloom?
+  seg_seq : Int
 }
 
 ///|
@@ -952,6 +1274,11 @@ fn parse_seg_meta(bs : Bytes) -> SegMetaInfo raise @core.SpndError {
       }
     _ => None
   }
+  // 可选 seg_seq：L0 delta 段用来判定「谁更新」；缺省 -1（按 manifest 顺序）。
+  let seg_seq = match m.get("seg_seq") {
+    Some(Number(d, ..)) => d.to_int()
+    _ => -1
+  }
   {
     row_count,
     partitions: parts,
@@ -961,6 +1288,7 @@ fn parse_seg_meta(bs : Bytes) -> SegMetaInfo raise @core.SpndError {
     vec_normalized,
     stats,
     bloom,
+    seg_seq,
   }
 }
 
@@ -988,6 +1316,9 @@ fn make_cached_seg(info : SegMetaInfo) -> CachedSeg {
     vec_info: None,
     block_stats: None,
     block_stats_tried: false,
+    slab_index: None,
+    slab_tried: false,
+    seg_seq: info.seg_seq,
     matchers: Map([]),
     vec_parts: Map([]),
   }
@@ -995,9 +1326,9 @@ fn make_cached_seg(info : SegMetaInfo) -> CachedSeg {
 
 ///|
 /// 批量加载 manifest 里所有缓存 miss 的 seg meta.json（已缓存的段不重复请求）。
-fn[S : @store.ObjectStore] prewarm_seg_metas(
+async fn[S : @store.ObjectStore] prewarm_seg_metas(
   n : Namespace[S],
-) -> Unit raise @core.SpndError {
+) -> Unit {
   let seg_count = n.manifest.segments.length()
   let missing_ids : Array[String] = Array(capacity=seg_count)
   for si in 0..<seg_count {
@@ -1027,10 +1358,10 @@ fn[S : @store.ObjectStore] prewarm_seg_metas(
 
 ///|
 /// 取得（必要时加载）某 segment 的缓存。
-fn[S : @store.ObjectStore] ensure_seg(
+async fn[S : @store.ObjectStore] ensure_seg(
   n : Namespace[S],
   seg_idx : Int,
-) -> CachedSeg raise @core.SpndError {
+) -> CachedSeg {
   let seg = n.manifest.segments[seg_idx]
   match n.cache.get(seg.id) {
     Some(cs) => cs
@@ -1047,16 +1378,16 @@ fn[S : @store.ObjectStore] ensure_seg(
 
 ///|
 /// fts dir（缓存）。
-fn[S : @store.ObjectStore] seg_dir(
+async fn[S : @store.ObjectStore] seg_dir(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> Array[@format.FtsDirEntry] raise @core.SpndError {
+) -> Array[@format.FtsDirEntry] {
   match cs.dir {
     Some(d) => d
     None => {
       let d = @format.decode_fts_dir(
-        get_object(n.store, "\{n.ns}/_segments/\{seg_id}/fts/dir.bin"),
+        seg_read_component_or_fail(n, seg_id, cs, "fts/dir.bin"),
       )
       cs.dir = Some(d)
       d
@@ -1066,17 +1397,17 @@ fn[S : @store.ObjectStore] seg_dir(
 
 ///|
 /// doc_len 列（缓存）。
-fn[S : @store.ObjectStore] seg_doc_len(
+async fn[S : @store.ObjectStore] seg_doc_len(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> Array[Int] raise @core.SpndError {
+) -> Array[Int] {
   match cs.doc_len {
     Some(a) => a
     None => {
       let a = match
         @format.decode_col(
-          get_object(n.store, "\{n.ns}/_segments/\{seg_id}/fts/doc_len.bin"),
+          seg_read_component_or_fail(n, seg_id, cs, "fts/doc_len.bin"),
         ) {
         @format.ColU32(x) => x
         _ => raise @core.Corrupt("doc_len column dtype is not u32")
@@ -1089,17 +1420,17 @@ fn[S : @store.ObjectStore] seg_doc_len(
 
 ///|
 /// id 列（缓存；dense 段不加载）。
-fn[S : @store.ObjectStore] seg_ids(
+async fn[S : @store.ObjectStore] seg_ids(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> Array[UInt64] raise @core.SpndError {
+) -> Array[UInt64] {
   match cs.ids {
     Some(a) => a
     None => {
       let a = match
         @format.decode_col(
-          get_object(n.store, "\{n.ns}/_segments/\{seg_id}/rows/id.bin"),
+          seg_read_component_or_fail(n, seg_id, cs, "rows/id.bin"),
         ) {
         @format.ColU64(x) => x
         _ => raise @core.Corrupt("id column dtype is not u64")
@@ -1112,17 +1443,16 @@ fn[S : @store.ObjectStore] seg_ids(
 
 ///|
 /// block-max 索引（缓存；文件不存在时记 tried 避免重复 GET）。
-fn[S : @store.ObjectStore] seg_blockmax(
+async fn[S : @store.ObjectStore] seg_blockmax(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> Array[Array[(Int, Int)]]? raise @core.SpndError {
+) -> Array[Array[(Int, Int)]]? {
   if cs.blockmax_tried {
     return cs.blockmax
   }
   cs.blockmax_tried = true
-  let key = "\{n.ns}/_segments/\{seg_id}/fts/blockmax.bin"
-  match n.store.get(key) {
+  match seg_read_component(n, seg_id, cs, "fts/blockmax.bin") {
     Some(bs) => {
       cs.blockmax_size = @core.read_u32_le(bs, 12).reinterpret_as_int()
       let blk = @format.decode_blockmax(bs)
@@ -1135,16 +1465,15 @@ fn[S : @store.ObjectStore] seg_blockmax(
 
 ///|
 /// PQ16 共享码本（每 segment 一个对象，缓存）。
-fn[S : @store.ObjectStore] seg_pq_codebook(
+async fn[S : @store.ObjectStore] seg_pq_codebook(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> (Int, Int, Array[Float])? raise @core.SpndError {
+) -> (Int, Int, Array[Float])? {
   match cs.pq_codebook {
     Some(cbs) => Some((cs.pq_m, cs.pq_dsub, cbs))
     None => {
-      let key = "\{n.ns}/_segments/\{seg_id}/vec/pq-codebook.bin"
-      match n.store.get(key) {
+      match seg_read_component(n, seg_id, cs, "vec/pq-codebook.bin") {
         Some(bs) => {
           let (m, dsub, _, cbs) = @format.decode_pq_codebook(bs)
           cs.pq_m = m
@@ -1160,12 +1489,12 @@ fn[S : @store.ObjectStore] seg_pq_codebook(
 
 ///|
 /// row→id：dense 段用 min_id+行号，否则读 id 列（缓存）。
-fn[S : @store.ObjectStore] row_id(
+async fn[S : @store.ObjectStore] row_id(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   row : Int,
-) -> UInt64 raise @core.SpndError {
+) -> UInt64 {
   if cs.id_dense {
     return cs.min_id + row.to_uint64()
   }
@@ -1360,9 +1689,9 @@ fn seg_may_match_f(cs : CachedSeg, f : Filter) -> Bool {
 
 ///|
 /// 惰性加载 centroids（首次调用后缓存进 Namespace）。
-fn[S : @store.ObjectStore] ensure_centroids(
+async fn[S : @store.ObjectStore] ensure_centroids(
   n : Namespace[S],
-) -> @format.Centroids raise @core.SpndError {
+) -> @format.Centroids {
   match n.centroids {
     Some(c) => c
     None => {
@@ -1390,15 +1719,16 @@ fn dedupe_terms(terms : Array[String]) -> Array[String] {
 
 ///|
 /// 候选合并收尾：row→id（dense 用 min_id+行号，否则缓存 id 列）→ tombstone
-/// 过滤 → score 降序 → top-k。
+/// 过滤 → 跨段按 id 去重（LSM 语义：manifest 中更靠后的段 / seg_seq 更大的段
+/// 视为更新，覆盖旧段的同一 doc id）→ score 降序 → top-k。
 /// cands 元素 = (segment 下标, segment 内行号, 分数)。
-fn[S : @store.ObjectStore] results_from_candidates(
+async fn[S : @store.ObjectStore] results_from_candidates(
   n : Namespace[S],
   cands : Array[(Int, Int, Double)],
   tomb : Set[UInt64],
   k : Int,
-) -> Array[QueryResult] raise @core.SpndError {
-  let out : Array[QueryResult] = Array()
+) -> Array[QueryResult] {
+  let best : Map[UInt64, (Int, Double)] = Map([])
   for c in cands {
     let (si, row, score) = c
     let seg = n.manifest.segments[si]
@@ -1407,7 +1737,19 @@ fn[S : @store.ObjectStore] results_from_candidates(
     if tomb.contains(id) {
       continue
     }
-    out.push({ id, score })
+    // 段新旧序：seg_seq 标注优先，否则用 manifest 下标（靠后 = 新）。
+    let rank = if cs.seg_seq >= 0 { cs.seg_seq } else { si }
+    match best.get(id) {
+      Some((old_rank, old_score)) =>
+        if rank > old_rank || (rank == old_rank && score > old_score) {
+          best.set(id, (rank, score))
+        }
+      None => best.set(id, (rank, score))
+    }
+  }
+  let out : Array[QueryResult] = Array(capacity=best.length())
+  for kv in best.iter() {
+    out.push({ id: kv.0, score: kv.1.1 })
   }
   out.sort_by(fn(a, b) { b.score.compare(a.score) })
   if out.length() > k {

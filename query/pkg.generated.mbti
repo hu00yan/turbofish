@@ -4,19 +4,18 @@ package "turbofish/query"
 import {
   "moonbitlang/core/debug",
   "moonbitlang/core/set",
-  "turbofish/core",
   "turbofish/format",
   "turbofish/store",
 }
 
 // Values
-pub fn[S : @store.ObjectStore] bm25_search(Namespace[S], String, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] bm25_search(Namespace[S], String, Int32, Filter?) -> Array[QueryResult]
 
-pub fn[S : @store.ObjectStore] count_docs(Namespace[S], Filter?) -> Int32 raise @core.SpndError
+pub async fn[S : @store.ObjectStore] count_docs(Namespace[S], Filter?) -> Int32
 
-pub fn[S : @store.ObjectStore] eval_filter_columnar(Namespace[S], CachedSeg, String, Filter) -> BitSet raise @core.SpndError
+pub async fn[S : @store.ObjectStore] eval_filter_columnar(Namespace[S], CachedSeg, String, Filter) -> BitSet
 
-pub fn[S : @store.ObjectStore] eval_pushdown_filter(Namespace[S], Filter) -> MatchedDocSet raise @core.SpndError
+pub async fn[S : @store.ObjectStore] eval_pushdown_filter(Namespace[S], Filter) -> MatchedDocSet
 
 pub fn f_bool(String, Bool) -> Filter
 
@@ -24,15 +23,15 @@ pub fn f_i64(String, Int64) -> Filter
 
 pub fn f_str(String, String) -> Filter
 
-pub fn[S : @store.ObjectStore] hybrid_search(Namespace[S], String, Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] hybrid_search(Namespace[S], String, Array[Float], Int32, Int32, Filter?) -> Array[QueryResult]
 
-pub fn[S : @store.ObjectStore] hybrid_search_opts(Namespace[S], String, Array[Float], Int32, Int32, Filter?, HybridOpts) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] hybrid_search_opts(Namespace[S], String, Array[Float], Int32, Int32, Filter?, HybridOpts) -> Array[QueryResult]
 
-pub fn[S : @store.ObjectStore] matching_ids(Namespace[S], Filter) -> Array[UInt64] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] matching_ids(Namespace[S], Filter) -> Array[UInt64]
 
-pub fn[S : @store.ObjectStore] open(S, String) -> Namespace[S] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] open(S, String) -> Namespace[S]
 
-pub fn[S : @store.ObjectStore] open_cached(MetadataCache[S], S, String) -> Namespace[S] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] open_cached(MetadataCache[S], S, String) -> Namespace[S]
 
 pub fn[S] open_cached_or_create(MetadataCache[S], S, String, @format.NamespaceMeta, @format.ManifestData) -> Namespace[S]
 
@@ -40,17 +39,25 @@ pub fn[S] open_from_meta(S, String, @format.NamespaceMeta, @format.ManifestData)
 
 pub fn pq_adc_candidates(Array[Float], @format.PQPart, Array[Float]) -> Array[(Int32, Double)]
 
-pub fn[S : @store.ObjectStore] sum_field(Namespace[S], String, Filter?) -> Double raise @core.SpndError
+pub async fn[S : @store.ObjectStore] seg_read_component(Namespace[S], String, CachedSeg, String) -> Bytes?
 
-pub fn[S : @store.ObjectStore] vec_search(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] seg_read_component_or_fail(Namespace[S], String, CachedSeg, String) -> Bytes
 
-pub fn[S : @store.ObjectStore] vec_search_rerank(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] seg_read_component_range(Namespace[S], String, CachedSeg, String, Int32, Int32) -> Bytes?
 
-pub fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(Namespace[S], Array[Float], Int32, Int32, Filter?, @set.Set[UInt64]?) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] seg_read_components_many(Namespace[S], Array[(String, CachedSeg, String)]) -> Array[Bytes?]
 
-pub fn[S : @store.ObjectStore] vec_search_with_pushdown(Namespace[S], Array[Float], Int32, Int32, Filter?, @set.Set[UInt64]?) -> Array[QueryResult] raise @core.SpndError
+pub async fn[S : @store.ObjectStore] sum_field(Namespace[S], String, Filter?) -> Double
 
-pub fn[S : @store.ObjectStore] warm_namespace(Namespace[S]) -> Unit raise @core.SpndError
+pub async fn[S : @store.ObjectStore] vec_search(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult]
+
+pub async fn[S : @store.ObjectStore] vec_search_rerank(Namespace[S], Array[Float], Int32, Int32, Filter?) -> Array[QueryResult]
+
+pub async fn[S : @store.ObjectStore] vec_search_rerank_with_pushdown(Namespace[S], Array[Float], Int32, Int32, Filter?, @set.Set[UInt64]?) -> Array[QueryResult]
+
+pub async fn[S : @store.ObjectStore] vec_search_with_pushdown(Namespace[S], Array[Float], Int32, Int32, Filter?, @set.Set[UInt64]?) -> Array[QueryResult]
+
+pub async fn[S : @store.ObjectStore] warm_namespace(Namespace[S]) -> Unit
 
 // Errors
 
@@ -95,6 +102,9 @@ pub(all) struct CachedSeg {
   mut vec_info : (Int32, Int32, Int32)?
   mut block_stats : (Int32, Int32, Array[(Int64, Int64)])?
   mut block_stats_tried : Bool
+  mut slab_index : @format.SlabIndex?
+  mut slab_tried : Bool
+  mut seg_seq : Int32
   matchers : Map[String, RowMatcher]
   vec_parts : Map[Int32, Bytes]
 }

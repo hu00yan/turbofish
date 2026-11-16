@@ -100,6 +100,15 @@ pub impl @store.ObjectStore for CountingBatchStore with fn get_range_many(
   @store.BatchStore::get_range_many(self.inner, ranges)
 }
 
+///|
+/// 批量写在计数 wrapper 里同样走内层批量实现（10 个 trait 方法全量补齐）。
+pub impl @store.ObjectStore for CountingBatchStore with fn put_many(
+  self : CountingBatchStore,
+  items : Array[(String, Bytes)],
+) -> Unit {
+  self.inner.put_many(items)
+}
+
 pub extend CountingBatchStore with @store.ObjectStore::{
   get,
   put,
@@ -110,10 +119,11 @@ pub extend CountingBatchStore with @store.ObjectStore::{
   head_version,
   get_many,
   get_range_many,
+  put_many,
 }
 
 ///|
-test "warm_namespace / BM25 走批量读入口且结果不变" {
+async test "warm_namespace / BM25 走批量读入口且结果不变" {
   let inner = make_test_store([])
   let s = CountingBatchStore::new(inner)
   let n = open(s, "test")
@@ -126,10 +136,11 @@ test "warm_namespace / BM25 走批量读入口且结果不变" {
   let before = bm25_search(n, "fox", 5, None)
   assert_eq(before.length() > 0, true)
   assert_eq(s.many_calls > 0, true)
-  // 再查一次：缓存命中，不再产生批量请求。
+  // 再查一次：列/dir/doc_len 全部缓存命中，不再产生批量整读请求；
+  // 只剩批量 Range 读：**每段 1 次**（该段多个 term 的 posting 局部区间合并）。
   s.reset_counts()
   let after = bm25_search(n, "fox", 5, None)
   assert_eq(after.length(), before.length())
   assert_eq(s.many_calls, 0)
-  assert_eq(s.range_calls, 0)
+  assert_eq(s.range_calls, 2)
 }

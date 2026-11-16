@@ -2,16 +2,31 @@
 import {
   "moonbitlang/async",
   "moonbitlang/async/http",
+  "moonbitlang/async/io",
   "moonbitlang/async/socket",
   "turbofish/meta",
   "turbofish/fsstore",
   "moonbitlang/core/env",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/socket",
+  "turbofish/meta",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
+} for "wbtest"
 
 options(
   "is-main": true,
   targets: {
-    "main.mbt": [ "native" ],
+    "main.mbt": [ "native", "llvm" ],
+    "state.mbt": [ "native", "llvm" ],
+    "route_wbtest.mbt": [ "native", "llvm" ],
     "stub.mbt": [ "wasm", "wasm-gc", "js" ],
   },
 )

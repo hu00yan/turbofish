@@ -1,0 +1,31 @@
+#cfg(any(target="native", target="llvm"))
+import {
+  "turbofish/s3store",
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/string",
+  "moonbitlang/core/debug",
+} for "wbtest"
+
+// 纯 MoonBit 异步实现依赖 moonbitlang/async 的 native event loop，
+// 只在 native / llvm 后端编译（非 native 不提供桩实现）。
+options(
+  targets: {
+    "client.mbt": [ "native", "llvm" ],
+    "xml.mbt": [ "native", "llvm" ],
+    "time.mbt": [ "native", "llvm" ],
+    "client_wbtest.mbt": [ "native", "llvm" ],
+    "server_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

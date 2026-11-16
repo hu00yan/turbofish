@@ -1,0 +1,31 @@
+import {
+  "moonbitlang/core/encoding/utf8",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
+} for "wbtest"
+
+// 租约/脏队列/异步客户端依赖 moonbitlang/async 的协程与事件循环，
+// 只在 native / llvm 后端编译（非 native 仅保留 is_metadata_key 等纯函数）。
+options(
+  targets: {
+    "coord.mbt": [ "native", "llvm" ],
+    "client.mbt": [ "native", "llvm" ],
+    "client_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

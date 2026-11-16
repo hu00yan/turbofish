@@ -1,0 +1,18 @@
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/semaphore",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+// 组提交缓冲器依赖 moonbitlang/async 的协程/事件循环，只在 native / llvm 编译。
+options(
+  targets: {
+    "buffer.mbt": [ "native", "llvm" ],
+    "buffer_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

@@ -1,0 +1,24 @@
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/process",
+  "moonbitlang/async/signal",
+  "moonbitlang/core/env",
+  "moonbitlang/core/string",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+// 多进程监管器依赖 moonbitlang/async 的子进程能力（native event loop），
+// 只在 native / llvm 后端编译。
+options(
+  "is-main": true,
+  targets: {
+    "main.mbt": [ "native", "llvm" ],
+    "router_wbtest.mbt": [ "native", "llvm" ],
+    "stub.mbt": [ "wasm", "wasm-gc", "js" ],
+  },
+)

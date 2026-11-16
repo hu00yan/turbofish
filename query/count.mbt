@@ -7,10 +7,10 @@
 
 ///|
 /// 命名空间内满足 filter 的存活文档数（精确值）。
-pub fn[S : @store.ObjectStore] count_docs(
+pub async fn[S : @store.ObjectStore] count_docs(
   n : Namespace[S],
   filter : Filter?,
-) -> Int raise @core.SpndError {
+) -> Int {
   let tomb = tombstones_of(n)
   match filter {
     None => {
@@ -33,11 +33,11 @@ pub fn[S : @store.ObjectStore] count_docs(
 /// 命名空间内满足 filter（可选）的存活文档的某数值属性之和（Double）。
 /// field 对应 rows/{field}.bin，必须是 i64 列（否则报 Corrupt）。
 /// 无 filter 时对全部存活文档求和。
-pub fn[S : @store.ObjectStore] sum_field(
+pub async fn[S : @store.ObjectStore] sum_field(
   n : Namespace[S],
   field : String,
   filter : Filter?,
-) -> Double raise @core.SpndError {
+) -> Double {
   let tomb = tombstones_of(n)
   let mut total = 0.0
   for si in 0..<n.manifest.segments.length() {
@@ -47,11 +47,9 @@ pub fn[S : @store.ObjectStore] sum_field(
       continue
     }
     // 加载字段列
-    let col_key = "\{n.ns}/_segments/\{seg.id}/rows/\{field}.bin"
-    let col_bs = match n.store.get(col_key) {
-      Some(b) => b
-      None => raise @core.NotFound(col_key)
-    }
+    let col_bs = seg_read_component_or_fail(
+      n, seg.id, cs, "rows/\{field}.bin",
+    )
     let vals = match @format.decode_col(col_bs) {
       @format.ColI64(arr) => arr
       _ =>
@@ -85,10 +83,10 @@ pub fn[S : @store.ObjectStore] sum_field(
 
 ///|
 /// 命名空间内满足 filter 的所有存活文档 ID（无序，用于 delete_by_filter）。
-pub fn[S : @store.ObjectStore] matching_ids(
+pub async fn[S : @store.ObjectStore] matching_ids(
   n : Namespace[S],
   filter : Filter,
-) -> Array[UInt64] raise @core.SpndError {
+) -> Array[UInt64] {
   let p = eval_pushdown_filter(n, filter)
   let out : Array[UInt64] = Array(capacity=p.total_matched)
   for id in p.allowed_ids {

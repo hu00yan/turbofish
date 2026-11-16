@@ -29,31 +29,31 @@ pub(all) struct LeaseToken {
 /// Pluggable Metadata Catalog 接口抽象。
 pub(open) trait MetadataCatalog {
   // Namespace lifecycle
-  fn create_namespace(Self, @format.NamespaceMeta) -> Unit raise CatalogError
-  fn get_namespace(Self, String) -> @format.NamespaceMeta? raise CatalogError
-  fn update_head_manifest(
+  async fn create_namespace(Self, @format.NamespaceMeta) -> Unit
+  async fn get_namespace(Self, String) -> @format.NamespaceMeta?
+  async fn update_head_manifest(
     Self,
     String,
     String,
     expected_head? : String,
     lease_token? : LeaseToken
-  ) -> Unit raise CatalogError
+  ) -> Unit
 
   // Distributed Fencing / Lease management
-  fn acquire_lease(Self, String, String, UInt64) -> LeaseToken? raise CatalogError
-  fn renew_lease(Self, LeaseToken, UInt64) -> LeaseToken? raise CatalogError
-  fn release_lease(Self, LeaseToken) -> Bool raise CatalogError
+  async fn acquire_lease(Self, String, String, UInt64) -> LeaseToken?
+  async fn renew_lease(Self, LeaseToken, UInt64) -> LeaseToken?
+  async fn release_lease(Self, LeaseToken) -> Bool
 
   // Lineage & Snapshot DAG
-  fn register_snapshot(Self, String, String, String) -> Unit raise CatalogError
-  fn resolve_snapshot(Self, String, String) -> String? raise CatalogError
-  fn record_branch_origin(Self, String, String) -> Unit raise CatalogError
-  fn get_lineage(Self, String) -> Array[String] raise CatalogError
+  async fn register_snapshot(Self, String, String, String) -> Unit
+  async fn resolve_snapshot(Self, String, String) -> String?
+  async fn record_branch_origin(Self, String, String) -> Unit
+  async fn get_lineage(Self, String) -> Array[String]
 
   // GC Safety Active Reference Tracking
-  fn list_active_segment_ids(Self, String) -> Set[String] raise CatalogError
-  fn mark_segment_referenced(Self, String, String) -> Unit raise CatalogError
-  fn get_unreferenced_segments(Self, String, UInt64) -> Array[String] raise CatalogError
+  async fn list_active_segment_ids(Self, String) -> Set[String]
+  async fn mark_segment_referenced(Self, String, String) -> Unit
+  async fn get_unreferenced_segments(Self, String, UInt64) -> Array[String]
 }
 
 ///|
@@ -213,7 +213,7 @@ fn s3_segments_prefix(ns : String) -> String {
 
 ///|
 /// 向 S3CasCatalog 写入 Manifest 对象（用于预注册或测试）。
-pub fn[S : @store.ObjectStore] S3CasCatalog::register_manifest(
+pub async fn[S : @store.ObjectStore] S3CasCatalog::register_manifest(
   self : S3CasCatalog[S],
   ns : String,
   manifest : @format.ManifestData
@@ -224,7 +224,7 @@ pub fn[S : @store.ObjectStore] S3CasCatalog::register_manifest(
 
 ///|
 /// 模拟写入段元数据对象（用于测试或双写上传）。
-pub fn[S : @store.ObjectStore] S3CasCatalog::seed_segment(
+pub async fn[S : @store.ObjectStore] S3CasCatalog::seed_segment(
   self : S3CasCatalog[S],
   ns : String,
   seg_id : String
@@ -240,7 +240,7 @@ pub fn[S : @store.ObjectStore] S3CasCatalog::seed_segment(
 impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with create_namespace(
   self,
   meta : @format.NamespaceMeta
-) -> Unit raise CatalogError {
+) -> Unit {
   let key = s3_meta_key(meta.ns_name)
   let bytes = @utf8.encode(meta.to_json().stringify())
   self.store.put(key, bytes)
@@ -254,7 +254,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with create_nam
 impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with get_namespace(
   self,
   ns : String
-) -> @format.NamespaceMeta? raise CatalogError {
+) -> @format.NamespaceMeta? {
   let key = s3_meta_key(ns)
   match self.store.get(key) {
     Some(bytes) => {
@@ -281,7 +281,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with update_hea
   new_mid : String,
   expected_head? : String,
   lease_token? : LeaseToken
-) -> Unit raise CatalogError {
+) -> Unit {
   let now = self.now()
 
   // 1. Fencing Token & Lease 校验
@@ -408,7 +408,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with acquire_le
   ns : String,
   worker_id : String,
   ttl_ms : UInt64
-) -> LeaseToken? raise CatalogError {
+) -> LeaseToken? {
   let now = self.now()
   let lkey = s3_lease_key(ns)
   let cur_opt = self.store.get(lkey)
@@ -444,7 +444,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with renew_leas
   self,
   token : LeaseToken,
   ttl_ms : UInt64
-) -> LeaseToken? raise CatalogError {
+) -> LeaseToken? {
   let now = self.now()
   let lkey = s3_lease_key(token.ns)
   match self.store.get(lkey) {
@@ -473,7 +473,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with renew_leas
 impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with release_lease(
   self,
   token : LeaseToken
-) -> Bool raise CatalogError {
+) -> Bool {
   let lkey = s3_lease_key(token.ns)
   match self.store.get(lkey) {
     Some(bs) => {
@@ -496,7 +496,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with register_s
   ns : String,
   snap_name : String,
   mid : String
-) -> Unit raise CatalogError {
+) -> Unit {
   let skey = s3_snapshot_key(ns, snap_name)
   let now = self.now()
   let m : Map[String, Json] = Map([])
@@ -511,7 +511,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with resolve_sn
   self,
   ns : String,
   snap_name : String
-) -> String? raise CatalogError {
+) -> String? {
   let skey = s3_snapshot_key(ns, snap_name)
   match self.store.get(skey) {
     Some(bs) => {
@@ -534,7 +534,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with record_bra
   self,
   branch_ns : String,
   parent_ns : String
-) -> Unit raise CatalogError {
+) -> Unit {
   let bkey = s3_branch_origin_key(branch_ns)
   let now = self.now()
   let m : Map[String, Json] = Map([])
@@ -548,7 +548,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with record_bra
 impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with get_lineage(
   self,
   ns : String
-) -> Array[String] raise CatalogError {
+) -> Array[String] {
   let lineage : Array[String] = [ns]
   let mut cur = ns
   while true {
@@ -581,7 +581,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with mark_segme
   self,
   ns : String,
   seg_id : String
-) -> Unit raise CatalogError {
+) -> Unit {
   let key = s3_active_ref_key(ns, seg_id)
   let now = self.now()
   let m : Map[String, Json] = Map([])
@@ -594,7 +594,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with mark_segme
 impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with list_active_segment_ids(
   self,
   ns : String
-) -> Set[String] raise CatalogError {
+) -> Set[String] {
   let active : Set[String] = Set([])
   let lineage = MetadataCatalog::get_lineage(self, ns)
   for ancestor in lineage {
@@ -662,7 +662,7 @@ impl[S : @store.ObjectStore] MetadataCatalog for S3CasCatalog[S] with get_unrefe
   self,
   ns : String,
   grace_period_ms : UInt64
-) -> Array[String] raise CatalogError {
+) -> Array[String] {
   let now = self.now()
   let active = MetadataCatalog::list_active_segment_ids(self, ns)
   let unref : Array[String] = []
@@ -1018,13 +1018,14 @@ pub fn MemRdbCatalog::rollback_transaction(self : MemRdbCatalog) -> Unit {
 
 ///|
 /// 在事务块内运行 f，若失败自动执行回滚并重新抛出异常；若成功则自动提交。
-pub fn[T] MemRdbCatalog::with_transaction(
+/// 接受 async 闭包（S3 侧目录方法本身就是 async），失败自动回滚。
+pub async fn[T] MemRdbCatalog::with_transaction(
   self : MemRdbCatalog,
-  f : () -> T raise CatalogError
-) -> T raise CatalogError {
+  f : async () -> T
+) -> T {
   let was_in_tx = self.active_tx_id is Some(_)
   let _ = self.begin_transaction()
-  let res : Result[T, CatalogError] = try {
+  let res : Result[T, Error] = try {
     Ok(f())
   } catch {
     err => Err(err)
@@ -1183,13 +1184,13 @@ fn MemRdbCatalog::find_visible_manifest(
 
 ///|
 /// 注册 Manifest 所包含的 Segment ID 映射，供关系模型进行外键及活跃段追踪。
-pub fn MemRdbCatalog::register_manifest_segments(
+pub async fn MemRdbCatalog::register_manifest_segments(
   self : MemRdbCatalog,
   ns : String,
   manifest_id : String,
   segment_ids : Array[String]
 ) -> Unit {
-  let _ = self.with_transaction(() => {
+  let _ = self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     let mkey = "\{ns}/\{manifest_id}"
@@ -1248,7 +1249,7 @@ pub fn MemRdbCatalog::register_manifest_segments(
 
 ///|
 /// 从 ManifestData 自动提取段信息并注册到 MemRdbCatalog。
-pub fn MemRdbCatalog::register_manifest(
+pub async fn MemRdbCatalog::register_manifest(
   self : MemRdbCatalog,
   ns : String,
   manifest : @format.ManifestData
@@ -1281,8 +1282,8 @@ pub fn MemRdbCatalog::get_namespace_at(
 impl MetadataCatalog for MemRdbCatalog with create_namespace(
   self,
   meta : @format.NamespaceMeta
-) -> Unit raise CatalogError {
-  self.with_transaction(() => {
+) -> Unit {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     let ns = meta.ns_name
@@ -1314,7 +1315,7 @@ impl MetadataCatalog for MemRdbCatalog with create_namespace(
 impl MetadataCatalog for MemRdbCatalog with get_namespace(
   self,
   ns : String
-) -> @format.NamespaceMeta? raise CatalogError {
+) -> @format.NamespaceMeta? {
   let tx = self.current_read_tx()
   match self.find_visible_tenant(ns, tx) {
     Some(rec) => Some(rec.meta)
@@ -1329,8 +1330,8 @@ impl MetadataCatalog for MemRdbCatalog with update_head_manifest(
   new_mid : String,
   expected_head? : String,
   lease_token? : LeaseToken
-) -> Unit raise CatalogError {
-  self.with_transaction(() => {
+) -> Unit {
+  self.with_transaction(fn() raise {
     let tx = self.current_read_tx()
     let now = self.now()
 
@@ -1452,8 +1453,8 @@ impl MetadataCatalog for MemRdbCatalog with acquire_lease(
   ns : String,
   worker_id : String,
   ttl_ms : UInt64
-) -> LeaseToken? raise CatalogError {
-  self.with_transaction(() => {
+) -> LeaseToken? {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     let cur_lease = self.find_visible_lease(ns, tx)
@@ -1494,8 +1495,8 @@ impl MetadataCatalog for MemRdbCatalog with renew_lease(
   self,
   token : LeaseToken,
   ttl_ms : UInt64
-) -> LeaseToken? raise CatalogError {
-  self.with_transaction(() => {
+) -> LeaseToken? {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     match self.find_visible_lease(token.ns, tx) {
@@ -1536,8 +1537,8 @@ impl MetadataCatalog for MemRdbCatalog with renew_lease(
 impl MetadataCatalog for MemRdbCatalog with release_lease(
   self,
   token : LeaseToken
-) -> Bool raise CatalogError {
-  self.with_transaction(() => {
+) -> Bool {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     match self.find_visible_lease(token.ns, tx) {
       Some(rec) =>
@@ -1560,8 +1561,8 @@ impl MetadataCatalog for MemRdbCatalog with register_snapshot(
   ns : String,
   snap_name : String,
   mid : String
-) -> Unit raise CatalogError {
-  self.with_transaction(() => {
+) -> Unit {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     let skey = "\{ns}/\{snap_name}"
@@ -1595,7 +1596,7 @@ impl MetadataCatalog for MemRdbCatalog with resolve_snapshot(
   self,
   ns : String,
   snap_name : String
-) -> String? raise CatalogError {
+) -> String? {
   let tx = self.current_read_tx()
   let skey = "\{ns}/\{snap_name}"
   match self.find_visible_snapshot(skey, tx) {
@@ -1609,8 +1610,8 @@ impl MetadataCatalog for MemRdbCatalog with record_branch_origin(
   self,
   branch_ns : String,
   parent_ns : String
-) -> Unit raise CatalogError {
-  self.with_transaction(() => {
+) -> Unit {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     match self.find_visible_lineage(branch_ns, tx) {
@@ -1640,7 +1641,7 @@ impl MetadataCatalog for MemRdbCatalog with record_branch_origin(
 impl MetadataCatalog for MemRdbCatalog with get_lineage(
   self,
   ns : String
-) -> Array[String] raise CatalogError {
+) -> Array[String] {
   let tx = self.current_read_tx()
   let lineage : Array[String] = [ns]
   let mut cur = ns
@@ -1665,8 +1666,8 @@ impl MetadataCatalog for MemRdbCatalog with mark_segment_referenced(
   self,
   ns : String,
   seg_id : String
-) -> Unit raise CatalogError {
-  self.with_transaction(() => {
+) -> Unit {
+  self.with_transaction(fn() {
     let tx = self.current_read_tx()
     let now = self.now()
     let rkey = "\{ns}/\{seg_id}"
@@ -1699,7 +1700,7 @@ impl MetadataCatalog for MemRdbCatalog with mark_segment_referenced(
 impl MetadataCatalog for MemRdbCatalog with list_active_segment_ids(
   self,
   ns : String
-) -> Set[String] raise CatalogError {
+) -> Set[String] {
   let tx = self.current_read_tx()
   let active : Set[String] = Set([])
   let lineage = MetadataCatalog::get_lineage(self, ns)
@@ -1754,7 +1755,7 @@ impl MetadataCatalog for MemRdbCatalog with get_unreferenced_segments(
   self,
   ns : String,
   grace_period_ms : UInt64
-) -> Array[String] raise CatalogError {
+) -> Array[String] {
   let tx = self.current_read_tx()
   let now = self.now()
   let active = MetadataCatalog::list_active_segment_ids(self, ns)

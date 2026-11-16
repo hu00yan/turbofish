@@ -10,12 +10,12 @@
 
 ///|
 /// wbtest 辅助：trait 方法跨包不能直接点调用，走泛型分发。
-fn[S : @store.ObjectStore] tput(s : S, key : String, val : Bytes) -> Unit {
+async fn[S : @store.ObjectStore] tput(s : S, key : String, val : Bytes) -> Unit {
   s.put(key, val)
 }
 
 ///|
-fn[S : @store.ObjectStore] tdel(s : S, key : String) -> Unit {
+async fn[S : @store.ObjectStore] tdel(s : S, key : String) -> Unit {
   s.delete(key)
 }
 
@@ -31,7 +31,7 @@ fn spin_ms(ms : UInt64) -> Unit {
 ///|
 /// 最小 namespace：直接写 JSON，避免耦合 `ManifestData` 后续新增可选字段。
 /// namespace.json 的 head 指向 mid；manifest 为空段。
-fn seed_ns(s : @store.MemStore, ns : String, mid : String) -> Unit {
+async fn seed_ns(s : @store.MemStore, ns : String, mid : String) -> Unit {
   let nm : Map[String, Json] = Map([])
   nm.set("format", Json::string("seekpond/v1"))
   nm.set("namespace", Json::string(ns))
@@ -66,13 +66,13 @@ fn seed_ns(s : @store.MemStore, ns : String, mid : String) -> Unit {
 }
 
 ///|
-fn drop_ns_objects(s : @store.MemStore, ns : String, mid : String) -> Unit {
+async fn drop_ns_objects(s : @store.MemStore, ns : String, mid : String) -> Unit {
   tdel(s, "\{ns}/_meta/namespace.json")
   tdel(s, "\{ns}/_manifest/\{mid}.json")
 }
 
 ///|
-test "ttl hit: second acquire does not reopen" {
+async test "ttl hit: second acquire does not reopen" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -94,7 +94,7 @@ test "ttl hit: second acquire does not reopen" {
 }
 
 ///|
-test "release reaches zero pins and later acquire still hits" {
+async test "release reaches zero pins and later acquire still hits" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -119,7 +119,7 @@ test "release reaches zero pins and later acquire still hits" {
 }
 
 ///|
-test "ttl zero: every acquire reloads" {
+async test "ttl zero: every acquire reloads" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -144,7 +144,7 @@ test "ttl zero: every acquire reloads" {
 }
 
 ///|
-test "pointer probe hit avoids full reopen on ttl expiry" {
+async test "pointer probe hit avoids full reopen on ttl expiry" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   // 写者已升级：发布时维护 `_head_ptr` 指针。
@@ -170,7 +170,7 @@ test "pointer probe hit avoids full reopen on ttl expiry" {
 }
 
 ///|
-test "pointer probe mismatch triggers reload" {
+async test "pointer probe mismatch triggers reload" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   tput(s, "test/_head_ptr", @utf8.encode("manifest-01"))
@@ -194,7 +194,7 @@ test "pointer probe mismatch triggers reload" {
 }
 
 ///|
-test "invalidate bypasses probe and forces full reload" {
+async test "invalidate bypasses probe and forces full reload" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   tput(s, "test/_head_ptr", @utf8.encode("manifest-01"))
@@ -219,7 +219,7 @@ test "invalidate bypasses probe and forces full reload" {
 }
 
 ///|
-test "stale_ok returns old snapshot after reload failure" {
+async test "stale_ok returns old snapshot after reload failure" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -241,7 +241,7 @@ test "stale_ok returns old snapshot after reload failure" {
 }
 
 ///|
-test "stale_ok false rethrows on reload failure" {
+async test "stale_ok false rethrows on reload failure" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -262,7 +262,7 @@ test "stale_ok false rethrows on reload failure" {
 }
 
 ///|
-test "invalidate drops snapshot but keeps pinned manifest id" {
+async test "invalidate drops snapshot but keeps pinned manifest id" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -284,7 +284,7 @@ test "invalidate drops snapshot but keeps pinned manifest id" {
 }
 
 ///|
-test "unpinned invalidate removes entry entirely" {
+async test "unpinned invalidate removes entry entirely" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -302,7 +302,7 @@ test "unpinned invalidate removes entry entirely" {
 }
 
 ///|
-test "max_entries evicts unpinned oldest and keeps pinned" {
+async test "max_entries evicts unpinned oldest and keeps pinned" {
   let s = @store.MemStore::new()
   seed_ns(s, "a", "m-a")
   seed_ns(s, "b", "m-b")
@@ -335,7 +335,7 @@ test "max_entries evicts unpinned oldest and keeps pinned" {
 }
 
 ///|
-test "reload keeps old pinned id in pinned_manifests but returns new top" {
+async test "reload keeps old pinned id in pinned_manifests but returns new top" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -366,7 +366,7 @@ test "reload keeps old pinned id in pinned_manifests but returns new top" {
 }
 
 ///|
-test "invalidate keeps snapshot while pinned and drops entry after release" {
+async test "invalidate keeps snapshot while pinned and drops entry after release" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -392,7 +392,7 @@ test "invalidate keeps snapshot while pinned and drops entry after release" {
 }
 
 ///|
-test "invalidate while pinned makes next acquire reload the snapshot" {
+async test "invalidate while pinned makes next acquire reload the snapshot" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -414,7 +414,7 @@ test "invalidate while pinned makes next acquire reload the snapshot" {
 }
 
 ///|
-test "stale fallback refreshes checked_ms and avoids fail-storm" {
+async test "stale fallback refreshes checked_ms and avoids fail-storm" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -443,7 +443,7 @@ test "stale fallback refreshes checked_ms and avoids fail-storm" {
 }
 
 ///|
-test "stale_ok false does not push a pin on the failing acquire" {
+async test "stale_ok false does not push a pin on the failing acquire" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -464,7 +464,7 @@ test "stale_ok false does not push a pin on the failing acquire" {
 }
 
 ///|
-test "authoritative mode: update_snapshot grants instant visibility with zero s3 gets" {
+async test "authoritative mode: update_snapshot grants instant visibility with zero s3 gets" {
   let s = @store.MemStore::new()
   seed_ns(s, "test", "manifest-01")
   let cp = ControlPlane::new(
@@ -497,7 +497,7 @@ test "authoritative mode: update_snapshot grants instant visibility with zero s3
 }
 
 ///|
-test "WorkerTieredCache: 5-minute TTL eviction and LRU capacity budget" {
+async test "WorkerTieredCache: 5-minute TTL eviction and LRU capacity budget" {
   let cache = WorkerTieredCache::new(ttl_ms=10UL, max_bytes=500)
   let p1 : @format.GlobalVecPart = {
     cid: 0,
@@ -517,7 +517,7 @@ test "WorkerTieredCache: 5-minute TTL eviction and LRU capacity budget" {
 }
 
 ///|
-test "Coordinator: multi-tenant management and worker dispatch" {
+async test "Coordinator: multi-tenant management and worker dispatch" {
   let s = @store.MemStore::new()
   seed_ns(s, "t1", "m1")
   seed_ns(s, "t2", "m2")

@@ -187,14 +187,14 @@ fn normalize_query_vec(qv : Array[Float]) -> Array[Float] {
 
 ///|
 /// Worker 执行分配给自身的分区切片（结合本地 5 分钟热缓存）。
-pub fn[S : @store.ObjectStore] QueryWorker::execute_partition_slice(
+pub async fn[S : @store.ObjectStore] QueryWorker::execute_partition_slice(
   self : QueryWorker[S],
   n : @query.Namespace[S],
   qv : Array[Float],
   partitions : Array[Int],
   top_k : Int,
   filter : @query.Filter?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   if top_k <= 0 || qv.is_empty() || partitions.is_empty() {
     return []
   }
@@ -383,15 +383,16 @@ pub fn[S : @store.ObjectStore] QueryWorker::execute_partition_slice(
       if !cs.partitions.contains(cid) {
         continue
       }
-      let key = "\{n.ns}/_segments/\{seg.id}/vec/part-\{cid}.bin"
+      // SlabV2 单文件段从 `segment.slab` 的 `vec/part-{cid}` 组件精准读取，
+      // 碎片段走 `vec/part-{cid}.bin`（同一入口，透明兼容）。
       let bs = match cs.vec_parts.get(cid) {
         Some(b) => b
-        None => match self.store.get(key) {
-          Some(b) => {
-            cs.vec_parts.set(cid, b)
-            b
-          }
-          None => raise @core.NotFound(key)
+        None => {
+          let b = @query.seg_read_component_or_fail(
+            n, seg.id, cs, "vec/part-\{cid}.bin",
+          )
+          cs.vec_parts.set(cid, b)
+          b
         }
       }
       if !@format.is_pq_part(bs) && !@format.is_pq_shared_part(bs) {
@@ -468,7 +469,7 @@ pub fn[S] Coordinator::gather_merge(
 /// 1. 多 Worker 查询扇出（Multi-worker query fan-out）：划分探针分区并分配给 Worker 池；
 /// 2. 分区并行计算（Parallel partition execution）：每个 Worker 结合 5 分钟热缓存独立计算局部 Top-K；
 /// 3. Coordinator 流式汇聚（Streaming merge）：通过 TopKHeap (Min-Heap) 汇聚并返回全局 Top-K 结果。
-pub fn[S : @store.ObjectStore] Coordinator::scatter_gather_vector_query(
+pub async fn[S : @store.ObjectStore] Coordinator::scatter_gather_vector_query(
   self : Coordinator[S],
   tenant_id : String,
   n : @query.Namespace[S],
@@ -476,7 +477,7 @@ pub fn[S : @store.ObjectStore] Coordinator::scatter_gather_vector_query(
   top_k : Int,
   nprobe : Int,
   filter : @query.Filter?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let _ = tenant_id
   if top_k <= 0 || qv.is_empty() || nprobe <= 0 {
     return []

@@ -129,12 +129,12 @@ fn filter_key(f : Filter) -> String {
 /// 加载（或从缓存取）某 segment 的过滤匹配器。支持完整过滤树：
 /// 组合节点递归加载子匹配器，叶子按列 dtype 分派（dict / bitmap / 普通列 /
 /// ts 块级 stats）。空 In = MOr([])（恒 false），NotIn(空) = 恒 true。
-fn[S : @store.ObjectStore] load_matcher(
+async fn[S : @store.ObjectStore] load_matcher(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   f : Filter,
-) -> RowMatcher raise @core.SpndError {
+) -> RowMatcher {
   let key = filter_key(f)
   match cs.matchers.get(key) {
     Some(m) => m
@@ -168,8 +168,9 @@ fn[S : @store.ObjectStore] load_matcher(
         }
         Not(inner) => MNot(load_matcher(n, cs, seg_id, inner))
         Glob(field, pat) => {
-          let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
-          let bs = get_object(n.store, col_key)
+          let bs = seg_read_component_or_fail(
+            n, seg_id, cs, "rows/\{field}.bin",
+          )
           match @format.decode_col(bs) {
             @format.ColStr(arr) => MGlob(arr, pat)
             _ =>
@@ -187,15 +188,14 @@ fn[S : @store.ObjectStore] load_matcher(
 
 ///|
 /// 等值叶子：字典列按 code、bool 位图直查、ts 块级 stats（只读相交块）。
-fn[S : @store.ObjectStore] load_eq_matcher(
+async fn[S : @store.ObjectStore] load_eq_matcher(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   v : FVal,
-) -> RowMatcher raise @core.SpndError {
-  let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
-  let bs = get_object(n.store, col_key)
+) -> RowMatcher {
+  let bs = seg_read_component_or_fail(n, seg_id, cs, "rows/\{field}.bin")
   match v {
     S(s) =>
       if @format.is_dict_col(bs) {
@@ -238,7 +238,6 @@ fn[S : @store.ObjectStore] load_eq_matcher(
               cs.row_count,
               false,
             )
-            let ts_key = "\{n.ns}/_segments/\{seg_id}/rows/ts.bin"
             let mut ok = true
             for b in 0..<blocks.length() {
               let (lo, hi) = blocks[b]
@@ -249,7 +248,7 @@ fn[S : @store.ObjectStore] load_eq_matcher(
                 } else {
                   row_count - start
                 }
-                match n.store.get_range(ts_key, 20 + start * 8, nrows * 8) {
+                match seg_read_component_range(n, seg_id, cs, "rows/ts.bin", 20 + start * 8, nrows * 8) {
                   Some(pbs) =>
                     if pbs.length() >= nrows * 8 {
                       for x in 0..<nrows {
@@ -297,13 +296,13 @@ fn[S : @store.ObjectStore] load_eq_matcher(
 
 ///|
 /// In 叶子：值集合同型校验（兜底）→ 按值类型分派列编码。
-fn[S : @store.ObjectStore] load_in_matcher(
+async fn[S : @store.ObjectStore] load_in_matcher(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   vals : Array[FVal],
-) -> RowMatcher raise @core.SpndError {
+) -> RowMatcher {
   if vals.is_empty() {
     return MOr([]) // 空集合恒 false
   }
@@ -319,8 +318,7 @@ fn[S : @store.ObjectStore] load_in_matcher(
       )
     }
   }
-  let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
-  let bs = get_object(n.store, col_key)
+  let bs = seg_read_component_or_fail(n, seg_id, cs, "rows/\{field}.bin")
   match head {
     B(_) => {
       // bool In：最多两个不同值，展开为 Or(Eq..)（复用位图/普通列等值路径）
@@ -382,16 +380,15 @@ fn[S : @store.ObjectStore] load_in_matcher(
 ///|
 /// 范围叶子：i64 数值比较 / string 字节序字典序。bool 列不支持范围。
 /// ts 走块级 mask：只读与谓词范围相交的块（块内逐行比较）。
-fn[S : @store.ObjectStore] load_cmp_matcher(
+async fn[S : @store.ObjectStore] load_cmp_matcher(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
   field : String,
   op : Int,
   v : FVal,
-) -> RowMatcher raise @core.SpndError {
-  let col_key = "\{n.ns}/_segments/\{seg_id}/rows/\{field}.bin"
-  let bs = get_object(n.store, col_key)
+) -> RowMatcher {
+  let bs = seg_read_component_or_fail(n, seg_id, cs, "rows/\{field}.bin")
   match v {
     B(_) =>
       raise @core.Corrupt(
@@ -405,7 +402,6 @@ fn[S : @store.ObjectStore] load_cmp_matcher(
               cs.row_count,
               false,
             )
-            let ts_key = "\{n.ns}/_segments/\{seg_id}/rows/ts.bin"
             let mut ok = true
             for b in 0..<blocks.length() {
               let (lo, hi) = blocks[b]
@@ -416,7 +412,7 @@ fn[S : @store.ObjectStore] load_cmp_matcher(
                 } else {
                   row_count - start
                 }
-                match n.store.get_range(ts_key, 20 + start * 8, nrows * 8) {
+                match seg_read_component_range(n, seg_id, cs, "rows/ts.bin", 20 + start * 8, nrows * 8) {
                   Some(pbs) =>
                     if pbs.length() >= nrows * 8 {
                       for x in 0..<nrows {
@@ -741,12 +737,57 @@ fn wand_advance_to(
 }
 
 ///|
-/// 单 segment 的 block-max WAND。正确性：全局/块上界都是 BM25 的合法上界
-/// （tf 越大分越高、dl 越小分越高），因此跳过的块不可能进入 top-k。
-fn[S : @store.ObjectStore] bm25_segment_wand(
+/// 批量拉取多个 term 的 posting 局部区间（外层 16 = SPNDPOS1 头）。
+/// SlabV2 段映射到 `fts/postings` 组件内的相对偏移，碎片段读 `fts/postings.bin`；
+/// 两种布局都合并成一次 `get_range_many`（批量预读，不逐 term 发请求）。
+async fn[S : @store.ObjectStore] seg_postings_slices(
   n : Namespace[S],
   seg_id : String,
+  cs : CachedSeg,
   matched : Array[(Int, @format.FtsDirEntry)],
+) -> Array[Bytes] {
+  let out : Array[Bytes] = Array(capacity=matched.length())
+  if matched.is_empty() {
+    return out
+  }
+  let slab = ensure_slab_index(n, cs, seg_id)
+  let entry = match slab {
+    Some(index) => slab_entry_of(index, "fts/postings.bin")
+    None => None
+  }
+  let ranges : Array[(String, Int, Int)] = Array(capacity=matched.length())
+  for m in matched {
+    let e = m.1
+    let off = 16 + e.offset
+    match entry {
+      Some(en) =>
+        ranges.push(
+          (seg_slab_key(n.ns, seg_id), en.offset.to_int() + off, e.size),
+        )
+      None =>
+        ranges.push((seg_legacy_key(n.ns, seg_id, "fts/postings.bin"), off, e.size))
+    }
+  }
+  let results = @store.ObjectStore::get_range_many(n.store, ranges)
+  for i in 0..<matched.length() {
+    let bs = match results[i] {
+      Some(x) => x
+      None =>
+        raise @core.NotFound(
+          "\{n.ns}/_segments/\{seg_id}/fts/postings.bin range",
+        )
+    }
+    out.push(bs)
+  }
+  out
+}
+
+///|
+/// 单 segment 的 block-max WAND。正确性：全局/块上界都是 BM25 的合法上界
+/// （tf 越大分越高、dl 越小分越高），因此跳过的块不可能进入 top-k。
+fn bm25_segment_wand(
+  matched : Array[(Int, @format.FtsDirEntry)],
+  slices : Array[Bytes],
   blk : Array[Array[(Int, Int)]],
   block_size : Int,
   doc_len : Array[Int],
@@ -758,21 +799,9 @@ fn[S : @store.ObjectStore] bm25_segment_wand(
   matcher : RowMatcher?,
 ) -> Array[(Int, Double)] raise @core.SpndError {
   let iters : Array[WandIter] = Array()
-  for m in matched {
+  for mi, m in matched {
     let (di, e) = m
-    let slice = match
-      n.store.get_range(
-        "\{n.ns}/_segments/\{seg_id}/fts/postings.bin",
-        16 + e.offset,
-        e.size,
-      ) {
-      Some(x) => x
-      None =>
-        raise @core.NotFound(
-          "\{n.ns}/_segments/\{seg_id}/fts/postings.bin range",
-        )
-    }
-    let posts = decode_posting_slice(slice)
+    let posts = decode_posting_slice(slices[mi])
     if posts.is_empty() {
       continue
     }
@@ -912,7 +941,7 @@ fn[S : @store.ObjectStore] bm25_segment_wand(
 ///|
 /// 单 segment 的 BM25 候选：返回 (row, score) 降序 top-k。
 /// use_wand=true 且该段有 blockmax.bin 时走 WAND，否则逐 posting 累积。
-fn[S : @store.ObjectStore] bm25_segment(
+async fn[S : @store.ObjectStore] bm25_segment(
   n : Namespace[S],
   seg_idx : Int,
   terms : Array[String],
@@ -922,7 +951,7 @@ fn[S : @store.ObjectStore] bm25_segment(
   k : Int,
   filter : Filter?,
   use_wand : Bool,
-) -> Array[(Int, Double)] raise @core.SpndError {
+) -> Array[(Int, Double)] {
   let seg = n.manifest.segments[seg_idx]
   let cs = ensure_seg(n, seg_idx)
   if !seg_may_match(cs, filter) {
@@ -966,9 +995,8 @@ fn[S : @store.ObjectStore] bm25_segment(
     match seg_blockmax(n, cs, seg.id) {
       Some(blk) =>
         return bm25_segment_wand(
-          n,
-          seg.id,
           matched,
+          seg_postings_slices(n, seg.id, cs, matched),
           blk,
           cs.blockmax_size,
           doc_len,
@@ -983,22 +1011,11 @@ fn[S : @store.ObjectStore] bm25_segment(
     }
   }
   let scores : Map[Int, Double] = Map([])
-  for m in matched {
+  // 只拉命中 term 的局部 posting 区间（一次批量 Range 读，不逐 term 发请求）
+  let slices = seg_postings_slices(n, seg.id, cs, matched)
+  for mi, m in matched {
     let (_, e) = m
-    // 只拉 term 的局部 posting 区间（外层 16 = SPNDPOS1 头）
-    let slice = match
-      n.store.get_range(
-        "\{n.ns}/_segments/\{seg.id}/fts/postings.bin",
-        16 + e.offset,
-        e.size,
-      ) {
-      Some(x) => x
-      None =>
-        raise @core.NotFound(
-          "\{n.ns}/_segments/\{seg.id}/fts/postings.bin range",
-        )
-    }
-    let posts = decode_posting_slice(slice)
+    let posts = decode_posting_slice(slices[mi])
     for p in posts {
       if p.row >= row_count {
         continue
@@ -1037,16 +1054,17 @@ fn[S : @store.ObjectStore] bm25_segment(
 /// BM25 批量预读：段 meta、fts dir.bin、doc_len.bin。
 /// 只对“统计/Bloom 未剪枝且确实命中 term”的段预读，保持原有的早退语义；
 /// 已缓存的对象跳过，不绕过缓存。
-fn[S : @store.ObjectStore] bm25_prewarm_columns(
+async fn[S : @store.ObjectStore] bm25_prewarm_columns(
   n : Namespace[S],
   terms : Array[String],
   filter : Filter?,
-) -> Unit raise @core.SpndError {
+) -> Unit {
   prewarm_seg_metas(n)
   let nseg = n.manifest.segments.length()
   // 1) 批量读取 dir.bin（仅缓存 miss 且未被段统计/ Bloom 剪枝的段）。
+  // SlabV2 段映射到 segment.slab 内的 `fts/dir` 组件，合并进一次 get_range_many。
   let dir_cs : Array[CachedSeg] = Array()
-  let dir_keys : Array[String] = Array()
+  let dir_ids : Array[String] = Array()
   for si in 0..<nseg {
     let seg = n.manifest.segments[si]
     let cs = match n.cache.get(seg.id) {
@@ -1073,12 +1091,18 @@ fn[S : @store.ObjectStore] bm25_prewarm_columns(
       continue
     }
     dir_cs.push(cs)
-    dir_keys.push("\{n.ns}/_segments/\{seg.id}/fts/dir.bin")
+    dir_ids.push(seg.id)
   }
   if !dir_cs.is_empty() {
-    let results = @store.ObjectStore::get_many(n.store, dir_keys)
+    let reqs : Array[(String, CachedSeg, String)] = Array(
+      capacity=dir_cs.length(),
+    )
     for i in 0..<dir_cs.length() {
-      let key = dir_keys[i]
+      reqs.push((dir_ids[i], dir_cs[i], "fts/dir.bin"))
+    }
+    let results = seg_read_components_many(n, reqs)
+    for i in 0..<dir_cs.length() {
+      let key = seg_legacy_key(n.ns, dir_ids[i], "fts/dir.bin")
       let bs = match results[i] {
         Some(b) => b
         None => raise @core.NotFound(key)
@@ -1088,7 +1112,7 @@ fn[S : @store.ObjectStore] bm25_prewarm_columns(
   }
   // 2) 批量读取 doc_len.bin（仅确实有命中 term 且缓存 miss 的段）。
   let dl_cs : Array[CachedSeg] = Array()
-  let dl_keys : Array[String] = Array()
+  let dl_ids : Array[String] = Array()
   for si in 0..<nseg {
     let seg = n.manifest.segments[si]
     let cs = match n.cache.get(seg.id) {
@@ -1113,12 +1137,18 @@ fn[S : @store.ObjectStore] bm25_prewarm_columns(
       continue
     }
     dl_cs.push(cs)
-    dl_keys.push("\{n.ns}/_segments/\{seg.id}/fts/doc_len.bin")
+    dl_ids.push(seg.id)
   }
   if !dl_cs.is_empty() {
-    let results = @store.ObjectStore::get_many(n.store, dl_keys)
+    let reqs : Array[(String, CachedSeg, String)] = Array(
+      capacity=dl_cs.length(),
+    )
     for i in 0..<dl_cs.length() {
-      let key = dl_keys[i]
+      reqs.push((dl_ids[i], dl_cs[i], "fts/doc_len.bin"))
+    }
+    let results = seg_read_components_many(n, reqs)
+    for i in 0..<dl_cs.length() {
+      let key = seg_legacy_key(n.ns, dl_ids[i], "fts/doc_len.bin")
       let bs = match results[i] {
         Some(b) => b
         None => raise @core.NotFound(key)
@@ -1134,13 +1164,13 @@ fn[S : @store.ObjectStore] bm25_prewarm_columns(
 
 ///|
 /// BM25 检索实现（use_wand=false 用于正确性对照测试）。
-fn[S : @store.ObjectStore] bm25_search_impl(
+async fn[S : @store.ObjectStore] bm25_search_impl(
   n : Namespace[S],
   query : String,
   k : Int,
   filter : Filter?,
   use_wand : Bool,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   // 查询侧用 namespace 配置的分词器（与索引侧同一选择，见 init_namespace）。
   let qtok = match n.meta.fts_tokenizer {
     Some(s) =>
@@ -1179,11 +1209,11 @@ fn[S : @store.ObjectStore] bm25_search_impl(
 ///|
 /// BM25 检索：per-segment top-k → 合并 → tombstone → top-k（score 降序）。
 /// 有 blockmax.bin 的段自动走 WAND。
-pub fn[S : @store.ObjectStore] bm25_search(
+pub async fn[S : @store.ObjectStore] bm25_search(
   n : Namespace[S],
   query : String,
   k : Int,
   filter : Filter?,
-) -> Array[QueryResult] raise @core.SpndError {
+) -> Array[QueryResult] {
   bm25_search_impl(n, query, k, filter, true)
 }

@@ -37,7 +37,7 @@ fn make_manifest(mid : String, seg_ids : Array[String]) -> @format.ManifestData 
 // 1. MemRdbCatalog ACID 事务、回滚与 MVCC 快照隔离测试
 // ======================================================================
 
-test "MemRdbCatalog: ACID rollback on write failure" {
+async test "MemRdbCatalog: ACID rollback on write failure" {
   let cat = MemRdbCatalog::new()
   cat.create_namespace(default_namespace_meta("test_ns", head_manifest="mid-01"))
 
@@ -46,8 +46,8 @@ test "MemRdbCatalog: ACID rollback on write failure" {
   assert_eq(ns0.head_manifest, "mid-01")
 
   // 在事务中修改元数据并中途失败，验证自动回滚（原子性）
-  let res : Result[Unit, CatalogError] = try {
-    cat.with_transaction(() => {
+  let res : Result[Unit, Error] = try {
+    cat.with_transaction(async fn() {
       cat.update_head_manifest("test_ns", "mid-02")
       // 故意抛出错误模拟中途失败
       raise CatalogError::TxAborted("simulated write failure mid-transaction")
@@ -63,7 +63,7 @@ test "MemRdbCatalog: ACID rollback on write failure" {
   assert_eq(ns1.head_manifest, "mid-01")
 }
 
-test "MemRdbCatalog: MVCC snapshot isolation across transaction versions" {
+async test "MemRdbCatalog: MVCC snapshot isolation across transaction versions" {
   let cat = MemRdbCatalog::new()
   cat.create_namespace(default_namespace_meta("mvcc_ns", head_manifest="v1"))
 
@@ -87,7 +87,7 @@ test "MemRdbCatalog: MVCC snapshot isolation across transaction versions" {
 // 2. 分布式 Fencing 与租约管理测试（MemRdbCatalog & S3CasCatalog）
 // ======================================================================
 
-test "MemRdbCatalog: Distributed Fencing lease expiration and token mismatch" {
+async test "MemRdbCatalog: Distributed Fencing lease expiration and token mismatch" {
   let cat = MemRdbCatalog::new()
   cat.create_namespace(default_namespace_meta("fenced_ns", head_manifest="mid-01"))
   cat.set_mock_time(Some(1000UL))
@@ -117,7 +117,7 @@ test "MemRdbCatalog: Distributed Fencing lease expiration and token mismatch" {
   assert_eq(tok2.epoch, 2UL)
 
   // 6. Worker 1（拿着过期的旧 epoch 1 令牌）尝试提交 head manifest，被 FencingTokenMismatch 拒绝
-  let stale_commit : Result[Unit, CatalogError] = try {
+  let stale_commit : Result[Unit, Error] = try {
     cat.update_head_manifest("fenced_ns", "mid-stale", lease_token=tok1)
     Ok(())
   } catch {
@@ -136,7 +136,7 @@ test "MemRdbCatalog: Distributed Fencing lease expiration and token mismatch" {
   assert_eq(tok3 is Some(_), true)
 }
 
-test "S3CasCatalog: Distributed Fencing lease expiration and fencing on S3 CAS" {
+async test "S3CasCatalog: Distributed Fencing lease expiration and fencing on S3 CAS" {
   let store = @store.MemStore::new()
   let cat = S3CasCatalog::new(store)
   cat.create_namespace(default_namespace_meta("s3_fenced", head_manifest="mid-init"))
@@ -160,7 +160,7 @@ test "S3CasCatalog: Distributed Fencing lease expiration and fencing on S3 CAS" 
   assert_eq(tok2.epoch, 2UL)
 
   // 旧 Worker 1 提交被拦截
-  let res_stale : Result[Unit, CatalogError] = try {
+  let res_stale : Result[Unit, Error] = try {
     cat.update_head_manifest("s3_fenced", "mid-02", lease_token=tok1)
     Ok(())
   } catch {
@@ -178,7 +178,7 @@ test "S3CasCatalog: Distributed Fencing lease expiration and fencing on S3 CAS" 
 // 3. Lineage & Snapshot DAG 测试
 // ======================================================================
 
-test "MetadataCatalog: Lineage and Snapshot DAG traversal" {
+async test "MetadataCatalog: Lineage and Snapshot DAG traversal" {
   let cat = MemRdbCatalog::new()
   cat.create_namespace(default_namespace_meta("main", head_manifest="m-main-1"))
   cat.create_namespace(default_namespace_meta("feature_branch", head_manifest="m-feat-1"))
@@ -200,7 +200,7 @@ test "MetadataCatalog: Lineage and Snapshot DAG traversal" {
   assert_eq(cat.resolve_snapshot("main", "non_existent"), None)
 }
 
-test "S3CasCatalog: Lineage and Snapshot DAG in pure S3" {
+async test "S3CasCatalog: Lineage and Snapshot DAG in pure S3" {
   let store = @store.MemStore::new()
   let cat = S3CasCatalog::new(store)
   cat.create_namespace(default_namespace_meta("s3_root", head_manifest="m-root"))
@@ -218,7 +218,7 @@ test "S3CasCatalog: Lineage and Snapshot DAG in pure S3" {
 // 4. GC Safety Active Reference Tracking 测试
 // ======================================================================
 
-test "MemRdbCatalog: GC Reference Safety across head, snapshots, lineage and grace period" {
+async test "MemRdbCatalog: GC Reference Safety across head, snapshots, lineage and grace period" {
   let cat = MemRdbCatalog::new()
   cat.set_mock_time(Some(1000UL))
 
@@ -259,7 +259,7 @@ test "MemRdbCatalog: GC Reference Safety across head, snapshots, lineage and gra
   assert_eq(unref_late.contains("seg-root-snap"), false)
 }
 
-test "S3CasCatalog: GC Reference Safety and grace period on ObjectStore" {
+async test "S3CasCatalog: GC Reference Safety and grace period on ObjectStore" {
   let store = @store.MemStore::new()
   let cat = S3CasCatalog::new(store)
   cat.set_mock_time(Some(1000UL))
@@ -295,7 +295,7 @@ test "S3CasCatalog: GC Reference Safety and grace period on ObjectStore" {
 // 5. S3 CAS 原子更新与双写防悬挂指针一致性测试 (Safety 2 & 3)
 // ======================================================================
 
-test "S3CasCatalog: Dual-Write Crash Consistency (Safety 2 - No Dangling Pointer)" {
+async test "S3CasCatalog: Dual-Write Crash Consistency (Safety 2 - No Dangling Pointer)" {
   let store = @store.MemStore::new()
   let cat = S3CasCatalog::new(store)
   cat.create_namespace(default_namespace_meta("crash_ns", head_manifest="m0"))
@@ -306,7 +306,7 @@ test "S3CasCatalog: Dual-Write Crash Consistency (Safety 2 - No Dangling Pointer
   cat.register_manifest("crash_ns", make_manifest("m-broken", ["seg-missing"]))
 
   // 尝试提交 m-broken：目录必须拦截并报错 NotFound（防止悬挂指针破坏一致性）
-  let res : Result[Unit, CatalogError] = try {
+  let res : Result[Unit, Error] = try {
     cat.update_head_manifest("crash_ns", "m-broken")
     Ok(())
   } catch {
@@ -322,7 +322,7 @@ test "S3CasCatalog: Dual-Write Crash Consistency (Safety 2 - No Dangling Pointer
   assert_eq(ns.head_manifest, "m-broken")
 }
 
-test "S3CasCatalog: CAS conflict detection on expected_head" {
+async test "S3CasCatalog: CAS conflict detection on expected_head" {
   let store = @store.MemStore::new()
   let cat = S3CasCatalog::new(store)
   cat.create_namespace(default_namespace_meta("cas_ns", head_manifest="m1"))
@@ -330,7 +330,7 @@ test "S3CasCatalog: CAS conflict detection on expected_head" {
   cat.register_manifest("cas_ns", make_manifest("m2", []))
 
   // 预期版本与当前版本不匹配 -> CommitConflict
-  let conflict : Result[Unit, CatalogError] = try {
+  let conflict : Result[Unit, Error] = try {
     cat.update_head_manifest("cas_ns", "m2", expected_head="m_wrong")
     Ok(())
   } catch {

@@ -7,3 +7,16 @@ import {
   "turbofish/format",
   "turbofish/query",
 }
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"
+
+options(
+  targets: {
+    "catalog_wbtest.mbt": [ "native", "llvm" ],
+    "control_wbtest.mbt": [ "native", "llvm" ],
+    "scatter_wbtest.mbt": [ "native", "llvm" ],
+  },
+)

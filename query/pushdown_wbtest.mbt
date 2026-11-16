@@ -7,7 +7,7 @@
 // 4. Integration into vector search candidate pruning (zero-match pruning, heavy filter pruning, tombstone pruning).
 
 ///|
-test "pushdown bitset: basic bit operations and popcount" {
+async test "pushdown bitset: basic bit operations and popcount" {
   let bs = BitSet::new(130)
   assert_eq(bs.count(), 0)
   assert_eq(bs.is_empty(), true)
@@ -39,7 +39,7 @@ test "pushdown bitset: basic bit operations and popcount" {
 }
 
 ///|
-test "pushdown bitset: all_set, not_inplace, and mask_last_word" {
+async test "pushdown bitset: all_set, not_inplace, and mask_last_word" {
   let bs = BitSet::all_set(70)
   assert_eq(bs.count(), 70)
   for i in 0..<70 {
@@ -60,7 +60,7 @@ test "pushdown bitset: all_set, not_inplace, and mask_last_word" {
 }
 
 ///|
-test "pushdown bitset: and_inplace and or_inplace" {
+async test "pushdown bitset: and_inplace and or_inplace" {
   let a = BitSet::new(100)
   let b = BitSet::new(100)
 
@@ -86,7 +86,7 @@ test "pushdown bitset: and_inplace and or_inplace" {
 }
 
 ///|
-test "pushdown filter: columnar Eq and Neq evaluation" {
+async test "pushdown filter: columnar Eq and Neq evaluation" {
   let n = open(make_test_store([]), "test")
   let cs0 = ensure_seg(n, 0) // seg-01A (4 docs: 1, 2, 3, 4)
   // seg-01A data:
@@ -127,7 +127,7 @@ test "pushdown filter: columnar Eq and Neq evaluation" {
 }
 
 ///|
-test "pushdown filter: columnar In and NotIn evaluation" {
+async test "pushdown filter: columnar In and NotIn evaluation" {
   let n = open(make_test_store([]), "test")
   let cs0 = ensure_seg(n, 0)
 
@@ -173,7 +173,7 @@ test "pushdown filter: columnar In and NotIn evaluation" {
 }
 
 ///|
-test "pushdown filter: columnar range comparison (Lt, Lte, Gt, Gte)" {
+async test "pushdown filter: columnar range comparison (Lt, Lte, Gt, Gte)" {
   let n = open(make_test_store([]), "test")
   let cs0 = ensure_seg(n, 0)
 
@@ -201,7 +201,7 @@ test "pushdown filter: columnar range comparison (Lt, Lte, Gt, Gte)" {
 }
 
 ///|
-test "pushdown filter: columnar Glob evaluation" {
+async test "pushdown filter: columnar Glob evaluation" {
   let n = open(make_test_store([]), "test")
   let cs0 = ensure_seg(n, 0)
   // text: "the quick brown fox", "the lazy dog sleeps", "fox and fox run", "猫追狗"
@@ -219,7 +219,7 @@ test "pushdown filter: columnar Glob evaluation" {
 }
 
 ///|
-test "pushdown filter: complex nested filters (And, Or, Not)" {
+async test "pushdown filter: complex nested filters (And, Or, Not)" {
   let n = open(make_test_store([]), "test")
   let cs0 = ensure_seg(n, 0)
 
@@ -253,7 +253,7 @@ test "pushdown filter: complex nested filters (And, Or, Not)" {
 }
 
 ///|
-test "pushdown filter: global eval_pushdown_filter with selectivity and tombstones" {
+async test "pushdown filter: global eval_pushdown_filter with selectivity and tombstones" {
   // Store with doc 1 deleted
   let s = make_test_store([1UL])
   let n = open(s, "test")
@@ -277,7 +277,7 @@ test "pushdown filter: global eval_pushdown_filter with selectivity and tombston
 }
 
 ///|
-test "pushdown filter: vector candidate pruning and zero-match short circuit" {
+async test "pushdown filter: vector candidate pruning and zero-match short circuit" {
   let s = make_test_store([])
   let n = open(s, "test")
   let qv : Array[Float] = [10.0, 0.0]
@@ -325,7 +325,7 @@ test "pushdown filter: vector candidate pruning and zero-match short circuit" {
 }
 
 ///|
-test "pushdown filter: count_docs and matching_ids use pushdown" {
+async test "pushdown filter: count_docs and matching_ids use pushdown" {
   let s = make_test_store([])
   let n = open(s, "test")
 

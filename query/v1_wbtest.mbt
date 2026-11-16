@@ -10,7 +10,7 @@
 
 ///|
 /// euclidean 度量的同构 fixture（仅 namespace.json 的 distance_metric 不同）。
-fn make_test_store_euclid() -> @store.MemStore {
+async fn make_test_store_euclid() -> @store.MemStore {
   let s = make_test_store([])
   let meta : @format.NamespaceMeta = {
     format: "seekpond/v1",
@@ -33,7 +33,7 @@ fn make_test_store_euclid() -> @store.MemStore {
 }
 
 ///|
-test "v1 filter tree: And/Or/Not/Neq/In/NotIn/range on bm25" {
+async test "v1 filter tree: And/Or/Not/Neq/In/NotIn/range on bm25" {
   let n = open(make_test_store([]), "test")
   // "the" 命中 {1,2,5}
   // And(Eq(category,a), Gte(ts,500)) → 5
@@ -97,7 +97,7 @@ test "v1 filter tree: And/Or/Not/Neq/In/NotIn/range on bm25" {
 }
 
 ///|
-test "v1 count_docs: unfiltered / filtered / tombstoned" {
+async test "v1 count_docs: unfiltered / filtered / tombstoned" {
   let n = open(make_test_store([]), "test")
   assert_eq(count_docs(n, None), 6)
   assert_eq(count_docs(n, Some(Eq("category", S("a")))), 3) // 1, 3, 5
@@ -117,7 +117,7 @@ test "v1 count_docs: unfiltered / filtered / tombstoned" {
 }
 
 ///|
-test "v1 seg_may_match: tree pruning" {
+async test "v1 seg_may_match: tree pruning" {
   let j = @utf8.encode(
     (
       #|{"id":"s","row_count":10,"min_id":1,"max_id":10,"partitions":[0],
@@ -152,6 +152,9 @@ test "v1 seg_may_match: tree pruning" {
     vec_info: None,
     block_stats: None,
     block_stats_tried: false,
+    slab_index: None,
+    slab_tried: false,
+    seg_seq: -1,
     matchers: Map([]),
     vec_parts: Map([]),
   }
@@ -194,7 +197,7 @@ test "v1 seg_may_match: tree pruning" {
 }
 
 ///|
-test "v1 matcher: set / cmp / composition semantics" {
+async test "v1 matcher: set / cmp / composition semantics" {
   // MDictSet：codes [0,1,0]，目标 {1}
   let md : RowMatcher = MDictSet(
     [(0).to_uint16(), (1).to_uint16(), (0).to_uint16()],
@@ -232,7 +235,7 @@ test "v1 matcher: set / cmp / composition semantics" {
 }
 
 ///|
-test "v1 hybrid opts: weights degenerate to single list; rrf compat" {
+async test "v1 hybrid opts: weights degenerate to single list; rrf compat" {
   let n = open(make_test_store([]), "test")
   let qv : Array[Float] = [10.0, 0.0]
   let bm = bm25_search(n, "the", 3, None) // {1,2,5}
@@ -302,7 +305,7 @@ test "v1 hybrid opts: weights degenerate to single list; rrf compat" {
 }
 
 ///|
-test "v1 euclidean metric: scoring and brute-force parity" {
+async test "v1 euclidean metric: scoring and brute-force parity" {
   let n = open(make_test_store_euclid(), "test")
   let qv : Array[Float] = [10.0, 0.0]
   let rs = vec_search(n, qv, 10, 2, None)
@@ -321,7 +324,7 @@ test "v1 euclidean metric: scoring and brute-force parity" {
 
 ///|
 /// glob_match 单元测试：* / ? / 边界 / 混合。
-test "v1 glob_match unit" {
+async test "v1 glob_match unit" {
   // 精确匹配（无通配符）
   assert_eq(glob_match("hello", "hello"), true)
   assert_eq(glob_match("hello", "world"), false)
@@ -358,7 +361,7 @@ test "v1 glob_match unit" {
 
 ///|
 /// Glob 过滤在 bm25_search 和 count_docs 路径均工作。
-test "v1 Glob filter: basic wildcard matching" {
+async test "v1 Glob filter: basic wildcard matching" {
   let n = open(make_test_store([]), "test")
   // category 字段：a a b a c c（id 顺序 1~6）
   // Glob(category, "a") 精确 → ids {1,3,5}
@@ -390,7 +393,7 @@ test "v1 Glob filter: basic wildcard matching" {
 
 ///|
 /// Glob 匹配 text 字段（非 dict 列）。
-test "v1 Glob filter: text field wildcards" {
+async test "v1 Glob filter: text field wildcards" {
   let n = open(make_test_store([]), "test")
   // text "the quick brown fox" - Glob 匹配 "the*fox"
   // 通过 count_docs 验证：满足 Glob(text, "the*fox") 的文档
@@ -415,7 +418,7 @@ test "v1 Glob filter: text field wildcards" {
 
 ///|
 /// Glob 与 tombstone 配合：被删文档不出现在 count/matching_ids 结果中。
-test "v1 Glob filter: tombstone exclusion" {
+async test "v1 Glob filter: tombstone exclusion" {
   // id1 被删除
   let nt = open(make_test_store([1UL]), "test")
   // 未删时 Glob(category, "a") count = 3（id1,3,5）；删 id1 后 = 2
@@ -428,7 +431,7 @@ test "v1 Glob filter: tombstone exclusion" {
 
 ///|
 /// Glob 组合：And/Or 嵌套。
-test "v1 Glob filter: composition with And/Or" {
+async test "v1 Glob filter: composition with And/Or" {
   let n = open(make_test_store([]), "test")
   // And(Glob(category,a*), Gte(ts,300)) → category=a 且 ts>=300 → id3(ts300), id5(ts500)
   let cnt_and = count_docs(
@@ -451,7 +454,7 @@ test "v1 Glob filter: composition with And/Or" {
 
 ///|
 /// sum_field: ts 字段求和。
-test "v1 sum_field: ts sum without filter" {
+async test "v1 sum_field: ts sum without filter" {
   let n = open(make_test_store([]), "test")
   // ts = [100,200,300,400,500,600]，和 = 2100
   let s = sum_field(n, "ts", None)
@@ -460,7 +463,7 @@ test "v1 sum_field: ts sum without filter" {
 
 ///|
 /// sum_field: 带 filter 求和。
-test "v1 sum_field: ts sum with filter" {
+async test "v1 sum_field: ts sum with filter" {
   let n = open(make_test_store([]), "test")
   // category=a → id1(ts100), id3(ts300), id5(ts500) → 900
   let s_a = sum_field(n, "ts", Some(Eq("category", S("a"))))
@@ -489,7 +492,7 @@ test "v1 sum_field: ts sum with filter" {
 
 ///|
 /// sum_field: tombstone 被排除。
-test "v1 sum_field: tombstone excluded" {
+async test "v1 sum_field: tombstone excluded" {
   // 删除 id1(ts=100) 和 id4(ts=400)
   let nt = open(make_test_store([1UL, 4UL]), "test")
   // 全部存活 sum = 2100 - 100 - 400 = 1600
@@ -503,7 +506,7 @@ test "v1 sum_field: tombstone excluded" {
 
 ///|
 /// sum_field: 空结果集返回 0。
-test "v1 sum_field: empty result" {
+async test "v1 sum_field: empty result" {
   let n = open(make_test_store([]), "test")
   // 不存在的 category → sum = 0
   let s = sum_field(n, "ts", Some(Eq("category", S("zzz"))))
@@ -512,7 +515,7 @@ test "v1 sum_field: empty result" {
 
 ///|
 /// matching_ids: 基本行为。
-test "v1 matching_ids: basic" {
+async test "v1 matching_ids: basic" {
   let n = open(make_test_store([]), "test")
   // Eq(category, a) → {1,3,5}
   let ids_a = matching_ids(n, Eq("category", S("a")))
@@ -537,7 +540,7 @@ test "v1 matching_ids: basic" {
 
 ///|
 /// matching_ids: 组合过滤器。
-test "v1 matching_ids: compound filters" {
+async test "v1 matching_ids: compound filters" {
   let n = open(make_test_store([]), "test")
   // And(Eq(category,a), Gt(ts,200)) → id3(ts300), id5(ts500)
   let ids_and = matching_ids(
@@ -571,7 +574,7 @@ test "v1 matching_ids: compound filters" {
 
 ///|
 /// matching_ids: tombstone 排除。
-test "v1 matching_ids: tombstone excluded" {
+async test "v1 matching_ids: tombstone excluded" {
   // 删除 id3
   let nt = open(make_test_store([3UL]), "test")
   let ids = matching_ids(nt, Eq("category", S("a")))
@@ -582,7 +585,7 @@ test "v1 matching_ids: tombstone excluded" {
 
 ///|
 /// matching_ids: 空过滤结果。
-test "v1 matching_ids: empty result" {
+async test "v1 matching_ids: empty result" {
   let n = open(make_test_store([]), "test")
   // 不存在的值
   let ids = matching_ids(n, Eq("category", S("zzz")))
@@ -595,7 +598,7 @@ test "v1 matching_ids: empty result" {
 
 ///|
 /// seg_may_match 对 Glob 保守返回 true（不跳过段）。
-test "v1 seg_may_match: Glob is conservative (never prunes)" {
+async test "v1 seg_may_match: Glob is conservative (never prunes)" {
   let j = @utf8.encode(
     (
       #|{"id":"s","row_count":10,"min_id":1,"max_id":10,"partitions":[0],
@@ -630,6 +633,9 @@ test "v1 seg_may_match: Glob is conservative (never prunes)" {
     vec_info: None,
     block_stats: None,
     block_stats_tried: false,
+    slab_index: None,
+    slab_tried: false,
+    seg_seq: -1,
     matchers: Map([]),
     vec_parts: Map([]),
   }

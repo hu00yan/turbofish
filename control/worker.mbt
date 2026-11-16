@@ -171,14 +171,14 @@ pub fn[S] QueryWorker::new(
 
 ///|
 /// Worker 执行单次向量查询请求（结合 5 分钟热缓存）。
-pub fn[S : @store.ObjectStore] QueryWorker::execute_vector_query(
+pub async fn[S : @store.ObjectStore] QueryWorker::execute_vector_query(
   self : QueryWorker[S],
   n : @query.Namespace[S],
   qv : Array[Float],
   top_k : Int,
   nprobe : Int,
   filter : @query.Filter?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let ver = match n.manifest.vec_global_version {
     Some(v) => v
     None =>
@@ -211,20 +211,20 @@ pub fn[S : @store.ObjectStore] QueryWorker::execute_vector_query(
 
 ///|
 /// Worker 执行单次 BM25 全文检索。
-pub fn[S : @store.ObjectStore] QueryWorker::execute_bm25_query(
+pub async fn[S : @store.ObjectStore] QueryWorker::execute_bm25_query(
   self : QueryWorker[S],
   n : @query.Namespace[S],
   text : String,
   top_k : Int,
   filter : @query.Filter?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let _ = self
   @query.bm25_search(n, text, top_k, filter)
 }
 
 ///|
 /// Worker 执行单次混合检索请求（结合 5 分钟向量热缓存）。
-pub fn[S : @store.ObjectStore] QueryWorker::execute_hybrid_query(
+pub async fn[S : @store.ObjectStore] QueryWorker::execute_hybrid_query(
   self : QueryWorker[S],
   n : @query.Namespace[S],
   text : String,
@@ -233,7 +233,7 @@ pub fn[S : @store.ObjectStore] QueryWorker::execute_hybrid_query(
   nprobe : Int,
   filter : @query.Filter?,
   opts : @query.HybridOpts?,
-) -> Array[@query.QueryResult] raise @core.SpndError {
+) -> Array[@query.QueryResult] {
   let ver_opt = match n.manifest.vec_global_version {
     Some(v) => Some(v)
     None => n.meta.vec_global_version

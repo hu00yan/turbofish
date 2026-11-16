@@ -110,10 +110,10 @@ pub fn[S] ControlPlane::is_authoritative(
 /// （`{ns}/_head_ptr`，见 @store.head_pointer_key），指针仍指向当前快照
 /// 就续期复用，否则才全量 re-open。旧 store（无指针对象）回退全量 open。
 /// open 失败时按 stale_ok + 旧快照决定返回旧快照或 rethrow。
-pub fn[S : @store.ObjectStore] ControlPlane::acquire(
+pub async fn[S : @store.ObjectStore] ControlPlane::acquire(
   self : ControlPlane[S],
   ns : String,
-) -> @query.Namespace[S] raise @core.SpndError {
+) -> @query.Namespace[S] {
   let now = @env.now()
   let entry : CtrlEntry[S]? = self.entries.get(ns)
   match entry {
@@ -155,7 +155,7 @@ pub fn[S : @store.ObjectStore] ControlPlane::acquire(
   }
   self.misses += 1
   self.reloads += 1
-  let opened : Result[@query.Namespace[S], @core.SpndError] = try {
+  let opened : Result[@query.Namespace[S], Error] = try {
     Ok(@query.open(self.store, ns))
   } catch {
     err => Err(err)

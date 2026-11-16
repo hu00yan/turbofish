@@ -1,0 +1,12 @@
+// threadpool：纯 C pthread worker pool + MoonBit FFI，供 S3/本地 IO 的工作线程复用。
+// 硬边界：worker 线程只执行 C job（void(*)(void*)），绝不回调 MoonBit 闭包或
+// 持有 MoonBit 对象（native 运行时堆对象不可跨线程）。
+// 非 native 后端提供同签名桩；测试依赖真实线程/pipe，仅在 native/llvm 编译。
+options(
+  targets: {
+    "tp_native.mbt": [ "native", "llvm" ],
+    "tp_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+    "tp_test.mbt": [ "native", "llvm" ],
+  },
+  "native-stub": [ "tp.c" ],
+)

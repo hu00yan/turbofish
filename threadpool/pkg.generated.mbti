@@ -1,0 +1,30 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "turbofish/threadpool"
+
+// Values
+pub fn tf_tp_completion_fd(TfThreadPool) -> Int32
+
+pub fn tf_tp_create(Int32, Int32) -> TfThreadPool
+
+pub fn tf_tp_destroy(TfThreadPool) -> Unit
+
+pub fn tf_tp_drain(TfThreadPool) -> Int32
+
+pub fn tf_tp_pending(TfThreadPool) -> Int32
+
+pub fn tf_tp_shutdown(TfThreadPool) -> Unit
+
+pub fn tf_tp_submit_nop(TfThreadPool, Int32) -> Int32
+
+pub fn tf_tp_wait_drain(TfThreadPool, Int32) -> Int32
+
+// Errors
+
+// Types and methods
+pub enum TfThreadPool {
+  Stub
+}
+
+// Type aliases
+
+// Traits

@@ -30,7 +30,7 @@ pub(all) struct BuildConfig {
   write_blockmax : Bool // 写 fts/blockmax.bin（WAND 块跳过）
   normalize_vecs : Bool // 写入前把向量 L2 归一化（IVF 扫描 cosine→dot）
   write_block_stats : Bool // 写 rows/blockstats.bin（256 行 ts min/max）
-  global_vec_parts : Bool // 写 namespace 级全局 IVF 分区（跨 segment 合并）
+  global_vec_parts : Bool // 已废弃， Step 2 删： Step 1 起 slab 写路径（build_segment_slab / ingest_l0_slab / compact_optimistic）无条件走段内分区、忽略本开关；仅 legacy ingest / ingest_delta / compact_global 仍按它写全局代际链（旧数据兼容）
   write_fts_bloom : Bool // seg meta 内嵌 FTS term Bloom（跳过不可能命中的段）
   global_pack_size : Int // 全局分区分包：>1 时相邻 cid 打包成 pack-{i}.bin（1 = 每 cid 一对象）
   fts_tokenizer : @core.Tokenizer // 全文分词器（默认 Word = 旧行为；CJK 命名空间选 smartcn/kuromoji/nori）
@@ -125,12 +125,14 @@ pub fn BuildConfig::with_block_stats(
 }
 
 ///|
-/// 函数式更新：是否写 namespace 级全局 IVF 分区（消除 nprobe×段数放大）。
+/// 【已废弃， Step 2 删】namespace 级全局代际链已停写（ Step 1：向量回段内
+/// `vec/part-*` 分区）；本开关自 Step 1 起被写路径忽略，调用本函数不改变行为。
+/// 旧数据的全局读路径保留到 Step 2。
 pub fn BuildConfig::with_global_vec_parts(
   self : BuildConfig,
-  v : Bool,
+  _v : Bool,
 ) -> BuildConfig {
-  { ..self, global_vec_parts: v }
+  self
 }
 
 ///|
@@ -170,8 +172,9 @@ pub fn BuildConfig::with_distance_metric(
 }
 
 ///|
-/// 单副本推荐配置：全局 IVF（向量只存一份）+ 写入归一化（IVF 扫描 dot）+
-/// FTS Bloom。适合新 namespace；旧 namespace 可继续用 default 兼容布局。
+/// 单副本推荐配置：写入归一化（IVF 扫描 dot）+ FTS Bloom。
+/// `global_vec_parts` 已废弃（ Step 1 起 slab 写路径忽略，向量恒存段内分区）。
+/// 适合新 namespace；旧 namespace 可继续用 default 兼容布局。
 pub fn BuildConfig::single_copy(ns : String) -> BuildConfig {
   {
     ..BuildConfig::default(ns),

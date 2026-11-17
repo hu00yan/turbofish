@@ -438,11 +438,13 @@ priv struct BatchStat {
   puts : Int
   latency_ms : Double
   storage_bytes : Int
+  seg_count : Int
+  centroid_version : String
 }
 
 ///|
 fn batch_row(b : BatchStat) -> String {
-  "\{pad_left(b.batch.to_string(), 6)}\{pad_left(b.docs.to_string(), 8)}\{pad_left(mb(b.put_bytes), 14)}\{pad_left(b.puts.to_string(), 8)}\{pad_left(fmt(b.latency_ms, 1), 14)}\{pad_left(mb(b.storage_bytes), 16)}"
+  "\{pad_left(b.batch.to_string(), 6)}\{pad_left(b.docs.to_string(), 8)}\{pad_left(mb(b.put_bytes), 14)}\{pad_left(b.puts.to_string(), 8)}\{pad_left(fmt(b.latency_ms, 1), 14)}\{pad_left(mb(b.storage_bytes), 16)}\{pad_left(b.seg_count.to_string(), 6)} \{pad(b.centroid_version, 26)}"
 }
 
 ///|
@@ -699,6 +701,33 @@ async fn manifest_line(store : CountingStore, ns : String) -> String {
     None => "global_gen=None (single full base)"
   }
   "head=\{head} segments=\{m.segments.length()} num_docs=\{m.num_docs} \{gen} vec_global_version=\{vg}"
+}
+
+///|
+/// 逐批 manifest 观测：(manifest.segments.length(), manifest.centroid_version)。
+/// 任何一步不可用返回 (-1, "<n/a>")，不抛错（只作统计，不参与计量）。
+async fn batch_manifest_info(
+  store : CountingStore,
+  ns : String,
+) -> (Int, String) {
+  let (head, _newer) = @store.read_head_state(store, ns, "")
+  if head == "" {
+    return (-1, "<n/a>")
+  }
+  let body = match store.get("\{ns}/_manifest/\{head}.json") {
+    Some(bs) =>
+      @utf8.decode(bs.exact_view()) catch {
+        _ => return (-1, "<n/a>")
+      }
+    None => return (-1, "<n/a>")
+  }
+  let j = @json.parse(body) catch {
+    _ => return (-1, "<n/a>")
+  }
+  let m = @format.manifest_from_json(j) catch {
+    _ => return (-1, "<n/a>")
+  }
+  (m.segments.length(), m.centroid_version)
 }
 
 ///|
@@ -1078,6 +1107,9 @@ async fn run() -> Unit {
     let snap = store.inner.cost()
     let put_bytes = store.put_bytes
     let batch_us = snap.total_latency_us
+    // 逐批 manifest 观测（段数 / centroid_version，供后续步骤断言）。只读且
+    // 放在计量快照之后：不计入本批 puts/延迟，下一批开头的 reset 清掉这批 GET。
+    let (seg_count, centroid_version) = batch_manifest_info(store, ns)
     stats.push({
       batch: stats.length() + 1,
       docs: take,
@@ -1085,6 +1117,8 @@ async fn run() -> Unit {
       puts: snap.puts,
       latency_ms: batch_us / 1000.0,
       storage_bytes: snap.storage_bytes,
+      seg_count,
+      centroid_version,
     })
     put_bytes_total += put_bytes
     puts_total += snap.puts
@@ -1133,7 +1167,9 @@ async fn run() -> Unit {
     pad_left("put MB", 14) +
     pad_left("puts", 8) +
     pad_left("virt ms", 14) +
-    pad_left("storage MB", 16),
+    pad_left("storage MB", 16) +
+    pad_left("segs", 6) +
+    pad(" centroid_version", 26),
   )
   let nb = stats.length()
   for i in 0..<nb {

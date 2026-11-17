@@ -114,7 +114,7 @@ fn one_doc(
 }
 
 ///|
-/// 段内是否没有 `vector` 组件（全局 IVF 单副本模式）。
+/// 段内没有扁平 `vector` 组件（Step 1 起向量只存 `vec/part-*` 分区）。
 async fn store_has_no_vector_component(
   store : @store.MemStore,
   ns : String,
@@ -291,7 +291,62 @@ async test "l0 slab: delete-only batch updates roaring tombstone" {
 }
 
 ///|
-async test "l0 slab: global vec chain survives ingest and optimistic compact" {
+/// 段内向量不变式（Step 1）：扁平 `vector` 组件不存在；`vec/part-*` 每行恰
+/// 出现一次（Σ|part rows| == seg.row_count）；slab 的 meta.partitions 与写出
+/// 的 `vec/part-*` cid 集合一致。
+async fn assert_seg_vec_parts(
+  store : @store.MemStore,
+  ns : String,
+  seg : @format.SegmentMeta,
+) -> Unit {
+  assert_eq(store_has_no_vector_component(store, ns, seg), true)
+  let index = read_slab_index(store, ns, seg.id, seg.size_bytes)
+  let seen : Array[Bool] = Array(capacity=seg.row_count)
+  for _ in 0..<seg.row_count {
+    seen.push(false)
+  }
+  let part_names : Array[String] = Array()
+  for e in index.entries {
+    if !e.name.has_prefix("vec/part-") {
+      continue
+    }
+    part_names.push(e.name)
+    let bs = read_slab_component_by_name(store, ns, seg.id, index, e.name)
+    let rows = if @format.is_pq_shared_part(bs) {
+      @format.decode_pq_part_shared(bs).rows
+    } else if @format.is_pq_part(bs) {
+      @format.decode_pq_part(bs).rows
+    } else {
+      @format.decode_part(bs).rows
+    }
+    for r in rows {
+      assert_eq(r >= 0 && r < seg.row_count, true)
+      assert_eq(seen[r], false) // 每行恰在一个 part 里
+      seen[r] = true
+    }
+  }
+  let mut total = 0
+  for b in seen {
+    if b {
+      total += 1
+    }
+  }
+  assert_eq(total, seg.row_count) // Σ|part rows| == seg.row_count
+  part_names.sort()
+  let meta_names : Array[String] = Array()
+  for c in seg_partitions(store, "\{ns}/_segments/\{seg.id}") {
+    meta_names.push("vec/part-\{c}")
+  }
+  meta_names.sort()
+  assert_eq(part_names, meta_names) // meta.partitions 与写出的 vec/part-* 一致
+}
+
+///|
+/// Step 1 行为（全局代际链停写、向量回段内分区）：manifest 恒为
+/// vec_global_version=None / global_gen=None；每段向量恒在 `vec/part-*` 里，
+/// 每行恰出现一次（Σ|part rows| == seg.row_count），meta.partitions 与写出的
+/// part 一致；compact_optimistic 合并段同语义，列回读一致。
+async test "l0 slab: 向量随段内 vec/part-* 写入，manifest 无全局代际链" {
   let mem = @store.MemStore::new()
   let cfg = {
     ..BuildConfig::single_copy("l0g"),
@@ -304,39 +359,27 @@ async test "l0 slab: global vec chain survives ingest and optimistic compact" {
   let _ = ingest_l0_slab(mem, cfg, mkdocs(4, 8, 100UL, 32U), [])
   let m2 = head_manifest_of(mem, "l0g")
   assert_eq(m2.segments.length(), 2)
-  assert_eq(m2.vec_global_version is Some(_), true)
-  assert_eq(m2.global_gen is Some(_), true)
-  // slab 段不含向量列（向量只在 global part 里）
-  assert_eq(
-    is_l0_slab_segment(m2.segments[0].id) &&
-    store_has_no_vector_component(mem, "l0g", m2.segments[0]),
-    true,
-  )
-  let (gv2, dim2) = load_global_vec_rows(mem, "l0g", m2)
-  assert_eq(dim2, 8)
-  assert_eq(gv2.get(0).unwrap().length(), 4 * 8)
-  assert_eq(gv2.get(1).unwrap().length(), 4 * 8)
-  // 乐观 compaction：合并成 1 段 + 1 个全量新 base
+  // 全局代际链已停写：恒为 None（Step 1 语义）
+  assert_eq(m2.vec_global_version is None, true)
+  assert_eq(m2.global_gen is None, true)
+  for seg in m2.segments {
+    assert_eq(is_l0_slab_segment(seg.id), true)
+    assert_seg_vec_parts(mem, "l0g", seg)
+  }
+  // 乐观 compaction：合并段同样只写段内分区
   let cid = compact_optimistic(mem, cfg)
   assert_eq(cid is Some(_), true)
   let m3 = head_manifest_of(mem, "l0g")
   assert_eq(m3.segments.length(), 1)
   assert_eq(m3.segments[0].row_count, 8)
   assert_eq(m3.global_gen is None, true)
-  assert_eq(m3.vec_global_version, Some(m3.id))
-  let (gv3, dim3) = load_global_vec_rows(mem, "l0g", m3)
-  assert_eq(dim3, 8)
-  assert_eq(gv3.get(0).unwrap().length(), 8 * 8)
-  // 合并段的行都能从 global base 取回（列仍然可读）
-  let docs = load_segment_docs(
-    mem,
-    "l0g",
-    m3.segments[0],
-    gv3.get(0),
-    dim3,
-  )
+  assert_eq(m3.vec_global_version is None, true)
+  assert_seg_vec_parts(mem, "l0g", m3.segments[0])
+  // 合并段列回读一致（向量从 vec/part-* 重组）
+  let docs = load_segment_docs(mem, "l0g", m3.segments[0], None, 8)
   assert_eq(docs.length(), 8)
   assert_eq(docs[0].id, 1UL)
+  assert_eq(docs[7].id, 103UL)
 }
 
 ///|

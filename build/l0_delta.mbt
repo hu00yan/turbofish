@@ -92,9 +92,93 @@ pub async fn[S : @store.ObjectStore] segment_is_slab(
 }
 
 ///|
+/// 从 slab 的 `vec/part-{c}` 分区重组向量列（Step 1 起 slab 不写扁平 `"vector"`）。
+/// 每行恰在一个 part 里，按 rows 下标散布回行主序；PQ 共享码本分区用
+/// `vec/pq-codebook` 重建（码本中心近似）。返回 (dim, rows×dim)。
+async fn[S : @store.ObjectStore] rebuild_vec_from_parts(
+  store : S,
+  ns : String,
+  seg_id : String,
+  index : @format.SlabIndex,
+  n : Int,
+) -> (Int, Array[Float]) {
+  let mut vdim = 0
+  let flat : Array[Float] = Array(capacity=n)
+  for e in index.entries {
+    if !e.name.has_prefix("vec/part-") {
+      continue
+    }
+    let bs = read_slab_component_by_name(store, ns, seg_id, index, e.name)
+    let (rows, data, d) = if @format.is_pq_shared_part(bs) {
+      let pq = @format.decode_pq_part_shared(bs)
+      let (m, dsub, _, cbs) = match index.get("vec/pq-codebook") {
+        Some(_) =>
+          @format.decode_pq_codebook(
+            read_slab_component_by_name(
+              store, ns, seg_id, index, "vec/pq-codebook",
+            ),
+          )
+        None => raise @core.NotFound("\{segment_slab_key(ns, seg_id)} vec/pq-codebook")
+      }
+      if m != pq.m || dsub != pq.dsub {
+        raise @core.Corrupt("pq codebook mismatch in \{seg_id}")
+      }
+      let data : Array[Float] = Array(capacity=pq.rows.length() * pq.dim)
+      for i in 0..<pq.rows.length() {
+        for c in 0..<pq.m {
+          let code = pq.codes[i * pq.m + c].reinterpret_as_int()
+          for l in 0..<pq.dsub {
+            data.push(cbs[(c * 256 + code) * pq.dsub + l])
+          }
+        }
+      }
+      (pq.rows, data, pq.dim)
+    } else if @format.is_pq_part(bs) {
+      let pq = @format.decode_pq_part(bs)
+      let data : Array[Float] = Array(capacity=pq.rows.length() * pq.dim)
+      for i in 0..<pq.rows.length() {
+        for c in 0..<pq.m {
+          let code = pq.codes[i * pq.m + c].reinterpret_as_int()
+          for l in 0..<pq.dsub {
+            data.push(pq.codebooks[(c * 256 + code) * pq.dsub + l])
+          }
+        }
+      }
+      (pq.rows, data, pq.dim)
+    } else {
+      let part = @format.decode_part(bs)
+      (part.rows, part.data, part.dim)
+    }
+    if vdim == 0 {
+      vdim = d
+      for _ in 0..<(n * vdim) {
+        flat.push(0.0)
+      }
+    }
+    if d != vdim {
+      raise @core.Corrupt("part dim mismatch in \{seg_id}")
+    }
+    for i in 0..<rows.length() {
+      let r = rows[i]
+      if r < 0 || r >= n {
+        raise @core.Corrupt("part row \{r} out of range in \{seg_id}")
+      }
+      for dd in 0..<vdim {
+        flat[r * vdim + dd] = data[i * vdim + dd]
+      }
+    }
+  }
+  if vdim == 0 {
+    raise @core.Corrupt("slab segment has no vector components: \{seg_id}")
+  }
+  (vdim, flat)
+}
+
+///|
 /// 读 SlabV2 单文件段的六列并重建 Doc 数组（顺序 = 段内行号）。
-/// `preloaded` 非空时（全局 IVF 单副本模式）向量来自 global part，slab 内没有
-/// `vector` 组件。
+/// `preloaded` 非空时（旧全局 IVF 单副本数据）向量来自 global part；否则优先读
+/// 扁平 `vector` 组件（旧数据），没有则从 `vec/part-{c}` 分区重组
+///（Step 1 起 slab 恒写分区、不写扁平 `vector`）。
 async fn[S : @store.ObjectStore] load_slab_docs(
   store : S,
   ns : String,
@@ -131,10 +215,7 @@ async fn[S : @store.ObjectStore] load_slab_docs(
     None =>
       match index.get("vector") {
         Some(_) => @format.decode_vec_col(cell("vector"))
-        None =>
-          raise @core.Corrupt(
-            "slab segment has no vector component: \{seg.id}",
-          )
+        None => rebuild_vec_from_parts(store, ns, seg.id, index, ids.length())
       }
   }
   let n = ids.length()
@@ -268,10 +349,12 @@ async fn[S : @store.ObjectStore] write_global_base_from_segs(
 /// 首次调用会初始化 namespace（namespace.json + schema.json）并训练/写入
 /// centroids；之后复用头 manifest 钉住的 centroid_version。
 ///
-/// 全局 IVF（`global_vec_parts && VF16`）：段本身不存向量（与 `write_segment`
-/// 同语义），本批向量写成一个 **delta 代**（不重写 base，同 `ingest_delta`）；
-/// 非 global 配置下 manifest 的 global 字段清空（与 `ingest` 一致），向量随
-/// slab 段自带。
+/// 全局 IVF：**已停写**（Step 1 行为切换，向量恒随段内 `vec/part-*` 走）。
+/// `ingest_l0_slab` 与 `compact_optimistic` 的 manifest 恒为
+/// `vec_global_version = None` / `global_gen = None`；下面保留的代际链逻辑与
+/// `write_global_delta_parts` / `rebuild_global_vec_parts` / 
+/// `write_global_base_from_segs` 调用全部不执行（旧数据读路径仍兼容），
+/// 等 Step 2 与 `build/globalvec.mbt` 一起删除。
 pub async fn[S : @store.ObjectStore] ingest_l0_slab(
   store : S,
   cfg : BuildConfig,
@@ -381,7 +464,9 @@ pub async fn[S : @store.ObjectStore] ingest_l0_slab(
   } else {
     0.0
   }
-  let want_global = cfg.global_vec_parts && cfg.vec_storage == VF16
+  // 全局代际链已停写（Step 1）：恒 false，manifest 的 vec_global_version /
+  // global_gen 恒为 None，写路径不再产生全局代际链。
+  let want_global = false
   let mut vec_global_version : String? = None
   let mut global_gen : @format.GlobalGen? = None
   let mut full_base = false
@@ -625,7 +710,7 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
     Some(s) => s.id
     None => ""
   }
-  let want_global = cfg.global_vec_parts && cfg.vec_storage == VF16
+  let want_global = false // 全局代际链已停写（Step 1）：同 ingest_l0_slab。
   let mut last_tomb : (Array[UInt64], String)? = None
   let mut tries = 0
   let mut result : String? = None
@@ -700,11 +785,8 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
       segments: next_segs,
       deleted: deleted_next,
       deleted_roar,
-      vec_global_version: if want_global {
-        Some(new_id)
-      } else {
-        None
-      },
+      // 全局代际链已停写（Step 1）：恒为 None。
+      vec_global_version: None,
       global_gen: None,
       centroid_version: m_curr.centroid_version,
       num_docs: total_rows,

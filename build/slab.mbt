@@ -215,7 +215,6 @@ pub fn build_segment_slab(
 ) -> (Bytes, Bytes, @format.SegmentMeta) {
   let n = end - start
   let dim = docs[start].vector.length()
-  let use_global = cfg.global_vec_parts && cfg.vec_storage == VF16
 
   let ids : Array[UInt64] = Array(capacity=n)
   let texts : Array[String] = Array(capacity=n)
@@ -300,20 +299,7 @@ pub fn build_segment_slab(
   }
   components.push(@format.SlabComponentPayload::new("public", bs_pub, n))
 
-  // 6. Vector column (if not global)
-  if !use_global {
-    let bs_vec = match cfg.vec_storage {
-      VF16 => @format.encode_vec_col(dim, enc_flat, cfg.use_f16)
-      VSq8 => {
-        let (mins, scales) = @format.sq8_params_of(dim, enc_flat)
-        @format.encode_vec_col_sq8(dim, enc_flat, mins, scales)
-      }
-      VPq16 => @format.encode_vec_col(dim, enc_flat, cfg.use_f16)
-    }
-    components.push(@format.SlabComponentPayload::new("vector", bs_vec, n))
-  }
-
-  // 7. FTS components
+  // 6. FTS components
   let lists : Array[(String, Array[@format.Posting])] = Array()
   for kv in term_map.iter() {
     lists.push((kv.0, kv.1))
@@ -339,7 +325,7 @@ pub fn build_segment_slab(
   let bs_dlen = @format.encode_col(@format.ColU32(doc_len))
   components.push(@format.SlabComponentPayload::new("fts/doc_len", bs_dlen, n))
 
-  // 8. Optional block stats & blockmax
+  // 7. Optional block stats & blockmax
   if cfg.write_block_stats {
     let bs_bst = build_blockstats(tss, 256)
     components.push(
@@ -353,86 +339,86 @@ pub fn build_segment_slab(
     )
   }
 
-  // 9. Vector partitions (if not global)
+  // 8. Vector partitions：按 namespace 级冻结 centroids 分区，恒写
+  // `vec/part-{c}`，每行恰在一个 part 里（Σ|part rows| == n）；不再写扁平
+  // `"vector"` 组件，也不再有 namespace 级全局代际链（Step 1 行为切换）。
   let partitions : Array[Json] = Array()
-  if !use_global {
-    let k = cent.k()
-    let adim = if cent.dim > 0 { cent.dim } else { dim }
-    let part_rows : Array[Array[Int]] = Array(capacity=k)
-    for _ in 0..<k {
-      part_rows.push(Array())
-    }
-    if k > 0 {
-      for r in 0..<n {
-        let v = docs[start + r].vector
-        let mut best = 0
-        let mut best_d = @core.cosine_dist_f32(v, 0, cent.data, 0, adim)
-        for c in 1..<k {
-          let d = @core.cosine_dist_f32(v, 0, cent.data, c * adim, adim)
-          if d < best_d {
-            best_d = d
-            best = c
-          }
-        }
-        part_rows[best].push(r)
-      }
-    }
-    let (sq8_mins, sq8_scales) = if cfg.vec_storage == VSq8 {
-      @format.sq8_params_of(dim, enc_flat)
-    } else {
-      ([], [])
-    }
-    let pq_m = if cfg.vec_storage == VPq16 { pq_m_for(dim) } else { 0 }
-    let (pq_codebooks, pq_codes) = if cfg.vec_storage == VPq16 {
-      train_pq(dim, enc_flat)
-    } else {
-      ([], [])
-    }
-    if cfg.vec_storage == VPq16 {
-      let bs_cb = @format.encode_pq_codebook(dim, pq_m, pq_codebooks)
-      components.push(
-        @format.SlabComponentPayload::new("vec/pq-codebook", bs_cb, pq_m),
-      )
-    }
-    for c in 0..<k {
-      let rows = part_rows[c]
-      if rows.length() == 0 {
-        continue
-      }
-      let data : Array[Float] = Array(capacity=rows.length() * dim)
-      for r in rows {
-        for d in 0..<dim {
-          data.push(enc_flat[r * dim + d])
+  let k = cent.k()
+  let adim = if cent.dim > 0 { cent.dim } else { dim }
+  let part_rows : Array[Array[Int]] = Array(capacity=k)
+  for _ in 0..<k {
+    part_rows.push(Array())
+  }
+  if k > 0 {
+    for r in 0..<n {
+      let v = docs[start + r].vector
+      let mut best = 0
+      let mut best_d = @core.cosine_dist_f32(v, 0, cent.data, 0, adim)
+      for c in 1..<k {
+        let d = @core.cosine_dist_f32(v, 0, cent.data, c * adim, adim)
+        if d < best_d {
+          best_d = d
+          best = c
         }
       }
-      let bs_part = match cfg.vec_storage {
-        VF16 => @format.encode_part({ cid: c, rows, dim, data }, cfg.use_f16)
-        VSq8 =>
-          @format.encode_part_sq8(
-            { cid: c, rows, dim, data },
-            sq8_mins,
-            sq8_scales,
-          )
-        VPq16 => {
-          let part_codes : Array[UInt] = Array(
-            capacity=rows.length() * pq_m,
-          )
-          for r in rows {
-            for s in 0..<pq_m {
-              part_codes.push(pq_codes[r * pq_m + s])
-            }
-          }
-          @format.encode_pq_part_shared(rows, dim, pq_m, part_codes)
-        }
-      }
-      components.push(
-        @format.SlabComponentPayload::new("vec/part-\{c}", bs_part, rows.length()),
-      )
-      partitions.push(Json::number(c.to_double()))
+      part_rows[best].push(r)
     }
   }
+  let (sq8_mins, sq8_scales) = if cfg.vec_storage == VSq8 {
+    @format.sq8_params_of(dim, enc_flat)
+  } else {
+    ([], [])
+  }
+  let pq_m = if cfg.vec_storage == VPq16 { pq_m_for(dim) } else { 0 }
+  let (pq_codebooks, pq_codes) = if cfg.vec_storage == VPq16 {
+    train_pq(dim, enc_flat)
+  } else {
+    ([], [])
+  }
+  if cfg.vec_storage == VPq16 {
+    let bs_cb = @format.encode_pq_codebook(dim, pq_m, pq_codebooks)
+    components.push(
+      @format.SlabComponentPayload::new("vec/pq-codebook", bs_cb, pq_m),
+    )
+  }
+  for c in 0..<k {
+    let rows = part_rows[c]
+    if rows.length() == 0 {
+      continue
+    }
+    let data : Array[Float] = Array(capacity=rows.length() * dim)
+    for r in rows {
+      for d in 0..<dim {
+        data.push(enc_flat[r * dim + d])
+      }
+    }
+    let bs_part = match cfg.vec_storage {
+      VF16 => @format.encode_part({ cid: c, rows, dim, data }, cfg.use_f16)
+      VSq8 =>
+        @format.encode_part_sq8(
+          { cid: c, rows, dim, data },
+          sq8_mins,
+          sq8_scales,
+        )
+      VPq16 => {
+        let part_codes : Array[UInt] = Array(
+          capacity=rows.length() * pq_m,
+        )
+        for r in rows {
+          for s in 0..<pq_m {
+            part_codes.push(pq_codes[r * pq_m + s])
+          }
+        }
+        @format.encode_pq_part_shared(rows, dim, pq_m, part_codes)
+      }
+    }
+    components.push(
+      @format.SlabComponentPayload::new("vec/part-\{c}", bs_part, rows.length()),
+    )
+    partitions.push(Json::number(c.to_double()))
+  }
 
-  // 10. Meta JSON
+  // 9. Meta JSON
   let mj : Map[String, Json] = Map([])
   mj.set("id", Json::string(seg_id))
   mj.set("row_count", Json::number(n.to_double()))

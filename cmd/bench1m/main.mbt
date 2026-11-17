@@ -41,7 +41,8 @@
 //   BENCH_NPROBE=8         （vec_search 的 nprobe；默认 8）
 //   BENCH_FANOUT=3         （size-tiered 同档合并 fanout，仅测量透传；默认
 //                            @build.SEGMENT_TIER_FANOUT=3，不改产品默认值）
-//   BENCH_RECALL=0|1       （1 = 查询表之后追加 recall@10 vs nprobe 实验）
+//   BENCH_RECALL=0|1       （1 = 查询表之后追加 recall@10 vs nprobe 实验；
+//                           表含「探测比例 nprobe/nlist」与「每查询实测 KB/q」两列）
 //   BENCH_NCLUSTERS=16     （聚簇向量的中心数；默认 16）
 //   BENCH_NOISE=0.08       （每维均匀噪声半径；默认 0.08）
 //   BENCH_NLIST=64         （IVF nlist；1M 实测建议 256/1024）
@@ -242,6 +243,87 @@ fn merge_totals(rows : Array[MergeStat]) -> (Int, Int, Double) {
 priv struct CountingStore {
   inner : @simstore.SimStore
   mut put_bytes : Int
+  reads : Array[ReadEvent]
+}
+
+///|
+/// 读事件（仅测量输出用）：key + 区间起点（off = -1 表示整对象 get）+
+/// 其中计进 bytes_s3_read 的字节（NVMe/常驻命中为 0）。
+/// KB/q 分解按事件事后归因，不影响读路径本身。
+priv struct ReadEvent {
+  key : String
+  off : Int
+  s3 : Int
+}
+
+///|
+/// KB/q 分解桶（纯归因，不改读路径）：
+/// 0=probe 分区（vec/part-* 组件与 vec/global part|pack）；1=id 列（rows/id）；
+/// 2=中心表（_centroids/）；3=slab 索引（segment.slab 的 header/index 预读）；
+/// 4=meta（json/manifest/head 指针）；5=other。
+const BRK_PROBE : Int = 0
+const BRK_IDCOL : Int = 1
+const BRK_CENT : Int = 2
+const BRK_SLABIDX : Int = 3
+const BRK_META : Int = 4
+const BRK_OTHER : Int = 5
+const BRK_COUNT : Int = 6
+
+///|
+fn str_has(s : String, sub : String) -> Bool {
+  s.find(sub) is Some(_)
+}
+
+///|
+/// 读事件归因到分解桶。segment.slab 的区间读按区间起点命中 SlabEntry 组件名
+/// 归类（组件精确 Range GET 与 entry 起点对齐）；命中不了的区间是 header/index
+/// 预读 ⇒ slab 索引桶。其余按 key 语义分类。仅测量用。
+fn attribute_read(
+  ev : ReadEvent,
+  slab_map : Map[String, Array[(Int, Int, String)]],
+) -> Int {
+  let key = ev.key
+  if key.has_suffix(".slab") {
+    let mut bucket = BRK_SLABIDX
+    match slab_map.get(key) {
+      Some(entries) =>
+        for e in entries {
+          let (off, len, name) = e
+          if ev.off >= off && ev.off < off + len {
+            if name.has_prefix("vec/part") ||
+              name == "vector" ||
+              name == "rows/vector.bin" {
+              bucket = BRK_PROBE
+            } else if name == "id" || name == "rows/id.bin" {
+              bucket = BRK_IDCOL
+            } else if name == "meta" || name == "meta.json" {
+              bucket = BRK_META
+            } else {
+              bucket = BRK_OTHER
+            }
+          }
+        }
+      None => ()
+    }
+    return bucket
+  }
+  if str_has(key, "/_centroids/") {
+    return BRK_CENT
+  }
+  if str_has(key, "/vec/global/") {
+    return if key.has_suffix(".json") { BRK_META } else { BRK_PROBE }
+  }
+  if str_has(key, "vec/part-") {
+    return BRK_PROBE
+  }
+  if str_has(key, "rows/id") {
+    return BRK_IDCOL
+  }
+  if key.has_suffix(".json") || str_has(key, "/_meta/") ||
+    str_has(key, "/_manifest/") || str_has(key, "/_head") {
+    return BRK_META
+  }
+  BRK_OTHER
 }
 
 ///|
@@ -249,6 +331,7 @@ fn CountingStore::new(seed : UInt) -> CountingStore {
   {
     inner: @simstore.SimStore::new(@simstore.SimConfig::aws_default(seed)),
     put_bytes: 0,
+    reads: Array(),
   }
 }
 
@@ -262,7 +345,10 @@ impl @store.ObjectStore for CountingStore with fn get(
   self : CountingStore,
   key : String,
 ) -> Bytes? {
+  let b0 = self.inner.cost().bytes_s3_read
   let r = self.inner.get(key)
+  let s3 = (self.inner.cost().bytes_s3_read - b0).to_int()
+  self.reads.push({ key, off: -1, s3 })
   r
 }
 
@@ -300,7 +386,10 @@ impl @store.ObjectStore for CountingStore with fn get_range(
 ) -> Bytes? {
   let offset = br.off
   let len = br.len
+  let b0 = self.inner.cost().bytes_s3_read
   let r = self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
+  let s3 = (self.inner.cost().bytes_s3_read - b0).to_int()
+  self.reads.push({ key, off: offset, s3 })
   r
 }
 
@@ -539,6 +628,8 @@ priv struct Cell {
   bill_per_1m : Double
   tpu_per_1m : Double
   errors : Double
+  ev0 : Int
+  ev1 : Int
 }
 
 ///|
@@ -639,6 +730,8 @@ async fn measure(
     }
   }
   store.inner.reset_cost()
+  // 本档测量的读事件区间（burn-in 不计入；归因在 slab 组件表建好后回填）。
+  let ev_mark = store.reads.length()
   let lat : Array[Double] = Array(capacity=n)
   let gets : Array[Int] = Array(capacity=n)
   let lists : Array[Int] = Array(capacity=n)
@@ -695,6 +788,8 @@ async fn measure(
     bill_per_1m: c.bill_requests_total / n.to_double() * 1.0e6,
     tpu_per_1m: tpu / n.to_double() * 1.0e6,
     errors: errs.to_double() / n.to_double(),
+    ev0: ev_mark,
+    ev1: store.reads.length(),
   }
 }
 
@@ -960,8 +1055,37 @@ priv struct BuildSummary {
 }
 
 ///|
-/// 召回实验的 nprobe 扫描点：基础 [1,2,3,4,8,16]，nlist≥256 时补 [24,32,48,64]，
-/// 去掉 > nlist 的点，并保证包含 BENCH_NPROBE。
+/// 等探测比例黄金锚点：旧黄金基线 nprobe=3/nlist=64 的探测比例 3/64 ≈ 0.047。
+/// ANN 召回只随探测比例（nprobe/nlist）变，字节/查询 = 比例 × N × 行字节
+/// （必然随 N 线性）；跨规模对齐只看等比例行。
+const RECALL_RATIO_ANCHOR : Double = 0.047
+
+///|
+fn recall_ratio_anchor(nlist : Int) -> Int {
+  let a = (RECALL_RATIO_ANCHOR * nlist.to_double() + 0.5).to_int()
+  if a < 1 {
+    1
+  } else if a > nlist {
+    nlist
+  } else {
+    a
+  }
+}
+
+///|
+fn arr_has(arr : Array[Int], v : Int) -> Bool {
+  for x in arr {
+    if x == v {
+      return true
+    }
+  }
+  false
+}
+
+///|
+/// 召回实验的 nprobe 扫描点：基础 [1,2,3,4,8,16]，nlist≥64 时补 [24,32,48,64]，
+/// 去掉 > nlist 的点，并保证包含 BENCH_NPROBE 与等比例锚点
+/// round(RECALL_RATIO_ANCHOR × nlist)。
 fn recall_probe_list(nprobe_cfg : Int, nlist : Int) -> Array[Int] {
   let raw : Array[Int] = [1, 2, 3, 4, 8, 16]
   if nlist >= 64 {
@@ -972,18 +1096,14 @@ fn recall_probe_list(nprobe_cfg : Int, nlist : Int) -> Array[Int] {
       }
     }
   }
-  if nprobe_cfg <= nlist {
-    let mut has = false
-    for p in raw {
-      if p == nprobe_cfg {
-        has = true
-      }
-    }
-    if !has {
-      raw.push(nprobe_cfg)
-    }
+  if nprobe_cfg <= nlist && !arr_has(raw, nprobe_cfg) {
+    raw.push(nprobe_cfg)
   }
-  // nprobe > nlist 无意义；升序输出（同值只出现一次：raw 元素互不相同）。
+  let anchor = recall_ratio_anchor(nlist)
+  if anchor <= nlist && !arr_has(raw, anchor) {
+    raw.push(anchor)
+  }
+  // nprobe > nlist 无意义；升序输出（同值只出现一次）。
   let out : Array[Int] = []
   for p in raw {
     if p <= nlist {
@@ -997,16 +1117,25 @@ fn recall_probe_list(nprobe_cfg : Int, nlist : Int) -> Array[Int] {
 ///|
 priv struct RecallRow {
   nprobe : Int
+  ratio : Double
   recall : Double
   hits : Int
   total : Int
-  getq_est : Double
+  kb_q : Double
+  getq : Double
   measured : Bool
 }
 
 ///|
-fn recall_row(r : RecallRow) -> String {
-  "\{pad_left(r.nprobe.to_string(), 7)}\{pad_left(fmt(r.recall, 4), 12)}\{pad_left("\{r.hits}/\{r.total}", 10)}\{pad_left(fmt(r.getq_est, 2), 12)}\{if r.measured { "  (BENCH_NPROBE, 实测 cold GET/q)" } else { "" }}"
+fn recall_row(r : RecallRow, anchor : Int) -> String {
+  let mut mark = ""
+  if r.measured {
+    mark = mark + "  (BENCH_NPROBE, 实测 cold)"
+  }
+  if r.nprobe == anchor {
+    mark = mark + "  ←等比例锚点 0.047"
+  }
+  "\{pad_left(r.nprobe.to_string(), 7)}\{pad_left(fmt(r.ratio, 4), 10)}\{pad_left(fmt(r.recall, 4), 12)}\{pad_left("\{r.hits}/\{r.total}", 10)}\{pad_left(fmt(r.kb_q, 1), 10)}\{pad_left(fmt(r.getq, 2), 10)}\{mark}"
 }
 
 ///|
@@ -1079,15 +1208,17 @@ fn exact_top10(
 /// - ground truth：BENCH_EXACT_GT=1 ⇒ 全量暴搜余弦 top-10；否则 nprobe=nlist
 ///   （= 扫全部 list 的索引结果）近似。
 /// - recall@10：逐 query 的 |top10 ∩ gt_top10| / 10，再按 query 平均。
-/// - 预计 GET/q：cold vec 实测 GET/q = C（nprobe=BENCH_NPROBE），
-///   扣掉 N 个 part GET 得常数项 const=C-N，再按 const+nprobe 近似；仅近似值。
+/// - KB/q / GET/q：**实测**（非估算）：逐 query cold 重放（关 resident + 清
+///   NVMe/区间缓存）`open + vec_search`，差分 bytes_s3_read / s3_gets；与查询表
+///   cold-metadata 档同口径（KB/q = bytes_s3_read/1024）。
+/// - 探测比例 = nprobe/nlist：召回只随探测比例变；跨规模对比只看等比例行
+///   （锚点 RECALL_RATIO_ANCHOR = 旧黄金基线 3/64 ≈ 0.047）。
 async fn run_recall(
   store : CountingStore,
   ns : String,
   vec_qvs : Array[Array[Float]],
   nq : Int,
   nprobe_cfg : Int,
-  cold_getq : Double,
   nlist : Int,
   exact_gt : Bool,
   gt_ids : Array[UInt64],
@@ -1121,34 +1252,41 @@ async fn run_recall(
       gts.push(s)
     }
   }
-  let mut const_get = cold_getq - nprobe_cfg.to_double()
-  if const_get < 0.0 {
-    const_get = 0.0
-  }
-  // 候选查询与 GT 共享同一个 Namespace 快照（exact 模式下 GT 不走索引，
-  // 但候选仍走索引，因此这里统一 open）。
-  let n = @query.open(store, ns)
+  // 逐探测点 cold 实测：每 query 独立 open + 查询（与 cold-metadata 档同口径）。
+  // resident 关闭 + 每查询前 cold()（清 NVMe/区间缓存）⇒ KB/q 不含缓存命中。
+  store.inner.set_resident_enabled(false)
   let rows : Array[RecallRow] = Array(capacity=probes.length())
   for np in probes {
     let mut hits = 0
+    let mut s3 = 0
+    let mut gets = 0
     for i in 0..<nq {
+      store.inner.cold()
+      let c0 = store.inner.cost()
+      let n = @query.open(store, ns)
       for r in @query.vec_search(n, vec_qvs[i], 10, np, None) {
         if gts[i].contains(r.id) {
           hits += 1
         }
       }
+      let c1 = store.inner.cost()
+      s3 += (c1.bytes_s3_read - c0.bytes_s3_read).to_int()
+      gets += c1.s3_gets - c0.s3_gets
     }
     rows.push({
       nprobe: np,
+      ratio: np.to_double() / nlist.to_double(),
       recall: hits.to_double() / (nq * 10).to_double(),
       hits,
       total: nq * 10,
-      getq_est: const_get + np.to_double(),
+      kb_q: s3.to_double() / nq.to_double() / 1024.0,
+      getq: gets.to_double() / nq.to_double(),
       measured: np == nprobe_cfg,
     })
   }
+  store.inner.set_resident_enabled(true)
   println("")
-  println("== recall@10 vs nprobe (BENCH_RECALL=1) ==")
+  println("== recall@10 vs nprobe/探测比例 (BENCH_RECALL=1) ==")
   if exact_gt {
     println(
       "samples=\{nq} vec queries（batch0 测量集，非 burn-in）；ground truth = 全量 \{gt_ids.length()} docs 暴力余弦 top-10（独立精确，非索引近似）；recall@10 = |交集|/10 逐 query 平均",
@@ -1164,13 +1302,352 @@ async fn run_recall(
     )
   }
   println(
-    "cold vec 实测 GET/q=\{fmt(cold_getq, 2)} @ nprobe=\{nprobe_cfg} ⇒ 近似 GET/q ≈ const(\{fmt(const_get, 2)}) + nprobe（const 为 metadata/其他 GET，按实测反推，非精确值）",
+    "  口径:每行逐 query cold 重放（关 resident + 清 NVMe/区间）@ open+vec_search；KB/q = bytes_s3_read/1024、GET/q = s3_gets（实测非估算）；探测比例 = nprobe/nlist（召回只随探测比例变，等 nprobe 跨规模对比无意义）",
   )
+  let anchor = recall_ratio_anchor(nlist)
   println(
-    "  \{pad_left("nprobe", 7)}\{pad_left("recall@10", 12)}\{pad_left("hits", 10)}\{pad_left("预计GET/q", 12)}",
+    "  \{pad_left("nprobe", 7)}\{pad_left("探测比例", 10)}\{pad_left("recall@10", 12)}\{pad_left("hits", 10)}\{pad_left("KB/q", 10)}\{pad_left("GET/q", 10)}备注",
   )
   for r in rows {
-    println(recall_row(r))
+    println(recall_row(r, anchor))
+  }
+  for r in rows {
+    if r.nprobe == anchor {
+      println(
+        "等探测比例锚点 \{fmt(RECALL_RATIO_ANCHOR, 3)}（= 3/64 旧黄金基线比例）@ nprobe=\{anchor}/\{nlist}（ratio=\{fmt(r.ratio, 4)}）: recall@10=\{fmt(r.recall, 4)} KB/q=\{fmt(r.kb_q, 1)} GET/q=\{fmt(r.getq, 2)}",
+      )
+    }
+  }
+}
+
+///|
+/// 查询档位 KB/q 分解：按 ReadEvent 事后归因（s3 口径 = bytes_s3_read，与
+/// KB/q 列同源）；warm 档缓存命中计 0 字节，故各行合计 ≈ KB/q 列。
+fn print_breakdown(
+  cells : Array[Cell],
+  reads : Array[ReadEvent],
+  slab_map : Map[String, Array[(Int, Int, String)]],
+) -> Unit {
+  println(
+    "== KB/q 分解（每查询读取字节逐项归因，s3 口径；probe=vec/part-*+global part|pack，idcol=rows/id 列，cent=_centroids/ 中心表，slabidx=segment.slab header/index 预读，meta=json/manifest/head）==",
+  )
+  println(
+    "  \{pad("class", 6)}\{pad("tier", 19)}\{pad("probe", 10)}\{pad("idcol", 10)}\{pad("cent", 10)}\{pad("slabidx", 10)}\{pad("meta", 10)}\{pad("other", 10)}\{pad("合计", 10)}KB/q列(校验)",
+  )
+  for c in cells {
+    let buckets : Array[Double] = Array()
+    for _ in 0..<BRK_COUNT {
+      buckets.push(0.0)
+    }
+    for i in c.ev0..<c.ev1 {
+      let ev = reads[i]
+      let b = attribute_read(ev, slab_map)
+      buckets[b] = buckets[b] + ev.s3.to_double() / 1024.0 / c.n.to_double()
+    }
+    let mut total = 0.0
+    for v in buckets {
+      total += v
+    }
+    println(
+      "  \{pad(c.cls, 6)}\{pad(c.tier, 19)}\{pad(fmt(buckets[BRK_PROBE], 1), 10)}\{pad(fmt(buckets[BRK_IDCOL], 1), 10)}\{pad(fmt(buckets[BRK_CENT], 1), 10)}\{pad(fmt(buckets[BRK_SLABIDX], 1), 10)}\{pad(fmt(buckets[BRK_META], 1), 10)}\{pad(fmt(buckets[BRK_OTHER], 1), 10)}\{pad(fmt(total, 1), 10)}\{fmt(c.kb_s3, 1)}",
+    )
+  }
+}
+
+///|
+/// id 列解码（SPNDCOL1 u64 列，20B 头 + u64 LE payload）。
+fn decode_id_col(bs : Bytes) -> Array[UInt64] raise @core.SpndError {
+  match @format.decode_col(bs) {
+    @format.ColU64(a) => a
+    _ => raise @core.Corrupt("id column is not u64")
+  }
+}
+
+///|
+/// 解析非负十进制整数（从组件名 "vec/part-{cid}" 提取 cid）；非法返回 None。
+fn parse_uint(s : String) -> Int? {
+  if s.length() == 0 {
+    return None
+  }
+  let mut n = 0
+  for ch in s.iter() {
+    let c = ch.to_int()
+    if c < 48 || c > 57 {
+      return None
+    }
+    n = n * 10 + (c - 48)
+  }
+  Some(n)
+}
+
+///|
+/// vec/part-* 组件的行数（PQ/sq8/f16/f32 一律按 rows 数）。
+fn part_row_count(bs : Bytes) -> Int {
+  if @format.is_pq_shared_part(bs) {
+    try {
+      @format.decode_pq_part_shared(bs).rows.length()
+    } catch {
+      _ => 0
+    }
+  } else if @format.is_pq_part(bs) {
+    try {
+      @format.decode_pq_part(bs).rows.length()
+    } catch {
+      _ => 0
+    }
+  } else {
+    try {
+      @format.decode_part(bs).rows.length()
+    } catch {
+      _ => 0
+    }
+  }
+}
+
+///|
+/// 拉取并解码某段的 SlabIndex（与 query/ 的 load_slab_index 同款探测：先 4K
+/// 头预读，index 在尾部时补读 64K；仅测量用，不改读路径）。
+async fn slab_index_of(
+  store : CountingStore,
+  key : String,
+) -> @format.SlabIndex? {
+  let hdr = match store.get_range(key, @store.ByteRange::{ off: 0, len: 4096 }) {
+    Some(b) => b
+    None => return None
+  }
+  let io = try {
+    let (_v, o) = @format.decode_slab_header(hdr)
+    o.to_int()
+  } catch {
+    _ => return None
+  }
+  if io < 0 {
+    return None
+  }
+  if io < hdr.length() {
+    let idx = try {
+      Some(@format.decode_slab_index(hdr, io))
+    } catch {
+      _ => None
+    }
+    if idx is Some(_) {
+      return idx
+    }
+  }
+  let tail = match store.get_range(key, @store.ByteRange::{ off: io, len: 65536 }) {
+    Some(b) => b
+    None => return None
+  }
+  try {
+    Some(@format.decode_slab_index(tail, 0))
+  } catch {
+    _ => None
+  }
+}
+
+///|
+/// manifest 活段 id 集合。只认活段：grace 期内未回收的 superseded 段仍在桶里，
+/// 计进来会让组件行数/簇规模重复翻倍。
+async fn live_seg_ids(store : CountingStore, ns : String) -> Set[String] {
+  let out : Set[String] = Set([])
+  let (head, _newver) = @store.read_head_state(store, ns, "")
+  if head == "" {
+    return out
+  }
+  let body = match store.get("\{ns}/_manifest/\{head}.json") {
+    Some(bs) => bs
+    None => return out
+  }
+  let text = @utf8.decode(body.exact_view()) catch {
+    _ => return out
+  }
+  let j = @json.parse(text) catch {
+    _ => return out
+  }
+  let m = @format.manifest_from_json(j) catch {
+    _ => return out
+  }
+  for s in m.segments {
+    out.add(s.id)
+  }
+  out
+}
+
+///|
+/// segment.slab 组件表：key → [(off, len, name)]。仅测量归因用；只收 manifest
+/// 活段（superseded 段会让行数/簇规模重复计数）。
+async fn build_slab_map(
+  store : CountingStore,
+  ns : String,
+) -> Map[String, Array[(Int, Int, String)]] {
+  let map : Map[String, Array[(Int, Int, String)]] = Map([])
+  let live = live_seg_ids(store, ns)
+  let prefix = "\{ns}/_segments/"
+  for key in store.list(prefix) {
+    if !key.has_suffix(".slab") {
+      continue
+    }
+    if live.length() > 0 {
+      if !live.contains(seg_id_of_key(key, ns)) {
+        continue
+      }
+    }
+    match slab_index_of(store, key) {
+      Some(idx) => {
+        let out : Array[(Int, Int, String)] = Array()
+        for e in idx.entries {
+          out.push((e.offset.to_int(), e.length.to_int(), e.name))
+        }
+        map.set(key, out)
+      }
+      None => ()
+    }
+  }
+  map
+}
+
+///|
+/// 从 segment.slab key 提取段 id：`{ns}/_segments/{seg_id}/segment.slab`。
+fn seg_id_of_key(key : String, ns : String) -> String {
+  let prefix = "\{ns}/_segments/"
+  let rest = key[prefix.length():].to_owned()
+  rest[0:rest.length() - "/segment.slab".length()].to_owned()
+}
+
+///|
+/// 段是否 dense_u64（meta.json 的 id_encoding 标记；dense 段读侧 row→id =
+/// min_id+row，id 组件不进查询读）。仅测量用。
+async fn seg_is_dense(
+  store : CountingStore,
+  ns : String,
+  seg_id : String,
+) -> Bool {
+  match store.get("\{ns}/_segments/\{seg_id}/meta.json") {
+    Some(bs) => {
+      let text = @utf8.decode(bs.exact_view()) catch {
+        _ => return false
+      }
+      str_has(text, "\"dense_u64\"")
+    }
+    None => false
+  }
+}
+
+///|
+/// KB/q 静态分解支撑数据（一次只读扫描 slab 组件）：
+/// - 簇规模分布（cid → 跨段 rows 之和）：max/mean、E[s²]/E[s]、行字节；
+///   balanced k-means（簇等大小）把每 probe 字节从 size 偏置期望压到 mean×行字节。
+/// - id 列 runs 数：空洞合并段（合并非相邻 id 段）的行数/runs 数，估计
+///   runs 编码 (min_id u64, start_row u32, len u32) 的残余字节。
+async fn static_decomposition(
+  store : CountingStore,
+  ns : String,
+  slab_map : Map[String, Array[(Int, Int, String)]],
+) -> Unit {
+  let cid_rows : Map[Int, Int] = Map([])
+  let mut part_rows = 0
+  let mut part_bytes = 0
+  let mut id_rows = 0
+  let mut id_runs = 0
+  let mut id_bytes = 0
+  let mut dense_id_rows = 0
+  let mut dense_id_bytes = 0
+  for kv in slab_map.iter() {
+    let (key, entries) = kv
+    for e in entries {
+      let (off, len, name) = e
+      if name == "id" || name == "rows/id.bin" {
+        match store.get_range(key, @store.ByteRange::{ off: off, len: len }) {
+          Some(bs) => {
+            let ids = try {
+              Some(decode_id_col(bs))
+            } catch {
+              _ => None
+            }
+            match ids {
+              Some(arr) => {
+                let seg_id = seg_id_of_key(key, ns)
+                if seg_is_dense(store, ns, seg_id) {
+                  // dense_u64 段：读侧 row→id = min_id+row，id 组件不进查询读。
+                  dense_id_rows += arr.length()
+                  dense_id_bytes += len
+                } else {
+                  id_rows += arr.length()
+                  id_bytes += len
+                  let mut prev = 0UL
+                  for i in 0..<arr.length() {
+                    let v = arr[i]
+                    if i == 0 || v != prev + 1UL {
+                      id_runs += 1
+                    }
+                    prev = v
+                  }
+                }
+              }
+              None => ()
+            }
+          }
+          None => ()
+        }
+      } else if name.has_prefix("vec/part") {
+        match store.get_range(key, @store.ByteRange::{ off: off, len: len }) {
+          Some(bs) => {
+            part_bytes += len
+            let rows = part_row_count(bs)
+            part_rows += rows
+            match parse_uint(name[9:].to_owned()) {
+              Some(cid) =>
+                match cid_rows.get(cid) {
+                  Some(v) => cid_rows.set(cid, v + rows)
+                  None => cid_rows.set(cid, rows)
+                }
+              None => ()
+            }
+          }
+          None => ()
+        }
+      }
+    }
+  }
+  let mut ncid = 0
+  let mut s_max = 0
+  let mut s_sum = 0
+  let mut s_sq = 0.0
+  for kv in cid_rows.iter() {
+    let (_cid, s) = kv
+    ncid += 1
+    s_sum += s
+    if s > s_max {
+      s_max = s
+    }
+    s_sq += s.to_double() * s.to_double()
+  }
+  println("== KB/q 静态分解（组件大小/簇分布/id runs；只读扫描，非每查询口径）==")
+  if ncid > 0 && part_rows > 0 {
+    let mean = s_sum.to_double() / ncid.to_double()
+    let size_biased = s_sq / s_sum.to_double() // E[s²]/E[s]
+    let rowb = part_bytes.to_double() / part_rows.to_double()
+    println(
+      "  簇规模分布:有行 cid=\{ncid} 总 rows=\{part_rows} mean=\{fmt(mean, 1)} max=\{s_max} max/mean=\{fmt(s_max.to_double() / mean, 2)} E[s²]/E[s]=\{fmt(size_biased, 1)}",
+    )
+    println(
+      "  part 行字节 = \{fmt(rowb, 1)}（rows u32 + payload 实测均值）；probe 分区每 probe 字节:均匀探测 = mean×rowb = \{fmt(mean * rowb, 0)} B；size 偏置（查询落大簇）≈ E[s²]/E[s]×rowb = \{fmt(size_biased * rowb, 0)} B",
+    )
+    println(
+      "  balanced k-means（簇等大小）理论:每 probe 字节从 \{fmt(size_biased * rowb, 0)} B 压到 \{fmt(mean * rowb, 0)} B（≈\{fmt(size_biased / mean, 2)}x）",
+    )
+  } else {
+    println("  簇规模分布:无 vec/part-* 组件（数据不在这条路径）")
+  }
+  if id_rows > 0 {
+    println(
+      "  id 列（非 dense 空洞合并段，逐查询必读）: rows=\{id_rows} runs=\{id_runs} 现 u64 定长（8 B/row + 20B 头）实测 = \{fmt(id_bytes.to_double() / 1024.0, 1)} KB/查询（另 dense 段 id 组件 \{fmt(dense_id_bytes.to_double() / 1024.0, 1)} KB/\{dense_id_rows} rows，读侧免读）",
+    )
+    println(
+      "  runs 编码 (min_id u64, start_row u32, len u32) 16 B/run = \{fmt(id_runs.to_double() * 16.0 / 1024.0, 1)} KB/查询（压 \{fmt(id_bytes.to_double() / (id_runs.to_double() * 16.0), 1)}x）",
+    )
+  } else {
+    println("  id 列:无非 dense id 列（全部 dense_u64 或无 rows/id 组件）")
   }
 }
 
@@ -1556,6 +2033,9 @@ async fn run() -> Unit {
       "  NOTE: cold-metadata = resident 关闭 + 每查询重新 open（元数据走 S3）；warm-touched = burn-in \{nq} 次后重放不同样本，未用 admit_all。",
     )
   }
+  // ---- KB/q 分解（读事件事后归因；slab 组件表在全部查询计量之后才建，不污染计量）----
+  let slab_map = build_slab_map(store, ns)
+  print_breakdown(cells, store.reads, slab_map)
   // ---- control plane 统计（查询表后；hits = TTL 内命中，reloads = 重新 open）----
   if bench_control {
     println("")
@@ -1574,19 +2054,27 @@ async fn run() -> Unit {
     )
   }
   // ---- recall@10 vs nprobe（BENCH_RECALL=1；查询表之后，不影响上面的计量）----
+  // 探测比例的分母必须是**实际中心数**（cutover 结束态），不是 cfg 初始值：
+  // cutover 把 nlist 重设为 ≈num_docs/target_rows（50k→129，500k→1059），
+  // 用 cfg.nlist=64 会把比例与锚点算错，GT 也不是全扫。
+  let (_rec_docs, rec_cv) = manifest_ivf_info(store, ns)
+  let rec_cent : @format.Centroids? = try {
+    Some(@build.load_centroids(store, ns, rec_cv))
+  } catch {
+    _ => None
+  }
+  let rec_nlist = match rec_cent {
+    Some(c) => if c.dim > 0 && c.k() > 0 { c.k() } else { nlist }
+    None => nlist
+  }
   if bench_recall {
-    let cold_tier = tier_label(true, has_cp(cp))
-    let mut cold_getq = 0.0
-    for c in cells {
-      if c.cls == "vec" && c.tier == cold_tier {
-        cold_getq = c.gets
-      }
-    }
     run_recall(
-      store, ns, vec_qvs, nq, nprobe, cold_getq, nlist, exact_gt, gt_ids,
-      gt_vecs, dim,
+      store, ns, vec_qvs, nq, nprobe, rec_nlist, exact_gt, gt_ids, gt_vecs,
+      dim,
     )
   }
+  // ---- KB/q 分解支撑数据（组件大小/簇分布/id runs；只读扫描）----
+  static_decomposition(store, ns, slab_map)
   println("")
 
   // ---- 汇总（manifest/LIST 放在查询之后，避免预热缓存影响查询档位）----
@@ -1788,4 +2276,4 @@ async fn main {
 
 
 
-extend CountingStore with @turbofish/store.ObjectStore::{get, list}
+extend CountingStore with @turbofish/store.ObjectStore::{get, get_range, list}

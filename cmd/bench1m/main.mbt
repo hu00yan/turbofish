@@ -9,7 +9,8 @@
 //                    ⇒ 只追加 delta，**禁自动合并**（max_deltas=0/auto_compact=false）
 //   全部批次后     : 一次 @build.compact_global（把 base + 全部 deltas 折成新 base）
 //   每批写入后     : 一次 @build.maybe_compact_segments（size-tiered 同档合并：
-//                    同 tier 段数 ≥ fanout=3 时合并该档最旧 3 段；安全阀段数
+//                    同 tier 段数 ≥ fanout（默认 3，BENCH_FANOUT 可覆盖）时合并
+//                    该档最旧 fanout 段；安全阀段数
 //                    > tiers×fanout×2 退回一次前缀合并；合并批的 PUT/耗时单独计；
 //                    本轮结束后 GC 回收 superseded 段）
 //
@@ -35,6 +36,8 @@
 //   BENCH_DOCS=50000 BENCH_DIM=128 BENCH_BATCH=1000 BENCH_QUERIES=20 BENCH_SEED=7
 //   BENCH_CONTROL=0|1      （1 = 查询走 @control.ControlPlane 复用 Namespace）
 //   BENCH_NPROBE=8         （vec_search 的 nprobe；默认 8）
+//   BENCH_FANOUT=3         （size-tiered 同档合并 fanout，仅测量透传；默认
+//                            @build.SEGMENT_TIER_FANOUT=3，不改产品默认值）
 //   BENCH_RECALL=0|1       （1 = 查询表之后追加 recall@10 vs nprobe 实验）
 //   BENCH_NCLUSTERS=16     （聚簇向量的中心数；默认 16）
 //   BENCH_NOISE=0.08       （每维均匀噪声半径；默认 0.08）
@@ -1140,6 +1143,9 @@ async fn run() -> Unit {
   // 同理：BENCH_CONTROL 默认 0（关）；!0 即开启 ControlPlane 复用 Namespace。
   let bench_control = env_int("BENCH_CONTROL", 0) != 0
   let nprobe = env_int("BENCH_NPROBE", 8)
+  // size-tiered 合并 fanout：仅 bench 测量透传给 @build.maybe_compact_segments；
+  // 缺省/非法值回退产品默认 @build.SEGMENT_TIER_FANOUT（=3）。
+  let fanout = env_int("BENCH_FANOUT", @build.SEGMENT_TIER_FANOUT)
   let bench_recall = env_int("BENCH_RECALL", 0) != 0
   // 聚簇数据生成参数：n_clusters=16 中心 + 每维 ±0.08 噪声（默认即真实 embedding 近似）。
   let n_clusters = env_int("BENCH_NCLUSTERS", 16)
@@ -1181,7 +1187,7 @@ async fn run() -> Unit {
     )
   }
   println(
-    "  每批写入后 @build.maybe_compact_segments：size-tiered 同档合并（同 tier 段数 ≥ fanout=3 时合并该档最旧 3 段；合并批单独计）+ superseded 段 GC",
+    "  每批写入后 @build.maybe_compact_segments：size-tiered 同档合并（同 tier 段数 ≥ fanout=\{fanout} 时合并该档最旧 \{fanout} 段；合并批单独计）+ superseded 段 GC",
   )
   if bench_control {
     println(
@@ -1255,7 +1261,7 @@ async fn run() -> Unit {
     let superseded_at = @env.now()
     store.reset_writes()
     store.inner.reset_cost()
-    let outcome = @build.maybe_compact_segments(store, cfg)
+    let outcome = @build.maybe_compact_segments(store, cfg, fanout=fanout)
     let msnap = store.inner.cost()
     if outcome.merges > 0 {
       for info in outcome.merge_log {
@@ -1504,6 +1510,9 @@ async fn run() -> Unit {
   println("== summary ==")
   println("total docs           = \{s.docs} (dim=\{dim}, batches=\{s.batches})")
   println(
+    "tier fanout          = \{fanout} (BENCH_FANOUT 透传 maybe_compact_segments；产品默认 @build.SEGMENT_TIER_FANOUT=\{@build.SEGMENT_TIER_FANOUT})",
+  )
+  println(
     "build put            = \{mb(s.put_bytes)} MB (\{s.put_bytes} bytes, \{s.puts} PUTs, virt \{fmt(s.build_ms, 1)} ms)",
   )
   println(
@@ -1513,7 +1522,7 @@ async fn run() -> Unit {
     "compact put          = \{mb(s.compact_put_bytes)} MB (\{s.compact_put_bytes} bytes, virt \{fmt(s.compact_ms, 1)} ms)",
   )
   println(
-    "total put            = \{mb(total_put)} MB (build+merge+compact_global; virt total \{fmt(total_ms, 1)} ms)",
+    "total put            = \{mb(total_put)} MB (\{total_put} bytes; build+merge+compact_global; virt total \{fmt(total_ms, 1)} ms)",
   )
   println(
     "write_amp            = \{fmt(total_put.to_double() / vector_bytes.to_double(), 2)}x vector_bytes (f16 \{mb(vector_bytes)} MB)",
@@ -1542,7 +1551,7 @@ async fn run() -> Unit {
   )
   // ---- size-tiered 段分布与段数轨迹（写入结束时点；只读 GET 放查询之后）----
   println("== size-tiered 段分布（写入结束时点）==")
-  for line in tier_dist_lines(store, ns, cfg.segment_rows, @build.SEGMENT_TIER_FANOUT) {
+  for line in tier_dist_lines(store, ns, cfg.segment_rows, fanout) {
     println("\{line}")
   }
   println("segs 轨迹（逐批）   = \{seg_traj(stats)}")

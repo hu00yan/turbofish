@@ -534,3 +534,153 @@ async test "compact_optimistic merges segments with large slab index" {
   let ids = visible_ids(mem, "l0bigidx", m1)
   assert_eq(ids.length(), 600)
 }
+
+///|
+/// tier 公式 = floor(log2(row_count / base_rows))：整数边界精确（4000 行
+/// 恰为 tier 1、3999 行仍是 tier 0），小段落负档。
+test "segment_tier = floor(log2(row_count / segment_rows))" {
+  assert_eq(segment_tier(2000, 2000), 0)
+  assert_eq(segment_tier(3999, 2000), 0)
+  assert_eq(segment_tier(4000, 2000), 1)
+  assert_eq(segment_tier(1000, 2000), -1)
+  assert_eq(segment_tier(3, 2000), -10) // floor(log2(3/2000)) = floor(-9.38)
+  assert_eq(segment_tier(9, 2000), -8) // floor(log2(9/2000)) = floor(-7.80)
+  assert_eq(segment_tier(300, 2000), -3) // floor(log2(300/2000)) = floor(-2.74)
+  assert_eq(segment_tier(50000, 2000), 4) // floor(log2(25)) = 4
+  assert_eq(segment_tier(0, 2000), segment_tier(1, 2000)) // 空段按 1 行
+}
+
+///|
+/// size-tiered：只合并同 tier 内最旧的 fanout 个段，不跨 tier；合并明细
+/// 记录 tier / 输入段数 / 输入输出行数。
+async test "maybe_compact_segments merges oldest same-tier segments only" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0tier"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  // 3 个 100 行段（tier -5）+ 1 个 1200 行段（tier -1）
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(100, 8, 1UL, 61U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(100, 8, 1000UL, 62U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(100, 8, 2000UL, 63U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(1200, 8, 3000UL, 64U), [])
+  let m0 = head_manifest_of(mem, "l0tier")
+  assert_eq(m0.segments.length(), 4)
+  let big_id = m0.segments[3].id
+  let outcome = maybe_compact_segments(mem, cfg)
+  // 3 个 tier -5 段合并成 1 个 300 行段（tier -3）；1200 行段（tier -1）不动
+  assert_eq(outcome.merges, 1)
+  assert_eq(outcome.segs_before, 4)
+  assert_eq(outcome.segs_after, 2)
+  let m1 = head_manifest_of(mem, "l0tier")
+  assert_eq(m1.segments.length(), 2)
+  let mut big_kept = false
+  for s in m1.segments {
+    if s.id == big_id {
+      big_kept = true
+    }
+  }
+  assert_eq(big_kept, true)
+  // 行无丢失
+  let ids = visible_ids(mem, "l0tier", m1)
+  assert_eq(ids.length(), 1500)
+  // 合并明细：tier / 输入段数 / 输入输出行数
+  assert_eq(outcome.merge_log.length(), 1)
+  let info = outcome.merge_log[0]
+  assert_eq(info.prefix_fallback, false)
+  assert_eq(info.tier, -5)
+  assert_eq(info.segs_in, 3)
+  assert_eq(info.rows_in, 300)
+  assert_eq(info.rows_out, 300)
+  assert_eq(outcome.gc_kept_in_grace, outcome.superseded.length())
+}
+
+///|
+/// merge_ids 指定子集合并：可只合并不相邻的段；跳过段原样保留，墓碑只
+/// 保留 tail 段范围内的（被合并段范围的已物理化）。
+async test "compact_optimistic merge_ids merges a non-contiguous subset" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0sub"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(50, 8, 1UL, 71U), []) // A: id 1..50
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(50, 8, 1000UL, 72U), []) // B: id 1000..1049
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(50, 8, 2000UL, 73U), []) // C: id 2000..2049
+  // 删除 A 范围的 7UL 与 B 范围的 1007UL（纯删除批，不新增段）
+  let _ = ingest_l0_slab(mem, cfg, [], [7UL, 1007UL])
+  let m0 = head_manifest_of(mem, "l0sub")
+  assert_eq(m0.segments.length(), 3)
+  let a_id = m0.segments[0].id
+  let b_id = m0.segments[1].id
+  let c_id = m0.segments[2].id
+  // 只合并 A 与 C（不相邻），B 原样保留
+  let merged = compact_optimistic(mem, cfg, merge_ids=[a_id, c_id])
+  assert_eq(merged is Some(_), true)
+  let m1 = head_manifest_of(mem, "l0sub")
+  assert_eq(m1.segments.length(), 2)
+  let mut b_kept = false
+  let mut merged_rows = -1
+  let mut merged_id = ""
+  for s in m1.segments {
+    if s.id == b_id {
+      b_kept = true
+    } else {
+      merged_rows = s.row_count
+      merged_id = s.id
+    }
+  }
+  assert_eq(b_kept, true)
+  assert_eq(merged_id == a_id, false)
+  assert_eq(merged_id == c_id, false)
+  // 合并段 = A 50 - 1 墓碑 + C 50
+  assert_eq(merged_rows, 99)
+  // 墓碑：A 范围的 7UL 已物理化，B 范围的 1007UL 保留
+  assert_eq(m1.deleted.length(), 1)
+  assert_eq(m1.deleted[0], 1007UL)
+  let ids = visible_ids(mem, "l0sub", m1)
+  assert_eq(ids.length(), 148)
+}
+
+///|
+/// 安全阀：段数真超过 tiers × fanout × 2 时退回一次前缀合并并记录在
+/// merge_log（prefix_fallback），随后仍由 tiered 循环收尾。
+async test "maybe_compact_segments safety valve falls back once to prefix merge" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0valve"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  // 10 个小段（每批 3 行，全落 tier -10）：10 > 1 × 3 × 2 ⇒ 安全阀触发
+  for b in 0..<10 {
+    let _ = ingest_l0_slab(
+      mem,
+      cfg,
+      mkdocs(3, 8, (b * 100 + 1).to_uint64(), (90 + b).reinterpret_as_uint()),
+      [],
+    )
+  }
+  let outcome = maybe_compact_segments(mem, cfg)
+  let mut fallbacks = 0
+  for info in outcome.merge_log {
+    if info.prefix_fallback {
+      fallbacks += 1
+    }
+  }
+  assert_eq(fallbacks, 1)
+  assert_eq(outcome.merge_log.length(), outcome.merges)
+  assert_eq(outcome.merges > 0, true)
+  let m1 = head_manifest_of(mem, "l0valve")
+  assert_eq(m1.segments.length() <= 3, true)
+  let ids = visible_ids(mem, "l0valve", m1)
+  assert_eq(ids.length(), 30)
+}

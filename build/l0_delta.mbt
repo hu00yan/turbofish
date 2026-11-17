@@ -619,7 +619,9 @@ fn prune_tombstones(
 
 ///|
 /// 无阻塞乐观 Rebase Compaction：
-/// 1. 拍起始快照 `M_start`，取前缀段集合（默认前 8 段）；
+/// 1. 拍起始快照 `M_start`，取合并集合：`merge_ids` 非空时只合并这些段
+///    （**指定子集合并**，同 tier 段可以不相邻；只认 `M_start` 里实际存在的
+///    id，一个都不剩则 `None`）；默认取前缀段集合（manifest 顺序的前 N 段）；
 /// 2. 段数 ≤ 1 且 `M_start.deleted` 为空 ⇒ `None`（无可合并）；
 /// 3. 把前缀段的存活行合并成 **1 个** SlabV2 单文件段并上传（`global_vec_parts`
 ///    时同时写新的全量 global IVF packs）；
@@ -629,10 +631,16 @@ fn prune_tombstones(
 ///    **绝不重传已上传的合并段**，也不会丢并发新写。
 ///
 /// 返回新 manifest id；无需合并或 5 次 CAS 全部冲突时返回 None。
+///
+/// 【子集合并的限制】rebase 拼接固定把合并段排在段列表最前（前缀合并时
+/// 天然保持段序）；`merge_ids` 非前缀子集时 manifest 段序会被重排。段序
+/// 不承载语义（query 全段扫描、GC 集合判定、`prune_tombstones` 按段 id
+/// 范围剪裁），故本单不改 rebase 拼接逻辑。
 pub async fn[S : @store.ObjectStore] compact_optimistic(
   store : S,
   cfg : BuildConfig,
   max_prefix_segments? : Int = 8,
+  merge_ids? : Array[String] = [],
 ) -> String? {
   let ns = cfg.ns
   let meta0 = match read_namespace(store, ns) {
@@ -646,18 +654,40 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
   if m_start.segments.length() <= 1 && m_start.deleted.is_empty() {
     return None
   }
-  // 前缀段集合：manifest 顺序的前 N 段
-  let maxp = if max_prefix_segments > 0 {
-    max_prefix_segments
-  } else {
-    m_start.segments.length()
-  }
+  // 合并集合：merge_ids 非空 = 指定子集（同 tier 不相邻段也可以）；
+  // 默认 = manifest 顺序的前 N 段（前缀合并）。rebase 拼接两种情况共用。
   let in_prefix : Map[String, Bool] = Map([])
-  let mut taken = 0
-  for s in m_start.segments {
-    if taken < maxp {
-      in_prefix.set(s.id, true)
-      taken += 1
+  if merge_ids.length() > 0 {
+    let wanted : Map[String, Bool] = Map([])
+    for id in merge_ids {
+      wanted.set(id, true)
+    }
+    let mut picked = 0
+    for s in m_start.segments {
+      let hit = match wanted.get(s.id) {
+        Some(_) => true
+        None => false
+      }
+      if hit {
+        in_prefix.set(s.id, true)
+        picked += 1
+      }
+    }
+    if picked == 0 {
+      return None
+    }
+  } else {
+    let maxp = if max_prefix_segments > 0 {
+      max_prefix_segments
+    } else {
+      m_start.segments.length()
+    }
+    let mut taken = 0
+    for s in m_start.segments {
+      if taken < maxp {
+        in_prefix.set(s.id, true)
+        taken += 1
+      }
     }
   }
   // 读前缀段的存活行（兼容传统多文件段与单文件 slab 段）
@@ -731,7 +761,7 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
       return result
     }
     let m_curr = load_manifest(store, ns, meta_curr.head_manifest)
-    // 并发新增 tail 段：不在 prefix、也不是本次的合并段
+    // 并发新增 tail 段：不在合并集合、也不是本次的合并段
     let tails : Array[@format.SegmentMeta] = Array()
     for s in m_curr.segments {
       if in_prefix.contains(s.id) || s.id == merged_id {
@@ -739,6 +769,8 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
       }
       tails.push(s)
     }
+    // 合并段固定排最前（前缀合并时天然保持段序）；merge_ids 非前缀子集时
+    // 段序会重排，但段序不承载语义（见函数头「子集合并的限制」）。
     let next_segs : Array[@format.SegmentMeta] = Array()
     match merged_seg {
       Some(s) => next_segs.push(s)
@@ -1000,99 +1032,323 @@ pub async fn[S : @store.ObjectStore] gc_superseded_segments(
 }
 
 ///|
-/// 段数压力触发的前缀合并（薄封装，`compact_optimistic` 的写路径触发器）：
-/// 当前 manifest 段数 > `max_segments` 时调 `compact_optimistic` 合并前缀段，
-/// 直到 ≤ `max_segments` 或合并无法推进（返回 None / 段数不再下降）。
-/// 每次发布成功后按 `gc_superseded_segments` 回收被合并掉的旧段（grace 窗口
-/// 见 `SEGMENT_GC_GRACE_MS`）。
-///
-/// 返回 `SegCompactOutcome`：合并后的 head、合并次数、合并前后段数、被合并掉
-/// 的段 id（供调用方做 GC 计数观测）与本轮 GC 统计。不改 `ingest_l0_slab` /
-/// `compact_optimistic` 的语义。
+/// size-tiered 合并 fanout：同 tier（同量级）段攒够 fanout 个才合并，
+/// 一次只合并该 tier 内最旧的 fanout 个段（具名常量，默认 3）。
+pub const SEGMENT_TIER_FANOUT : Int = 3
+
+///|
+/// 安全阀倍数：段数真超过 `tiers × fanout × SEGMENT_TIER_MAX_FACTOR` 时
+/// 退回一次前缀合并并打日志（保底，防 tier 判定异常导致段数无界）。
+pub const SEGMENT_TIER_MAX_FACTOR : Int = 2
+
+///|
+/// floor(log2(n))（n ≥ 1）。
+fn floor_log2_i64(n : Int64) -> Int {
+  let mut t = 0
+  let mut v = 1L
+  while v <= n / 2L {
+    v = v * 2L
+    t = t + 1
+  }
+  t
+}
+
+///|
+/// 2^t（t ≥ 0）。
+fn pow2_i64(t : Int) -> Int64 {
+  let mut v = 1L
+  for _ in 0..<t {
+    v = v * 2L
+  }
+  v
+}
+
+///|
+/// base·2^t ≤ rows（t 可为负）。负指数侧用带进位除法避免溢出/截断。
+fn le_pow(base : Int64, rows : Int64, t : Int) -> Bool {
+  if t >= 0 {
+    base * pow2_i64(t) <= rows
+  } else {
+    let p = pow2_i64(0 - t)
+    (base + p - 1L) / p <= rows
+  }
+}
+
+///|
+/// 段量级档（tier）：`floor(log2(row_count / base_rows))`，base_rows 取
+/// `cfg.segment_rows`。同 tier 段行数相差 < 2×，视为同量级，size-tiered
+/// 只在同 tier 内合并。全程 Int64 精确比较（`base·2^t ≤ rows <
+/// base·2^(t+1)`），无浮点误差；rows / base_rows ≤ 0 时按 1 处理。
+pub fn segment_tier(row_count : Int, base_rows : Int) -> Int {
+  let base = if base_rows > 0 { base_rows.to_int64() } else { 1L }
+  let rows = if row_count > 0 { row_count.to_int64() } else { 1L }
+  let mut t = floor_log2_i64(rows) - floor_log2_i64(base)
+  while t > -61 && !le_pow(base, rows, t) {
+    t = t - 1
+  }
+  while t < 61 && le_pow(base, rows, t + 1) {
+    t = t + 1
+  }
+  t
+}
+
+///|
+/// 一次合并的明细：被合并段所在 tier（前缀合并记输出段 tier）、输入段数、
+/// 输入/输出行数（输出行数 = 新 head 里本次合并产物的行数，单写者下精确）。
+#derive(Debug)
+pub(all) struct SegMergeInfo {
+  tier : Int
+  segs_in : Int
+  rows_in : Int
+  rows_out : Int
+  prefix_fallback : Bool // true = 安全阀退回的前缀合并
+}
+
+///|
+/// size-tiered 段压力合并的结果：合并后的 head、合并次数、合并前后段数、
+/// 被合并掉的段 id（供调用方做 GC 计数观测）、整轮一次 GC 的统计与逐次
+/// 合并明细 `merge_log`。
 #derive(Debug)
 pub(all) struct SegCompactOutcome {
-  head : String // 合并后的 head manifest id（未触发 = 调用前 head；无 head = ""）
-  merges : Int // 成功发布的合并批次数
+  head : String // 合并后的 head manifest id（未触发 = 调用前 head；无 head = "")
+  merges : Int // 成功发布的合并批次数（= merge_log.length()）
   segs_before : Int
   segs_after : Int
   superseded : Array[String] // 被合并掉的段 id（GC 判定前的候选）
   gc_deleted : Int
   gc_kept_in_grace : Int
+  merge_log : Array[SegMergeInfo] // 逐次合并明细（tier / 输入段数 / 输入输出行数）
 }
+
+///|
+/// 合并前后 manifest 差集：被合并掉的段 id + 输出段行数（新 head 里不在
+/// 合并前段集合中的段 = 本次合并产物；并发新增 tail 段同理计入，单写者下
+/// 精确）。
+fn merge_diff(
+  old_ids : Array[String],
+  rows_of : Map[String, Int],
+  new_m : @format.ManifestData,
+) -> (Array[String], Int) {
+  let keep : Map[String, Bool] = Map([])
+  for s in new_m.segments {
+    keep.set(s.id, true)
+  }
+  let superseded : Array[String] = Array()
+  for id in old_ids {
+    let hit = match keep.get(id) {
+      Some(_) => true
+      None => false
+    }
+    if !hit {
+      superseded.push(id)
+    }
+  }
+  let mut rows_out = 0
+  for s in new_m.segments {
+    let known = match rows_of.get(s.id) {
+      Some(_) => true
+      None => false
+    }
+    if !known {
+      rows_out += s.row_count
+    }
+  }
+  (superseded, rows_out)
+}
+
+///|
+/// size-tiered 段压力合并（薄封装，`compact_optimistic` 的写路径触发器）：
+///
+/// - 段按 `segment_tier(row_count, cfg.segment_rows)` 分档（tier），**只合并
+///   同 tier 段**、不跨档；某 tier 段数 ≥ `fanout` 时，把该 tier 内**最旧的
+///   fanout 个段**（段 id 升序 = 创建序）交给
+///   `compact_optimistic(merge_ids=...)` 合并成 1 段，循环到没有任何 tier
+///   达到 fanout 为止（合并产物升档后可能在本轮继续触发更高档合并）；
+/// - 段数不再硬性 ≤ `max_segments`，实际上界 ≈ tiers × `fanout`；安全阀：
+///   段数真超过 `tiers × fanout × SEGMENT_TIER_MAX_FACTOR` 时退回**一次**
+///   前缀合并（`compact_optimistic`，前缀段数取 `max_segments`）并打日志，
+///   随后仍由 tiered 循环收尾；
+/// - 本轮结束时一次 `gc_superseded_segments` 回收被合并掉的旧段（grace 窗口
+///   见 `SEGMENT_GC_GRACE_MS`），outcome 的 gc_* 是整轮口径；
+/// - 每次合并的 tier / 输入段数 / 输入输出行数记录在 `merge_log`。
+///
+/// 返回 `SegCompactOutcome`；合并无法推进（无可合并 / CAS 全部冲突 / 段数
+/// 不再下降）即停。不改 `ingest_l0_slab` / `compact_optimistic` 的语义。
 
 ///|
 pub async fn[S : @store.ObjectStore] maybe_compact_segments(
   store : S,
   cfg : BuildConfig,
   max_segments~ : Int = 8,
+  fanout~ : Int = SEGMENT_TIER_FANOUT,
 ) -> SegCompactOutcome {
   let ns = cfg.ns
+  let none : SegCompactOutcome = {
+    head: "",
+    merges: 0,
+    segs_before: 0,
+    segs_after: 0,
+    superseded: [],
+    gc_deleted: 0,
+    gc_kept_in_grace: 0,
+    merge_log: [],
+  }
   let meta0 = match read_namespace(store, ns) {
     Some(m) => m
-    None =>
-      return {
-        head: "",
-        merges: 0,
-        segs_before: 0,
-        segs_after: 0,
-        superseded: [],
-        gc_deleted: 0,
-        gc_kept_in_grace: 0,
-      }
+    None => return none
   }
   if meta0.head_manifest == "" {
-    return {
-      head: "",
-      merges: 0,
-      segs_before: 0,
-      segs_after: 0,
-      superseded: [],
-      gc_deleted: 0,
-      gc_kept_in_grace: 0,
-    }
+    return none
   }
   let m0 = load_manifest(store, ns, meta0.head_manifest)
   let segs_before = m0.segments.length()
+  let base_rows = if cfg.segment_rows > 0 { cfg.segment_rows } else { 1 }
+  let ff = if fanout > 1 { fanout } else { SEGMENT_TIER_FANOUT }
   let mut head = meta0.head_manifest
   let mut segs = segs_before
   let superseded : Array[String] = Array()
+  let merge_log : Array[SegMergeInfo] = Array()
   let mut merges = 0
-  let mut gc_deleted = 0
-  let mut gc_kept_in_grace = 0
-  while segs > max_segments {
-    // 合并前的段集合：差集 = 本次被合并掉的段。
-    let old_segs : Set[String] = Set([])
-    for s in load_manifest(store, ns, head).segments {
-      old_segs.add(s.id)
-    }
-    match compact_optimistic(store, cfg) {
-      Some(new_head) => {
-        merges += 1
-        head = new_head
-        let m = load_manifest(store, ns, new_head)
-        let keep : Set[String] = Set([])
-        for s in m.segments {
-          keep.add(s.id)
-        }
-        for id in old_segs {
-          if !keep.contains(id) {
-            superseded.push(id)
-          }
-        }
-        let old_count = segs
-        segs = m.segments.length()
-        // 发布成功后回收 superseded 段（grace 窗口内的一律保留）。
-        let stat = gc_superseded_segments(store, ns)
-        gc_deleted += stat.deleted
-        gc_kept_in_grace += stat.kept_in_grace
-        // 安全阀：段数没降 ⇒ 合并无法推进，退出避免死循环。
-        if segs >= old_count {
-          break
+  let mut fallback_used = false
+  let mut going = true
+  while going {
+    going = false
+    let m = load_manifest(store, ns, head)
+    // tier → 段 id（升序 = 创建序，最旧在前）；rows_of 供行数统计。
+    let tier_ids : Map[Int, Array[String]] = Map([])
+    let tier_keys : Array[Int] = Array()
+    let rows_of : Map[String, Int] = Map([])
+    for s in m.segments {
+      rows_of.set(s.id, s.row_count)
+      let t = segment_tier(s.row_count, base_rows)
+      match tier_ids.get(t) {
+        Some(a) => a.push(s.id)
+        None => {
+          let a : Array[String] = Array()
+          a.push(s.id)
+          tier_ids.set(t, a)
+          tier_keys.push(t)
         }
       }
-      // 合并无法推进（无可合并 / CAS 全部冲突）。
-      None => break
     }
+    tier_keys.sort()
+    // 合并前的段集合：差集 = 本次被合并掉的段。
+    let old_ids : Array[String] = Array()
+    for s in m.segments {
+      old_ids.push(s.id)
+    }
+    let mut acted = false
+    // 安全阀：段数真超过 tiers × fanout × 倍数时退回一次前缀合并。
+    if !fallback_used &&
+      segs > tier_keys.length() * ff * SEGMENT_TIER_MAX_FACTOR &&
+      segs > max_segments {
+      fallback_used = true
+      let prefix_n = if max_segments > 1 { max_segments } else { 2 }
+      println(
+        "maybe_compact_segments: 安全阀触发（segs=\{segs} > tiers=\{tier_keys.length()} × fanout=\{ff} × \{SEGMENT_TIER_MAX_FACTOR}），退回一次前缀合并（前缀 \{prefix_n} 段）",
+      )
+      let mut rows_in = 0
+      let mut segs_in = 0
+      for id in old_ids {
+        if segs_in < prefix_n {
+          match rows_of.get(id) {
+            Some(r) => rows_in += r
+            None => ()
+          }
+          segs_in += 1
+        }
+      }
+      match compact_optimistic(store, cfg, max_prefix_segments=prefix_n) {
+        Some(new_head) => {
+          acted = true
+          merges += 1
+          head = new_head
+          let m_new = load_manifest(store, ns, new_head)
+          let (sup, rows_out) = merge_diff(old_ids, rows_of, m_new)
+          for id in sup {
+            superseded.push(id)
+          }
+          merge_log.push({
+            tier: segment_tier(rows_out, base_rows),
+            segs_in,
+            rows_in,
+            rows_out,
+            prefix_fallback: true,
+          })
+          let old_count = segs
+          segs = m_new.segments.length()
+          if segs < old_count {
+            going = true
+          }
+        }
+        None => ()
+      }
+    }
+    if !acted {
+      // tiered：取 tier 值最小（最小段档）且段数 ≥ fanout 的档，
+      // 合并该档内最旧的 fanout 个段（段 id 升序 = 创建序）。
+      let picked : Array[String] = Array()
+      let mut picked_tier = 0
+      for t in tier_keys {
+        if picked.length() > 0 {
+          break
+        }
+        let arr = match tier_ids.get(t) {
+          Some(a) => a
+          None => continue
+        }
+        if arr.length() >= ff {
+          arr.sort()
+          picked_tier = t
+          for i in 0..<ff {
+            picked.push(arr[i])
+          }
+        }
+      }
+      if picked.length() == ff {
+        let mut rows_in = 0
+        for id in picked {
+          match rows_of.get(id) {
+            Some(r) => rows_in += r
+            None => ()
+          }
+        }
+        match compact_optimistic(store, cfg, merge_ids=picked) {
+          Some(new_head) => {
+            merges += 1
+            head = new_head
+            let m_new = load_manifest(store, ns, new_head)
+            let (sup, rows_out) = merge_diff(old_ids, rows_of, m_new)
+            for id in sup {
+              superseded.push(id)
+            }
+            merge_log.push({
+              tier: picked_tier,
+              segs_in: ff,
+              rows_in,
+              rows_out,
+              prefix_fallback: false,
+            })
+            let old_count = segs
+            segs = m_new.segments.length()
+            // 段数没降 ⇒ 合并无法推进，退出避免死循环。
+            if segs < old_count {
+              going = true
+            }
+          }
+          // 合并无法推进（无可合并 / CAS 全部冲突）。
+          None => ()
+        }
+      }
+    }
+  }
+  // 本轮结束时一次 GC（grace 窗口内的一律保留）。
+  let mut gc_deleted = 0
+  let mut gc_kept_in_grace = 0
+  if merges > 0 {
+    let stat = gc_superseded_segments(store, ns)
+    gc_deleted = stat.deleted
+    gc_kept_in_grace = stat.kept_in_grace
   }
   {
     head,
@@ -1102,9 +1358,11 @@ pub async fn[S : @store.ObjectStore] maybe_compact_segments(
     superseded,
     gc_deleted,
     gc_kept_in_grace,
+    merge_log,
   }
 }
 
 ///|
 pub extend SegGcStat with Debug::{to_repr}
+pub extend SegMergeInfo with Debug::{to_repr}
 pub extend SegCompactOutcome with Debug::{to_repr}

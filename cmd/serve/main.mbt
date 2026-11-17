@@ -2527,8 +2527,9 @@ async fn direct_ingest(
 /// 组提交 flush_fn：把本批所有 payload 解码聚合，一次 `ingest_l0_slab` 落盘，
 /// 返回新的 head manifest id。成功后同步刷新进程内 ns state、head 指针与
 /// metad 元数据，并 `mark_dirty`（后台合并由 cmd/compactd 消费）。
-/// flush 之后调一次 `maybe_compact_segments`：段数 > 8 触发 `compact_optimistic`
-/// 前缀合并（把读放大压回 nprobe × 段数的低段数区）并回收 superseded 段。
+/// flush 之后调一次 `maybe_compact_segments`：size-tiered 同档合并（同 tier
+/// 段数 ≥ fanout=3 时合并该档最旧 3 段；安全阀段数 > tiers×fanout×2 退回
+/// 一次前缀合并，把读放大压回 nprobe × 段数的低段数区）并回收 superseded 段。
 async fn flush_batch(
   store : AnyStore,
   ns : String,

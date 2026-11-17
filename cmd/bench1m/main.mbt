@@ -8,8 +8,10 @@
 //   batch 1..N-1   : @build.ingest_delta_opts(store, cfg, batch, 0, false)
 //                    ⇒ 只追加 delta，**禁自动合并**（max_deltas=0/auto_compact=false）
 //   全部批次后     : 一次 @build.compact_global（把 base + 全部 deltas 折成新 base）
-//   每批写入后     : 一次 @build.maybe_compact_segments（段数 > 8 触发 compact_optimistic
-//                    前缀合并；合并批的 PUT/耗时单独计；合并后 GC 回收 superseded 段）
+//   每批写入后     : 一次 @build.maybe_compact_segments（size-tiered 同档合并：
+//                    同 tier 段数 ≥ fanout=3 时合并该档最旧 3 段；安全阀段数
+//                    > tiers×fanout×2 退回一次前缀合并；合并批的 PUT/耗时单独计；
+//                    本轮结束后 GC 回收 superseded 段）
 //
 // 查询路径（样本全部来自第一批 docs，不依赖后续 docs）：
 //   cold-metadata : resident 关闭，每查询 @query.open + bm25/vec，逐查询计量后恢复
@@ -444,7 +446,7 @@ fn collect_queries(
 
 ///|
 /// 合并批单独计量（常规批只含 ingest 的 PUT；合并批 = maybe_compact_segments
-/// 触发的前缀合并 + superseded 段 GC 的 PUT/耗时）。
+/// 触发的 size-tiered 合并/安全阀前缀合并 + superseded 段 GC 的 PUT/耗时）。
 priv struct MergeStat {
   batch : Int
   merges : Int
@@ -455,6 +457,17 @@ priv struct MergeStat {
   segs_after : Int
   gc_deleted : Int
   gc_kept_in_grace : Int
+}
+
+///|
+/// 逐次合并明细（批次号 + @build.SegMergeInfo 的观测口径）。
+priv struct MergeDetail {
+  batch : Int
+  tier : Int
+  segs_in : Int
+  rows_in : Int
+  rows_out : Int
+  fallback : Bool
 }
 
 ///|
@@ -756,6 +769,108 @@ async fn batch_manifest_info(
     _ => return (-1, "<n/a>")
   }
   (m.segments.length(), m.centroid_version)
+}
+
+///|
+/// 写入结束时的 tier 分布（每 tier 段数/行数）与段数上界（tiers × fanout）。
+async fn tier_dist_lines(
+  store : CountingStore,
+  ns : String,
+  base_rows : Int,
+  fanout : Int,
+) -> Array[String] {
+  let out : Array[String] = Array()
+  let (head, _newer) = @store.read_head_state(store, ns, "")
+  if head == "" {
+    out.push("<no head>")
+    return out
+  }
+  let body = match store.get("\{ns}/_manifest/\{head}.json") {
+    Some(bs) =>
+      @utf8.decode(bs.exact_view()) catch {
+        _ => return out
+      }
+    None => return out
+  }
+  let j = @json.parse(body) catch {
+    _ => return out
+  }
+  let m = @format.manifest_from_json(j) catch {
+    _ => return out
+  }
+  let tier_keys : Array[Int] = Array()
+  let segs_of : Map[Int, Int] = Map([])
+  let rows_of : Map[Int, Int] = Map([])
+  for s in m.segments {
+    let t = @build.segment_tier(s.row_count, base_rows)
+    match segs_of.get(t) {
+      Some(n) => {
+        segs_of.set(t, n + 1)
+        match rows_of.get(t) {
+          Some(r) => rows_of.set(t, r + s.row_count)
+          None => rows_of.set(t, s.row_count)
+        }
+      }
+      None => {
+        segs_of.set(t, 1)
+        rows_of.set(t, s.row_count)
+        tier_keys.push(t)
+      }
+    }
+  }
+  tier_keys.sort()
+  for t in tier_keys {
+    let ns_ = match segs_of.get(t) {
+      Some(n) => n
+      None => 0
+    }
+    let rows = match rows_of.get(t) {
+      Some(r) => r
+      None => 0
+    }
+    out.push(
+      "tier \{pad_left(t.to_string(), 4)}: \{pad_left(ns_.to_string(), 4)} segs, \{pad_left(rows.to_string(), 8)} rows",
+    )
+  }
+  let tiers = tier_keys.length()
+  out.push(
+    "tier 数 = \{tiers}，段数上界 tiers × fanout = \{tiers} × \{fanout} = \{tiers * fanout}（安全阀阈值 ×\{2} = \{tiers * fanout * 2}）",
+  )
+  out
+}
+
+///|
+/// 逐批 segs 轨迹（≤ 60 批全量，否则前后各 15 批 + 省略段数）。
+fn seg_traj(stats : Array[BatchStat]) -> String {
+  let n = stats.length()
+  if n == 0 {
+    return "n/a"
+  }
+  let mut mn = stats[0].seg_count
+  let mut mx = stats[0].seg_count
+  for b in stats {
+    if b.seg_count < mn {
+      mn = b.seg_count
+    }
+    if b.seg_count > mx {
+      mx = b.seg_count
+    }
+  }
+  let mut s = "min=\{mn} max=\{mx} end=\{stats[n - 1].seg_count}："
+  if n <= 60 {
+    for i in 0..<n {
+      s = s + (if i > 0 { "," } else { "" }) + stats[i].seg_count.to_string()
+    }
+  } else {
+    for i in 0..<15 {
+      s = s + (if i > 0 { "," } else { "" }) + stats[i].seg_count.to_string()
+    }
+    s = s + ",…(\{n - 30} 批省略)…"
+    for i in (n - 15)..<n {
+      s = s + "," + stats[i].seg_count.to_string()
+    }
+  }
+  s
 }
 
 ///|
@@ -1066,7 +1181,7 @@ async fn run() -> Unit {
     )
   }
   println(
-    "  每批写入后 @build.maybe_compact_segments：段数 > 8 触发 compact_optimistic 前缀合并（合并批单独计）+ superseded 段 GC",
+    "  每批写入后 @build.maybe_compact_segments：size-tiered 同档合并（同 tier 段数 ≥ fanout=3 时合并该档最旧 3 段；合并批单独计）+ superseded 段 GC",
   )
   if bench_control {
     println(
@@ -1088,6 +1203,7 @@ async fn run() -> Unit {
   let stats : Array[BatchStat] = Array(capacity=batches)
   // 合并批单独计量 + superseded 段 GC 观测（(seg_id, 被合并时刻)）。
   let merge_rows : Array[MergeStat] = Array()
+  let merge_details : Array[MergeDetail] = Array()
   let superseded_log : Array[(String, UInt64)] = Array()
   let bm25_qs : Array[String] = Array()
   let vec_qvs : Array[Array[Float]] = Array()
@@ -1142,6 +1258,16 @@ async fn run() -> Unit {
     let outcome = @build.maybe_compact_segments(store, cfg)
     let msnap = store.inner.cost()
     if outcome.merges > 0 {
+      for info in outcome.merge_log {
+        merge_details.push({
+          batch: stats.length() + 1,
+          tier: info.tier,
+          segs_in: info.segs_in,
+          rows_in: info.rows_in,
+          rows_out: info.rows_out,
+          fallback: info.prefix_fallback,
+        })
+      }
       for id in outcome.superseded {
         superseded_log.push((id, superseded_at))
       }
@@ -1211,10 +1337,10 @@ async fn run() -> Unit {
   println("")
   // ---- 合并批表（段数 > 8 触发的前缀合并 + superseded 段 GC，单独计）----
   if merge_rows.is_empty() {
-    println("merge batches      = none（段数始终 ≤ 8，未触发 maybe_compact_segments）")
+    println("merge batches      = none（未触发 size-tiered 合并）")
   } else {
     println(
-      "merge batches（常规批 PUT 不含下列合并开销；每行 = 该批写入后的 maybe_compact_segments：compact_optimistic 前缀合并 + superseded 段 GC）:",
+      "merge batches（常规批 PUT 不含下列合并开销；每行 = 该批写入后的 maybe_compact_segments：size-tiered 同档合并/安全阀前缀合并 + superseded 段 GC）:",
     )
     println(
       pad("batch", 6) + pad("merges", 8) + pad_left("put MB", 14) +
@@ -1231,6 +1357,28 @@ async fn run() -> Unit {
     let (mt_puts, mt_bytes, mt_ms) = merge_totals(merge_rows)
     println(
       "merge total        = \{merge_rows.length()} 合并批, \{mt_puts} PUTs, \{mb(mt_bytes)} MB, virt \{fmt(mt_ms, 1)} ms",
+    )
+  }
+  // ---- 逐次合并明细（tier / 输入段数 / 输入行 → 输出行）----
+  if !merge_details.is_empty() {
+    println("merge detail（每次合并：tier / 输入段数 / 输入行 → 输出行）:")
+    println(
+      pad("batch", 6) + pad("kind", 8) + pad_left("tier", 6) +
+        pad_left("segs_in", 9) + pad_left("rows_in", 12) +
+        pad_left("rows_out", 12),
+    )
+    let mut rows_in_total = 0
+    let mut rows_out_total = 0
+    for d in merge_details {
+      let kind = if d.fallback { "prefix" } else { "tiered" }
+      rows_in_total += d.rows_in
+      rows_out_total += d.rows_out
+      println(
+        "\{pad_left(d.batch.to_string(), 6)}\{pad(kind, 8)}\{pad_left(d.tier.to_string(), 6)}\{pad_left(d.segs_in.to_string(), 9)}\{pad_left(d.rows_in.to_string(), 12)}\{pad_left(d.rows_out.to_string(), 12)}",
+      )
+    }
+    println(
+      "merge rows total   = \{merge_details.length()} 次合并, 输入 \{rows_in_total} rows, 输出 \{rows_out_total} rows（写入放大分子）",
     )
   }
   println("")
@@ -1381,7 +1529,7 @@ async fn run() -> Unit {
   )
   println("manifest             = \{s.gen}")
   println(
-    "  (每批写入后的段数压力合并走 @build.maybe_compact_segments → compact_optimistic；compact_global 在 slab 写路径下恒 no-op)",
+    "  (每批写入后的段数压力合并走 @build.maybe_compact_segments → compact_optimistic（size-tiered 同档合并 + 安全阀前缀合并）；compact_global 在 slab 写路径下恒 no-op)",
   )
   println(
     "storage bytes        = before compact \{mb(s.storage_before)} MB -> after compact \{mb(s.storage_after)} MB",
@@ -1392,6 +1540,12 @@ async fn run() -> Unit {
   println(
     "   旧代在 GLOBAL_GC_GRACE_MS 后由后续 ingest/compact 的 grace GC 回收)",
   )
+  // ---- size-tiered 段分布与段数轨迹（写入结束时点；只读 GET 放查询之后）----
+  println("== size-tiered 段分布（写入结束时点）==")
+  for line in tier_dist_lines(store, ns, cfg.segment_rows, @build.SEGMENT_TIER_FANOUT) {
+    println("\{line}")
+  }
+  println("segs 轨迹（逐批）   = \{seg_traj(stats)}")
   // ---- superseded 段 GC 计数（50k 档结束时点；只读 LIST/GET 放查询之后）----
   let seg_prefix = "\{ns}/_segments/"
   let dir_seen : Set[String] = Set([])

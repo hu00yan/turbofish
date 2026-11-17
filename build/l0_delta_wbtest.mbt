@@ -175,15 +175,16 @@ async test "l0 slab: 200 docs within 5 puts" {
   let mid = ingest_l0_slab(bs, cfg, mkdocs(200, 8, 2UL, 5U), [])
   let puts = bs.tracker().puts
   assert_eq(puts <= 5, true) // 实测 4 次（slab + manifest + head log + head 指针）
-  // 新段是单文件 slab，没有碎片对象
+  // 新段是单文件 slab：只有 slab 本体 + 兼容元对象，没有 per-cid 碎片
   let m2 = head_manifest_of(bs, "l0budget")
   assert_eq(m2.id, mid)
   assert_eq(m2.segments.length(), 2)
   assert_eq(m2.segments[1].row_count, 200)
   assert_eq(is_l0_slab_segment(m2.segments[1].id), true)
   let segp = "l0budget/_segments/\{m2.segments[1].id}"
-  assert_eq(mem.list("\{segp}/").length(), 1)
+  assert_eq(mem.list("\{segp}/").length(), 2)
   assert_eq(mem.head_version("\{segp}/segment.slab") is Some(_), true)
+  assert_eq(mem.head_version("\{segp}/meta.json") is Some(_), true)
   // 列回读一致
   let docs = load_segment_docs(bs, "l0budget", m2.segments[1], None, 8)
   assert_eq(docs.length(), 200)
@@ -336,4 +337,32 @@ async test "l0 slab: global vec chain survives ingest and optimistic compact" {
   )
   assert_eq(docs.length(), 8)
   assert_eq(docs[0].id, 1UL)
+}
+
+///|
+/// 不变量：manifest 里的每个段都必须在 `_segments/{id}/meta.json` 有可读元对象。
+/// 回归：`ingest_l0_slab` 曾经只写 slab、丢掉 meta.json，导致 query / compact /
+/// compact_global 在线上写路径产生的段上全部 NotFound。
+async test "l0 slab: 每个 manifest 段都有可读 meta.json（含 compact_optimistic 合并段）" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0metainv"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(5, 8, 1UL, 3U), [])
+  let m1 = head_manifest_of(mem, "l0metainv")
+  for s in m1.segments {
+    let key = segment_meta_key("l0metainv", s.id)
+    assert_eq(mem.get(key) is Some(_), true)
+  }
+  // compact_optimistic 合并出的段同样必须有
+  let _ = compact_optimistic(mem, cfg)
+  let m2 = head_manifest_of(mem, "l0metainv")
+  for s in m2.segments {
+    let key = segment_meta_key("l0metainv", s.id)
+    assert_eq(mem.get(key) is Some(_), true)
+  }
 }

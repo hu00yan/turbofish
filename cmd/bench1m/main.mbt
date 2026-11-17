@@ -966,6 +966,8 @@ async fn run() -> Unit {
   let seed = env_int("BENCH_SEED", 7)
   // env_int 把 "0"/非法/缺失都折回默认值 0 ⇒ 这里 !0 即“开关打开”。
   let seg_compact = env_int("BENCH_SEG_COMPACT", 0) != 0
+  // 写路径：legacy（ingest + ingest_delta_opts，历史多对象写）或 slab（serve 线上路径）。
+  let write_slab = env_int("BENCH_WRITE_SLAB", 0) != 0
   // 同理：BENCH_CONTROL 默认 0（关）；!0 即开启 ControlPlane 复用 Namespace。
   let bench_control = env_int("BENCH_CONTROL", 0) != 0
   let nprobe = env_int("BENCH_NPROBE", 8)
@@ -1002,9 +1004,13 @@ async fn run() -> Unit {
   } else {
     println("ground truth: nprobe=\{nlist} index result (BENCH_EXACT_GT=0 近似；设 1 用暴搜)")
   }
-  println(
-    "write path: batch0=ingest, batch1..=ingest_delta_opts(max_deltas=0, auto_compact=false), then 1x compact_global",
-  )
+  if write_slab {
+    println("write path: 每批 ingest_l0_slab（serve 线上路径，单对象 slab），then 1x compact_global")
+  } else {
+    println(
+      "write path: batch0=ingest, batch1..=ingest_delta_opts(max_deltas=0, auto_compact=false), then 1x compact_global",
+    )
+  }
   if seg_compact {
     println(
       "  then 1x @build.compact (BENCH_SEG_COMPACT=1: 全部段合并成 1 段，重建 global base)",
@@ -1061,7 +1067,9 @@ async fn run() -> Unit {
     }
     store.reset_writes()
     store.inner.reset_cost()
-    if stats.is_empty() {
+    if write_slab {
+      let _ = @build.ingest_l0_slab(store, cfg, docs, [])
+    } else if stats.is_empty() {
       @build.ingest(store, cfg, docs)
     } else {
       // 禁自动合并：链长由 bench 自己控制，最后一次性 compact_global。

@@ -68,6 +68,13 @@ fn same_ids(a : Array[UInt64], b : Array[UInt64]) -> Bool {
 }
 
 ///|
+/// 段的兼容元对象 key：`{ns}/_segments/{seg_id}/meta.json`。
+/// slab 内也内嵌同一份 meta（"meta" 组件），但这个对象是所有读者的公共契约。
+pub fn segment_meta_key(ns : String, seg_id : String) -> String {
+  "\{ns}/_segments/\{seg_id}/meta.json"
+}
+
+///|
 /// 段是否为 SlabV2 单文件布局：`slabseg-` 前缀（L0）或 `segment.slab` 存在
 /// （旧 `write_segment_slab` 输出）。后者需要 1 次 HEAD_Version 探测。
 pub async fn[S : @store.ObjectStore] segment_is_slab(
@@ -329,12 +336,16 @@ pub async fn[S : @store.ObjectStore] ingest_l0_slab(
     None => ()
   }
   let mut slab_write : (String, Bytes)? = None
+  // 不变量：manifest 里的每个段都必须有可读的 `_segments/{id}/meta.json`。
+  // query / compact / compact_global 都用它；slab 内嵌的 meta 只是读者优化。
+  let mut meta_write : (String, Bytes)? = None
   if docs.length() > 0 {
     let seg_id = new_slab_segment_id()
-    let (slab_bytes, _meta_bytes, meta) = build_segment_slab(
+    let (slab_bytes, meta_bytes, meta) = build_segment_slab(
       cfg, cent, docs, 0, docs.length(), seg_id~,
     )
     slab_write = Some((segment_slab_key(ns, seg_id), slab_bytes))
+    meta_write = Some((segment_meta_key(ns, seg_id), meta_bytes))
     segs.push(meta)
   }
   // 4. tombstone（roar 对象只在删除集合变化时写）
@@ -475,6 +486,10 @@ pub async fn[S : @store.ObjectStore] ingest_l0_slab(
     Some(kv) => items.push(kv)
     None => ()
   }
+  match meta_write {
+    Some(kv) => items.push(kv)
+    None => ()
+  }
   match tomb_write {
     Some(kv) => items.push(kv)
     None => ()
@@ -595,10 +610,13 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
   // 合并段：只上传一次；重试期间复用（乐观 rebase 的关键）
   let merged_seg : @format.SegmentMeta? = if live.length() > 0 {
     let seg_id = new_slab_segment_id()
-    let (slab_bytes, _meta_bytes, meta) = build_segment_slab(
+    let (slab_bytes, meta_bytes, meta) = build_segment_slab(
       cfg, cent, live, 0, live.length(), seg_id~,
     )
-    store.put(segment_slab_key(ns, seg_id), slab_bytes)
+    store.put_many([
+      (segment_slab_key(ns, seg_id), slab_bytes),
+      (segment_meta_key(ns, seg_id), meta_bytes),
+    ])
     Some(meta)
   } else {
     None

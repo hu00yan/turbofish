@@ -435,6 +435,22 @@ async fn[S : @store.ObjectStore] rebuild_global_vec_parts(
       Some(om) =>
         for si in 0..<om.segments.length() {
           let seg = om.segments[si]
+          // SlabV2 单文件段：向量在 slab 的 `vector` 组件里，没有
+          // `vec/part-{cid}.bin`，也没有 `meta.json`——走 lab 读路径，
+          // 否则线上 write path（ingest_l0_slab）产生的段永远无法全局压缩。
+          if segment_is_slab(store, ns, seg.id) {
+            let sdocs = load_slab_docs(store, ns, seg, None, dim)
+            for r in 0..<sdocs.length() {
+              let raw = sdocs[r].vector
+              let v = if cfg.normalize_vecs { normalize_one(raw, dim) } else { raw }
+              let cid = assign_cid(v, cent, dim)
+              rows[cid].push((si, r))
+              for d in 0..<dim {
+                data[cid].push(v[d])
+              }
+            }
+            continue
+          }
           let old_norm = segment_vec_normalized(store, ns, seg.id)
           let need_norm = cfg.normalize_vecs && !old_norm
           for cid in segment_partitions(store, ns, seg.id) {

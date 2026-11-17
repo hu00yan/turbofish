@@ -11,6 +11,7 @@
 // - per-segment 解码缓存（dir/doc_len/id/过滤列/blockmax，跨查询复用）
 // - seg meta.json stats：filter 与段统计不相交时整段跳过
 // - id_encoding=dense_u64：row→id 用 min_id+行号，不读 id.bin
+// - id 列 runs_u64（列头自描述）：读侧二分定位 run 再线性取行，不展开全列
 // - 字典列按 code 比对、bool 位图直接查位、PQ16 分区 ADC
 // - fts/blockmax.bin 存在时 BM25 走 block-max WAND（正确性与暴力路径一致）
 
@@ -105,7 +106,7 @@ pub(all) struct CachedSeg {
   bloom : @format.Bloom?
   mut dir : Array[@format.FtsDirEntry]?
   mut doc_len : Array[Int]?
-  mut ids : Array[UInt64]?
+  mut ids : @format.IdCol?
   mut blockmax : Array[Array[(Int, Int)]]?
   mut blockmax_size : Int
   mut blockmax_tried : Bool
@@ -377,10 +378,7 @@ pub async fn[S : @store.ObjectStore] warm_namespace(
         Some(b) => b
         None => raise @core.NotFound(key)
       }
-      let arr = match @format.decode_col(bs) {
-        @format.ColU64(x) => x
-        _ => raise @core.Corrupt("id column dtype is not u64")
-      }
+      let arr = @format.decode_id_col(bs)
       need_cs[i].ids = Some(arr)
     }
   }
@@ -549,6 +547,11 @@ const SLAB_INDEX_PREFETCH : Int = 4096
 const SLAB_INDEX_TAIL_PREFETCH : Int = 65536
 
 ///|
+/// SlabIndex 单条目字节上界估算（2B 名长 + 名 ≤15B + 8 + 8 + 4）：前置 index
+/// 超出头预读窗口时按剩余条目数定长续拉（不足再拉），不拉数据区。
+const SLAB_INDEX_ENTRY_MAX : Int = 37
+
+///|
 /// SlabV2 单文件段的 key。
 fn seg_slab_key(ns : String, seg_id : String) -> String {
   "\{ns}/_segments/\{seg_id}/segment.slab"
@@ -647,22 +650,64 @@ async fn[S : @store.ObjectStore] load_slab_index(
   match slab_index_of_header_bytes(hdr) {
     Some(idx) => Some(idx)
     None => {
-      // index 不在头部附近：按 header 里的 index_offset 补拉尾部切片。
       let (_ver, index_offset) = @format.decode_slab_header(hdr) catch {
         _ => return None
       }
       let off = index_offset.to_int()
-      if off <= 0 {
-        return None
-      }
-      match n.store.get_range(key, @store.ByteRange::{ off: off, len: SLAB_INDEX_TAIL_PREFETCH }) {
-        Some(tail) => {
-          let idx = @format.decode_slab_index(tail, 0) catch {
-            _ => return None
-          }
-          Some(idx)
+      if off == @format.SLAB_HEADER_LEN {
+        // 前置 index 超出头预读窗口（分区多的段）：从断点续拉剩余 index
+        // 字节（定长估算、不足再拉、至多 8 轮），不拉数据区。完整后用
+        // 已解条目直接组 SlabIndex，不再二次解码。
+        let scan0 = @format.scan_slab_index(hdr, off) catch {
+          _ => return None
         }
-        None => None
+        let mut idx = scan0.0
+        let count = scan0.1
+        let mut pos = scan0.2
+        let mut done = scan0.3
+        let mut acc = hdr
+        let mut tries = 0
+        while !done && tries < 8 {
+          tries += 1
+          let remaining = count - idx.entries.length()
+          if remaining <= 0 {
+            break
+          }
+          let want = remaining * SLAB_INDEX_ENTRY_MAX + 32
+          match n.store.get_range(key, @store.ByteRange::{ off: pos, len: want }) {
+            Some(part) => {
+              let b = Buffer()
+              b.write_bytesview(acc.exact_view(start=0, end=pos))
+              b.write_bytes(part.exact_view())
+              acc = b.to_bytes()
+              let scan = @format.scan_slab_index(acc, off) catch {
+                _ => return None
+              }
+              idx = scan.0
+              pos = scan.2
+              done = scan.3
+            }
+            None => return None
+          }
+        }
+        if done {
+          Some(idx)
+        } else {
+          None
+        }
+      } else if off > 0 {
+        // 旧尾部布局（兼容）：按 header 里的 index_offset 补拉尾部切片。
+        match n.store.get_range(key, @store.ByteRange::{ off: off, len: SLAB_INDEX_TAIL_PREFETCH }) {
+          Some(tail) => {
+            let idx = @format.decode_slab_index(tail, 0) catch {
+              _ => return None
+            }
+            Some(idx)
+          }
+          None => None
+        }
+      } else {
+        None
       }
     }
   }
@@ -1413,22 +1458,19 @@ async fn[S : @store.ObjectStore] seg_doc_len(
 }
 
 ///|
-/// id 列（缓存；dense 段不加载）。
+/// id 列（缓存；dense 段不加载）。runs_u64 段返回 run 表（不展开全列），
+/// 逐行列返回 IdPlain。
 async fn[S : @store.ObjectStore] seg_ids(
   n : Namespace[S],
   cs : CachedSeg,
   seg_id : String,
-) -> Array[UInt64] {
+) -> @format.IdCol {
   match cs.ids {
     Some(a) => a
     None => {
-      let a = match
-        @format.decode_col(
-          seg_read_component_or_fail(n, seg_id, cs, "rows/id.bin"),
-        ) {
-        @format.ColU64(x) => x
-        _ => raise @core.Corrupt("id column dtype is not u64")
-      }
+      let a = @format.decode_id_col(
+        seg_read_component_or_fail(n, seg_id, cs, "rows/id.bin"),
+      )
       cs.ids = Some(a)
       a
     }
@@ -1482,7 +1524,8 @@ async fn[S : @store.ObjectStore] seg_pq_codebook(
 }
 
 ///|
-/// row→id：dense 段用 min_id+行号，否则读 id 列（缓存）。
+/// row→id：dense 段用 min_id+行号；否则读 id 列（缓存）——runs_u64 段
+/// 二分定位 run 再线性取行，逐行列直接下标。
 async fn[S : @store.ObjectStore] row_id(
   n : Namespace[S],
   cs : CachedSeg,
@@ -1493,10 +1536,7 @@ async fn[S : @store.ObjectStore] row_id(
     return cs.min_id + row.to_uint64()
   }
   let ids = seg_ids(n, cs, seg_id)
-  match ids.get(row) {
-    Some(x) => x
-    None => raise @core.Corrupt("row \{row} out of range in id column")
-  }
+  ids.at(row)
 }
 
 ///|

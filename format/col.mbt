@@ -17,6 +17,14 @@
 // 解码对两种 flags 都兼容；encode_col 新写文件字符串一律走字典（distinct > 65535
 // 自动回退普通串列）、bool 一律走位图。
 //
+// u64 列 runs_u64 编码（flags bit2，id 列专用）：payload = run 表 × 16B
+//   (min_id u64 LE, start_row u32 LE, len u32 LE)
+// 行区间 [start_row, start_row+len) 内 id = min_id + (row - start_row)，
+// run 按 start_row 升序连续覆盖 [0, count)。extra = run 数。
+// 写侧 encode_id_col 在 run 表严格小于逐行 u64 时选用（连续 run 少的段免付
+// 逐行字节）；读侧 IdCol::at 二分定位 run 后线性取行，不解压全列。
+// decode_col 对 bit2 兼容展开为 ColU64（老调用方零改动）。
+//
 // SPNDVEC1（向量列），16B 头：
 //   [0..8)   magic "SPNDVEC1"
 //   [8]      dtype: 4=f32 7=f16 8=sq8（payload 见 quant.mbt）
@@ -65,6 +73,14 @@ pub const COL_FLAG_DICT : Int = 1
 pub const COL_FLAG_BITMAP : Int = 2
 
 ///|
+/// SPNDCOL1 flags bit2：u64 列 runs_u64 编码（id 列专用，run 表见文件头注释）。
+pub const COL_FLAG_RUNS : Int = 4
+
+///|
+/// id 编码名（runs_u64 = run 表 + 二分定位；标记在列头 flags，不动 meta）。
+pub const ID_ENCODING_RUNS : String = "runs_u64"
+
+///|
 #derive(Debug)
 pub(all) enum ColData {
   ColU64(Array[UInt64])
@@ -74,6 +90,25 @@ pub(all) enum ColData {
   ColStr(Array[String])
   ColBool(Array[Bool])
   ColVec(Int, Array[Float])
+}
+
+///|
+/// runs_u64 run 表项：行区间 [start_row, start_row+len) 内
+/// id = min_id + (row - start_row)。
+#derive(Debug, Eq)
+pub(all) struct IdRun {
+  min_id : UInt64
+  start_row : Int
+  len : Int
+}
+
+///|
+/// id 列内存形态：IdRuns（runs_u64 run 表，二分定位、不展开）或
+/// IdPlain（逐行 u64）。
+#derive(Debug)
+pub(all) enum IdCol {
+  IdRuns(Array[IdRun])
+  IdPlain(Array[UInt64])
 }
 
 ///|
@@ -194,6 +229,187 @@ pub fn is_bitmap_bool(bs : Bytes) -> Bool {
 }
 
 ///|
+/// 把按行 id 列切成极大 run：ids[i] == ids[i-1] + 1（环回语义，与测量口径一致）
+/// 时并入同一 run。run 按行号升序、连续覆盖 [0, ids.length())。
+pub fn id_runs_of(ids : Array[UInt64]) -> Array[IdRun] {
+  let runs : Array[IdRun] = Array()
+  let n = ids.length()
+  let mut i = 0
+  while i < n {
+    let min_id = ids[i]
+    let start = i
+    i += 1
+    while i < n && ids[i] == ids[i - 1] + 1UL {
+      i += 1
+    }
+    runs.push({ min_id, start_row: start, len: i - start })
+  }
+  runs
+}
+
+///|
+/// runs_u64 列编码：20B SPNDCOL1 头（dtype=u64, flags=COL_FLAG_RUNS,
+/// count=行数, extra=run 数）+ run 表 × 16B。
+pub fn encode_col_id_runs(row_count : Int, runs : Array[IdRun]) -> Bytes {
+  let b = Buffer()
+  write_col_header(b, DT_U64, COL_FLAG_RUNS, row_count, runs.length())
+  for r in runs {
+    b.write_uint64_le(r.min_id)
+    b.write_uint_le(r.start_row.reinterpret_as_uint())
+    b.write_uint_le(r.len.reinterpret_as_uint())
+  }
+  b.to_bytes()
+}
+
+///|
+/// id 列编码选择：run 表严格小于逐行 u64（16B/run < 8B/row）时写 runs_u64，
+/// 否则原样逐行——非连续 id（run 近似行数）的段字节与读行为都不变。
+pub fn encode_id_col(ids : Array[UInt64]) -> Bytes {
+  let runs = id_runs_of(ids)
+  if runs.length() * 16 < ids.length() * 8 {
+    encode_col_id_runs(ids.length(), runs)
+  } else {
+    encode_col(ColU64(ids))
+  }
+}
+
+///|
+/// 列是否 runs_u64 编码（dtype=u64 且 flags bit2）。
+pub fn is_id_runs_col(bs : Bytes) -> Bool {
+  match (bs.get(8), bs.get(9)) {
+    (Some(d), Some(f)) =>
+      d.to_int() == DT_U64 && (f.to_int() & COL_FLAG_RUNS) != 0
+    _ => false
+  }
+}
+
+///|
+/// id 列的编码名（"runs_u64" / "row_u64"）。测量与测试用。
+pub fn id_encoding_of(bs : Bytes) -> String {
+  if is_id_runs_col(bs) {
+    ID_ENCODING_RUNS
+  } else {
+    "row_u64"
+  }
+}
+
+///|
+/// 解码 runs_u64 run 表。非 runs 列 / 覆盖不连续 / 长度不符一律 Corrupt。
+pub fn decode_id_runs(bs : Bytes) -> Array[IdRun] raise @core.SpndError {
+  @core.check_magic(bs, COL_MAGIC)
+  let fa = bs.to_fixedarray()
+  let dtype8 = match bs.get(8) {
+    Some(x) => x.to_int()
+    None => raise @core.Truncated("col header")
+  }
+  let flags8 = match bs.get(9) {
+    Some(x) => x.to_int()
+    None => raise @core.Truncated("col header")
+  }
+  if dtype8 != DT_U64 || (flags8 & COL_FLAG_RUNS) == 0 {
+    raise @core.Corrupt("not a runs_u64 id column")
+  }
+  let count = fa_i32(fa, 10)
+  let nrun = fa_i32(fa, 14)
+  if count < 0 || nrun < 0 {
+    raise @core.Corrupt("runs_u64 col header")
+  }
+  if 20 + nrun * 16 > bs.length() {
+    raise @core.Truncated("runs_u64 run table")
+  }
+  let runs : Array[IdRun] = Array(capacity=nrun)
+  let mut covered = 0
+  for i in 0..<nrun {
+    let pos = 20 + i * 16
+    let min_id = fa_u64(fa, pos)
+    let start_row = fa_u32(fa, pos + 8).reinterpret_as_int()
+    let len = fa_u32(fa, pos + 12).reinterpret_as_int()
+    if start_row < 0 || len < 0 || start_row != covered {
+      raise @core.Corrupt("runs_u64 run table coverage")
+    }
+    covered += len
+    runs.push({ min_id, start_row, len })
+  }
+  if covered != count {
+    raise @core.Corrupt("runs_u64 run table row count")
+  }
+  runs
+}
+
+///|
+/// id 列解码（自描述）：runs_u64 → IdRuns（保持 run 表、不展开），
+/// 否则逐行 → IdPlain。
+pub fn decode_id_col(bs : Bytes) -> IdCol raise @core.SpndError {
+  if is_id_runs_col(bs) {
+    IdRuns(decode_id_runs(bs))
+  } else {
+    match decode_col(bs) {
+      ColU64(a) => IdPlain(a)
+      _ => raise @core.Corrupt("id column dtype is not u64")
+    }
+  }
+}
+
+///|
+/// 行 → id：runs_u64 二分定位 run 再线性取行（id = min_id + row - start_row），
+/// 逐行列直接下标；越界 raise Corrupt。
+pub fn IdCol::at(self : IdCol, row : Int) -> UInt64 raise @core.SpndError {
+  match self {
+    IdRuns(runs) => {
+      if row < 0 || runs.is_empty() {
+        raise @core.Corrupt("row \{row} out of range in id run table")
+      }
+      // 二分：最后一个满足 start_row <= row 的 run
+      let mut lo = 0
+      let mut hi = runs.length()
+      while lo < hi {
+        let mid = (lo + hi) / 2
+        if runs[mid].start_row <= row {
+          lo = mid + 1
+        } else {
+          hi = mid
+        }
+      }
+      if lo == 0 {
+        raise @core.Corrupt("row \{row} out of range in id run table")
+      }
+      let r = runs[lo - 1]
+      if row - r.start_row >= r.len {
+        raise @core.Corrupt("row \{row} out of range in id run table")
+      }
+      r.min_id + (row - r.start_row).to_uint64()
+    }
+    IdPlain(arr) =>
+      if row >= 0 && row < arr.length() {
+        arr[row]
+      } else {
+        raise @core.Corrupt("row \{row} out of range in id column")
+      }
+  }
+}
+
+///|
+/// 展开为逐行数组（filter 下推等需要整列的调用方）。
+pub fn IdCol::to_array(self : IdCol) -> Array[UInt64] {
+  match self {
+    IdPlain(a) => a
+    IdRuns(runs) => {
+      let mut n = 0
+      for r in runs {
+        n += r.len
+      }
+      let arr : Array[UInt64] = Array(capacity=n)
+      for r in runs {
+        for j in 0..<r.len {
+          arr.push(r.min_id + j.to_uint64())
+        }
+      }
+      arr
+    }
+  }
+}
+
+///|
 pub fn encode_col(cd : ColData) -> Bytes {
   let b = Buffer()
   match cd {
@@ -300,16 +516,20 @@ pub fn decode_col(bs : Bytes) -> ColData raise @core.SpndError {
     raise @core.Corrupt("col header")
   }
   match dtype8 {
-    d if d == DT_U64 => {
-      if 20 + count * 8 > bs.length() {
-        raise @core.Truncated("u64 col payload")
+    d if d == DT_U64 =>
+      if (flags8 & COL_FLAG_RUNS) != 0 {
+        // runs_u64 列：兼容路径展开成逐行 ColU64（下游 match ColU64 零改动）
+        ColU64(IdCol::to_array(IdRuns(decode_id_runs(bs))))
+      } else {
+        if 20 + count * 8 > bs.length() {
+          raise @core.Truncated("u64 col payload")
+        }
+        let arr : Array[UInt64] = Array(capacity=count)
+        for i in 0..<count {
+          arr.push(fa_u64(fa, 20 + i * 8))
+        }
+        ColU64(arr)
       }
-      let arr : Array[UInt64] = Array(capacity=count)
-      for i in 0..<count {
-        arr.push(fa_u64(fa, 20 + i * 8))
-      }
-      ColU64(arr)
-    }
     d if d == DT_U32 => {
       if 20 + count * 4 > bs.length() {
         raise @core.Truncated("u32 col payload")
@@ -575,3 +795,6 @@ pub fn decode_vec_payload(
 }
 
 pub extend ColData with Debug::{to_repr}
+pub extend IdRun with Debug::{to_repr}
+pub extend IdRun with Eq::{not_equal, equal}
+pub extend IdCol with Debug::{to_repr}

@@ -237,8 +237,7 @@ async fn[S : @store.ObjectStore] load_column_values(
           cache.set(field, cv)
           return cv
         } else {
-          let ids = seg_ids(n, cs, seg_id)
-          let cv = ColU64(ids)
+          let cv = ColU64(seg_ids(n, cs, seg_id).to_array())
           cache.set(field, cv)
           return cv
         }

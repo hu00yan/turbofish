@@ -474,8 +474,8 @@ async fn[S : @store.ObjectStore] write_segment(
   let put = fn(k : String, v : Bytes) -> Unit {
     items.push((k, v))
   }
-  // rows/id.bin（始终 u64 列；dense 标记在 meta.json）
-  let bs_id = @format.encode_col(@format.ColU64(ids))
+  // rows/id.bin（u64 列；连续 run 少时 runs_u64 编码，dense 标记在 meta.json）
+  let bs_id = @format.encode_id_col(ids)
   put("\{segp}/rows/id.bin", bs_id)
   size_bytes += bs_id.length()
   // text 始终普通字符串列；category 由 use_dict_cols 控制

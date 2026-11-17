@@ -480,7 +480,7 @@ async fn[S : @store.ObjectStore] collect_global_candidates(
   seg_norm : Array[Bool],
   seg_dense : Array[Bool],
   seg_min_id : Array[UInt64],
-  seg_ids_arr : Array[Array[UInt64]?],
+  seg_ids_arr : Array[@format.IdCol?],
   tomb : Set[UInt64],
   allowed_ids : Set[UInt64]?,
   heap : TopKHeap,
@@ -628,7 +628,7 @@ fn[S] score_global_part(
   seg_norm : Array[Bool],
   seg_dense : Array[Bool],
   seg_min_id : Array[UInt64],
-  seg_ids_arr : Array[Array[UInt64]?],
+  seg_ids_arr : Array[@format.IdCol?],
   tomb : Set[UInt64],
   allowed_ids : Set[UInt64]?,
   heap : TopKHeap,
@@ -667,12 +667,7 @@ fn[S] score_global_part(
       seg_min_id[si] + row.to_uint64()
     } else {
       match seg_ids_arr[si] {
-        Some(arr) =>
-          if row >= 0 && row < arr.length() {
-            arr[row]
-          } else {
-            raise @core.Corrupt("row \{row} out of range in id column")
-          }
+        Some(col) => col.at(row)
         None => raise @core.Corrupt("missing id column for non-dense segment")
       }
     }
@@ -905,7 +900,7 @@ async fn[S : @store.ObjectStore] vec_global_search(
   let seg_norm : Array[Bool] = Array(capacity=nseg)
   let seg_dense : Array[Bool] = Array(capacity=nseg)
   let seg_min_id : Array[UInt64] = Array(capacity=nseg)
-  let seg_ids_arr : Array[Array[UInt64]?] = Array(capacity=nseg)
+  let seg_ids_arr : Array[@format.IdCol?] = Array(capacity=nseg)
   let seg_matchers : Array[RowMatcher?] = Array(capacity=nseg)
   let seg_bitsets : Array[BitSet?] = Array(capacity=nseg)
 

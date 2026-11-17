@@ -341,12 +341,7 @@ pub async fn[S : @store.ObjectStore] QueryWorker::execute_partition_slice(
             cs.min_id + row.to_uint64()
           } else {
             match cs.ids {
-              Some(arr) =>
-                if row >= 0 && row < arr.length() {
-                  arr[row]
-                } else {
-                  continue
-                }
+              Some(col) => col.at(row) catch { _ => continue }
               None => continue
             }
           }
@@ -404,12 +399,7 @@ pub async fn[S : @store.ObjectStore] QueryWorker::execute_partition_slice(
             cs.min_id + row.to_uint64()
           } else {
             match cs.ids {
-              Some(arr) =>
-                if row >= 0 && row < arr.length() {
-                  arr[row]
-                } else {
-                  continue
-                }
+              Some(col) => col.at(row) catch { _ => continue }
               None => continue
             }
           }

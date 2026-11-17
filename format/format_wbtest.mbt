@@ -243,3 +243,99 @@ test "bad magic raises" {
     _ => ()
   }
 }
+
+///|
+/// 构造 12 runs / 300 行的 id 列（run 10 行连续、run 间空洞 5）：空洞合并段形态。
+fn mk_hole_ids() -> Array[UInt64] {
+  let ids : Array[UInt64] = Array()
+  let mut base = 1000UL
+  for _ in 0..<12 {
+    for j in 0..<10 {
+      ids.push(base + j.to_uint64())
+    }
+    base += 15UL
+  }
+  ids
+}
+
+///|
+/// runs_u64：连续 run 少的 id 列写 run 表；IdCol::at 二分定位、to_array /
+/// decode_col 兼容展开都与原 id 列逐行一致。
+test "format: encode_id_col few runs → runs_u64，二分/展开与逐行一致" {
+  let ids = mk_hole_ids()
+  let bs = encode_id_col(ids)
+  assert_eq(id_encoding_of(bs), ID_ENCODING_RUNS)
+  assert_eq(is_id_runs_col(bs), true)
+  let runs = decode_id_runs(bs)
+  assert_eq(runs.length(), 12)
+  assert_eq(runs[0].min_id, 1000UL)
+  assert_eq(runs[0].start_row, 0)
+  assert_eq(runs[0].len, 10)
+  assert_eq(runs[11].start_row, 110)
+  assert_eq(runs[11].len, 10)
+  assert_eq(runs[11].min_id, 1165UL)
+  let col = decode_id_col(bs)
+  for r in 0..<ids.length() {
+    assert_eq(col.at(r), ids[r])
+  }
+  // run 边界行（首/末）精确
+  assert_eq(col.at(0), 1000UL)
+  assert_eq(col.at(9), 1009UL)
+  assert_eq(col.at(110), 1165UL)
+  assert_eq(col.at(119), 1174UL)
+  assert_eq(col.to_array(), ids)
+  // 老调用方兼容路径：decode_col 展开为 ColU64
+  match decode_col(bs) {
+    ColU64(a) => assert_eq(a, ids)
+    _ => fail("runs_u64 decode_col 应展开为 ColU64")
+  }
+  // 越界 raise
+  let oob = try {
+    let _ = col.at(ids.length())
+    false
+  } catch {
+    _ => true
+  }
+  assert_eq(oob, true)
+}
+
+///|
+/// 非连续 id（run 近似行数）的段行为不变：run 表不小于逐行时保持 row_u64。
+test "format: 非连续 id encode_id_col 保持逐行 u64" {
+  // 交替 id：每行一个 run ⇒ 16B/run 不小于 8B/row ⇒ 逐行
+  let ids : Array[UInt64] = Array()
+  for i in 0..<100 {
+    ids.push((i * 2).to_uint64())
+  }
+  let bs = encode_id_col(ids)
+  assert_eq(id_encoding_of(bs), "row_u64")
+  assert_eq(is_id_runs_col(bs), false)
+  match decode_id_col(bs) {
+    IdPlain(a) => assert_eq(a, ids)
+    IdRuns(_) => fail("非连续 id 不应走 runs_u64")
+  }
+  // 阈值边界：2 行 1 run（16B == 16B）保持逐行；3 行 1 run（16B < 24B）走 runs
+  assert_eq(id_encoding_of(encode_id_col([7UL, 8UL])), "row_u64")
+  assert_eq(id_encoding_of(encode_id_col([7UL, 8UL, 9UL])), ID_ENCODING_RUNS)
+  assert_eq(id_encoding_of(encode_id_col([])), "row_u64")
+}
+
+///|
+/// runs_u64 run 表完整性校验：覆盖不足/错位一律 Corrupt（不静默错 id）。
+test "format: decode_id_runs 坏 run 表 Corrupt" {
+  // count=5 但 run 只覆盖 3 行
+  let bad = encode_col_id_runs(5, [{ min_id: 1UL, start_row: 0, len: 3 }])
+  let r1 = try {
+    let _ = decode_id_runs(bad)
+    false
+  } catch {
+    _ => true
+  }
+  assert_eq(r1, true)
+  // run 与行数一致但 min_id/行映射可逆：正常解码
+  let ok = encode_col_id_runs(3, [{ min_id: 42UL, start_row: 0, len: 3 }])
+  let runs = decode_id_runs(ok)
+  assert_eq(runs.length(), 1)
+  let col = decode_id_col(ok)
+  assert_eq(col.at(2), 44UL)
+}

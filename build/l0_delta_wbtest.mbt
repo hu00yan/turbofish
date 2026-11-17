@@ -753,3 +753,76 @@ fn meta_id_encoding(bs : Bytes) -> String raise @core.SpndError {
     _ => raise @core.Corrupt("seg meta not object")
   }
 }
+
+///|
+/// 空洞合并段 id 组件 runs_u64：合并两个非相邻 id 段（排序后 2 runs / 600 行）
+/// 时 id 组件写 run 表（id_encoding_of = "runs_u64"，20B+2×16B），meta.json
+/// 的 id_encoding 仍为空（空洞段不稠密；runs 标记在列头自描述），逐行 id
+/// 解码值不变；非连续 id（run ≈ 行数）的段保持逐行 u64（行为不变）。
+async test "空洞合并段 id 组件 runs_u64，非连续 id 段保持逐行" {
+  let store = WbStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0runs"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+    id_dense: true,
+  }
+  let _ = ingest_l0_slab(store, cfg, mkdocs(300, 8, 1000UL, 61U), [])
+  let _ = ingest_l0_slab(store, cfg, mkdocs(300, 8, 1600UL, 62U), [])
+  let merged = compact_optimistic(store, cfg, max_prefix_segments=2)
+  assert_eq(merged is Some(_), true)
+  let m = head_manifest_of(store, "l0runs")
+  assert_eq(m.segments.length(), 1)
+  let seg = m.segments[0]
+  let index = read_slab_index(store, "l0runs", seg.id, seg.size_bytes)
+  let meta_bs = read_slab_component_by_name(store, "l0runs", seg.id, index, "meta")
+  assert_eq(meta_id_encoding(meta_bs), "")
+  let id_bs = read_slab_component_by_name(store, "l0runs", seg.id, index, "id")
+  assert_eq(@format.id_encoding_of(id_bs), @format.ID_ENCODING_RUNS)
+  assert_eq(id_bs.length() < 600 * 8, true)
+  let ids = seg_ids(store, "l0runs", seg)
+  assert_eq(ids.length(), 600)
+  for i in 0..<300 {
+    assert_eq(ids[i], 1000UL + i.to_uint64())
+  }
+  for i in 300..<600 {
+    assert_eq(ids[i], 1600UL + (i - 300).to_uint64())
+  }
+  // 非连续 id（隔行 id，run ≈ 行数）：id 组件保持逐行 u64
+  let store2 = WbStore::new()
+  let cfg2 = {
+    ..BuildConfig::default("l0runs2"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let docs : Array[@core.Doc] = Array()
+  for i in 0..<50 {
+    let vec : Array[Float] = Array(capacity=8)
+    for _ in 0..<8 {
+      vec.push(0.5)
+    }
+    docs.push({
+      id: (i * 2).to_uint64(),
+      text: "t\{i}",
+      vector: vec,
+      category: "c",
+      ts: i.to_int64(),
+      public: true,
+    })
+  }
+  let _ = ingest_l0_slab(store2, cfg2, docs, [])
+  let m2 = head_manifest_of(store2, "l0runs2")
+  let seg2 = m2.segments[0]
+  let index2 = read_slab_index(store2, "l0runs2", seg2.id, seg2.size_bytes)
+  let id_bs2 = read_slab_component_by_name(store2, "l0runs2", seg2.id, index2, "id")
+  assert_eq(@format.id_encoding_of(id_bs2), "row_u64")
+  let ids2 = seg_ids(store2, "l0runs2", seg2)
+  assert_eq(ids2.length(), 50)
+  for i in 0..<50 {
+    assert_eq(ids2[i], (i * 2).to_uint64())
+  }
+}

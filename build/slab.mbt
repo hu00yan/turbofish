@@ -33,7 +33,7 @@ pub fn SlabBuilder::add(
 ///|
 pub fn SlabBuilder::build(
   self : SlabBuilder,
-  index_at_end~ : Bool = true,
+  index_at_end~ : Bool = false,
 ) -> (Bytes, @format.SlabIndex) {
   @format.encode_slab(self.components, index_at_end~)
 }
@@ -82,6 +82,10 @@ pub async fn[S : @store.ObjectStore] read_slab_index_from_tail(
 }
 
 ///|
+/// 前置 Index 大于头预读窗口时的补拉上限（Index 无 Trailer，一次拉完）。
+const SLAB_INDEX_MAX_READ : Int = 65536
+
+///|
 /// 自适应单次 Range GET 读取 Slab Index：
 /// 1. 先尝试拉取头部 [0..1024)；
 /// 2. 若 index_offset == 14（固定偏移），则在同一响应内完成解码（1 次请求）；
@@ -101,7 +105,27 @@ pub async fn[S : @store.ObjectStore] read_slab_index(
       let (_ver, index_offset) = @format.decode_slab_header(hdr_bs)
       let off = index_offset.to_int()
       if off == @format.SLAB_HEADER_LEN {
-        @format.decode_slab_index(hdr_bs, @format.SLAB_HEADER_LEN)
+        // 前置 Index：小索引在头预读内一次解完；大索引（>头预读）从固定
+        // 偏移补拉一次窗口解码（前置布局无 Trailer）。
+        let front = try {
+          Some(@format.decode_slab_index(hdr_bs, @format.SLAB_HEADER_LEN))
+        } catch {
+          _ => None
+        }
+        match front {
+          Some(idx) => idx
+          None => {
+            let win = if size_bytes - off < SLAB_INDEX_MAX_READ {
+              size_bytes - off
+            } else {
+              SLAB_INDEX_MAX_READ
+            }
+            match store.get_range(key, @store.ByteRange::{ off: off, len: win }) {
+              Some(bs) => @format.decode_slab_index(bs, 0)
+              None => raise @core.NotFound(key)
+            }
+          }
+        }
       } else if off > 0 && off < size_bytes {
         // Index 在文件末尾：tail 切片 = [index_offset, size_bytes)（Index + Trailer），
         // 精确一次 Range GET，索引表再大也不会越界。
@@ -218,7 +242,7 @@ pub fn build_segment_slab(
   start : Int,
   end : Int,
   seg_id~ : String,
-  index_at_end~ : Bool = true,
+  index_at_end~ : Bool = false,
 ) -> (Bytes, Bytes, @format.SegmentMeta) {
   let n = end - start
   let dim = docs[start].vector.length()
@@ -278,8 +302,8 @@ pub fn build_segment_slab(
   let enc_flat = if cfg.normalize_vecs { pq_normalize(flat, dim) } else { flat }
   let components : Array[@format.SlabComponentPayload] = Array()
 
-  // 1. ID column
-  let bs_id = @format.encode_col(@format.ColU64(ids))
+  // 1. ID column（连续 run 少时 runs_u64 编码：run 表 < 逐行 u64 时启用）
+  let bs_id = @format.encode_id_col(ids)
   components.push(@format.SlabComponentPayload::new("id", bs_id, n))
 
   // 2. Text column
@@ -491,7 +515,7 @@ pub async fn[S : @store.ObjectStore] write_segment_slab(
   docs : Array[@core.Doc],
   start : Int,
   end : Int,
-  index_at_end~ : Bool = true,
+  index_at_end~ : Bool = false,
 ) -> @format.SegmentMeta {
   let seg_id = new_segment_id()
   let (slab_bytes, bs_meta, meta) = build_segment_slab(
@@ -515,7 +539,7 @@ pub async fn[S : @store.ObjectStore] write_segment_pluggable(
   start : Int,
   end : Int,
   format : @format.SegmentFormat,
-  index_at_end~ : Bool = true,
+  index_at_end~ : Bool = false,
 ) -> @format.SegmentMeta {
   match format {
     LegacyMultiFile => write_segment(store, cfg, cent, docs, start, end)

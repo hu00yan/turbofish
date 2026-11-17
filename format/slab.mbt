@@ -271,12 +271,16 @@ pub fn encode_slab_index(index : SlabIndex) -> Bytes {
 }
 
 ///|
-pub fn decode_slab_index(
+/// 增量解码 SlabIndex：解出 [index_offset, ...) 处能完整解析的条目，返回
+/// （已解条目, 条目总数, 已消费末位, 是否完整）。仅缺字节（截断）时返回
+/// complete=false；magic/计数损坏仍 raise Corrupt。index 超出预读窗口时
+/// 读侧按断点续拉剩余 index 字节（不拉数据区），完整后直接用已解条目。
+pub fn scan_slab_index(
   bs : Bytes,
   index_offset : Int,
-) -> SlabIndex raise @core.SpndError {
+) -> (SlabIndex, Int, Int, Bool) raise @core.SpndError {
   if index_offset < 0 || index_offset + 8 > bs.length() {
-    raise @core.Truncated("slab index out of bounds at \{index_offset}")
+    return ({ entries: Array() }, 0, index_offset, false)
   }
   if bs[index_offset] != b'S' ||
     bs[index_offset + 1] != b'L' ||
@@ -293,21 +297,20 @@ pub fn decode_slab_index(
   let entries : Array[SlabEntry] = Array(capacity=count)
   for _ in 0..<count {
     if pos + 2 > bs.length() {
-      raise @core.Truncated("slab entry name len at \{pos}")
+      return ({ entries }, count, pos, false)
     }
     let nlen = fa_u16(fa, pos)
-    pos += 2
-    if pos + nlen + 20 > bs.length() {
-      raise @core.Truncated("slab entry payload at \{pos}")
+    if pos + nlen + 22 > bs.length() {
+      return ({ entries }, count, pos, false)
     }
     let name_buf = Buffer()
     for j in 0..<nlen {
-      name_buf.write_byte(bs[pos + j])
+      name_buf.write_byte(bs[pos + 2 + j])
     }
     let name = @utf8.decode(name_buf.to_bytes().exact_view()) catch {
       _ => raise @core.Corrupt("slab entry name is not valid utf8")
     }
-    pos += nlen
+    pos += nlen + 2
     let offset = fa_i64(fa, pos)
     pos += 8
     let length = fa_i64(fa, pos)
@@ -316,7 +319,22 @@ pub fn decode_slab_index(
     pos += 4
     entries.push({ name, offset, length, row_count })
   }
-  { entries, }
+  ({ entries }, count, pos, true)
+}
+
+///|
+pub fn decode_slab_index(
+  bs : Bytes,
+  index_offset : Int,
+) -> SlabIndex raise @core.SpndError {
+  if index_offset < 0 || index_offset + 8 > bs.length() {
+    raise @core.Truncated("slab index out of bounds at \{index_offset}")
+  }
+  let (index, _count, _pos, done) = scan_slab_index(bs, index_offset)
+  if !done {
+    raise @core.Truncated("slab index entry payload at \{index_offset}")
+  }
+  index
 }
 
 ///|

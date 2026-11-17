@@ -273,7 +273,13 @@ async fn run_sim(
   println(
     "== compact：合并 \{segs_before} 段 → 1 段（tombstone 物理化）...",
   )
-  @build.compact(store_sim, sim_build_cfg, ns)
+  // @build.compact 已废弃（只识 rows/*.bin）；段级合并走 compact_optimistic，
+  // 一次把全部前缀段折成 1 段（max_prefix=segs_before）。
+  let _ = @build.compact_optimistic(
+    store_sim,
+    sim_build_cfg,
+    max_prefix_segments=segs_before,
+  )
   let n_after = @query.open(store_sim, ns)
   println(
     "  compact 后 segments=\{n_after.manifest.segments.length()} num_docs=\{n_after.manifest.num_docs}（before \{docs_before}）",

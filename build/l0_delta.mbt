@@ -22,6 +22,12 @@
 pub const SLAB_SEG_PREFIX : String = "slabseg"
 
 ///|
+/// superseded 段回收（`gc_superseded_segments`）的 grace 窗口：段被合并掉后，
+/// 旧 manifest 的在途读者可能仍引用它；只有超窗后仍不被任何 live manifest
+/// 引用的段才物理删除。语义对齐 `GLOBAL_GC_GRACE_MS`（时间宽限），默认 300s。
+pub const SEGMENT_GC_GRACE_MS : UInt64 = 300000UL
+
+///|
 /// 生成 L0 单文件段 id（可排序，前缀即存储布局标记）。
 fn new_slab_segment_id() -> String {
   new_scoped_id(SLAB_SEG_PREFIX)
@@ -844,3 +850,261 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
   }
   result
 }
+
+///|
+/// 从 manifest id 解析内嵌毫秒时间戳（`manifest-{13 位 ts}-{writer}-{seq}`）。
+/// 解析不出（旧数据 / 测试短 id）返回 None，GC 一律按「刚发布」保守处理，
+/// 保证不误删时间戳未知的 manifest 所引用的段。
+fn manifest_id_ts_ms(id : String) -> UInt64? {
+  let prefix = "manifest-"
+  if !id.has_prefix(prefix) {
+    return None
+  }
+  let chars = id[prefix.length():].to_array()
+  if chars.length() < 14 || chars[13].to_int() != 45 {
+    return None
+  }
+  let mut n = 0UL
+  for i in 0..<13 {
+    let c = chars[i].to_int()
+    if c < 48 || c > 57 {
+      return None
+    }
+    n = n * 10UL + (c - 48).to_uint64()
+  }
+  Some(n)
+}
+
+///|
+/// superseded 段回收统计：`deleted` = 物理删除的 `slabseg-*` 段目录数；
+/// `kept_live` = 仍被当前 head 引用；`kept_in_grace` = 已被合并掉但仍在
+/// grace 窗口内（有 live manifest 仍可能引用）。
+#derive(Debug)
+pub(all) struct SegGcStat {
+  deleted : Int
+  kept_live : Int
+  kept_in_grace : Int
+}
+
+///|
+/// 回收被合并掉的旧 slab 段（superseded segment GC）。
+///
+/// 「live manifest」= 当前 head ∪ head 日志里发布不满 `grace_ms` 的 manifest
+/// （含并发 sibling / fork——在途读者可能仍钉在上面）。判定规则：只有**不在
+/// 任何 live manifest 里**、且最后一次被引用不晚于 grace 窗口之前的段才删除。
+/// 时间锚点取 manifest id 内嵌的毫秒时间戳（`manifest-{ts}-...`）；解析不出
+/// 的 id 按「刚发布」保守处理 ⇒ 其段永不误删。
+///
+/// 删除面 = 该段目录下的**全部**对象：段 slab + `meta.json` + 该段的
+/// `vec/part-*` 组件（碎片布局的 rows/fts/* 也一并回收）。
+/// 删除前**重新读一次 head** 逐段确认（防「扫描后 head 又引用该段」的 TOCTOU）。
+///
+/// 语义对齐 `gc_global_versions_grace`：grace 是给在途读者的宽限期，不是立即
+/// 删除；`grace_ms = 0` 时只保留 head 引用的段。保护集里的 manifest 读不出来
+/// 时整轮放弃（fail-safe，宁可漏回收不误删）。返回各分类计数。
+pub async fn[S : @store.ObjectStore] gc_superseded_segments(
+  store : S,
+  ns : String,
+  grace_ms~ : UInt64 = SEGMENT_GC_GRACE_MS,
+  now_ms~ : UInt64 = @env.now(),
+) -> SegGcStat {
+  let hprefix = @store.head_prefix(ns)
+  let sprefix = "\{ns}/_segments/"
+  // 1) 保护集：grace 窗口内发布的 manifest（含 fork/sibling）的段集合。
+  let live_refs : Set[String] = Set([])
+  for key in store.list(hprefix) {
+    if !key.has_prefix(hprefix) {
+      continue
+    }
+    let id = key[hprefix.length():].to_owned()
+    let ts = match manifest_id_ts_ms(id) {
+      Some(t) => t
+      None => now_ms // 时间戳未知：按刚发布处理 ⇒ 永在 grace 内
+    }
+    if ts + grace_ms <= now_ms {
+      continue // 超窗：该 manifest 的在途读者视为已结束
+    }
+    let mm : @format.ManifestData? = try {
+      Some(load_manifest(store, ns, id))
+    } catch {
+      _ => None
+    }
+    match mm {
+      Some(m) =>
+        for s in m.segments {
+          live_refs.add(s.id)
+        }
+      // 保护集里的 manifest 读不出来：段集合无法确认，整轮 GC 放弃。
+      None => return { deleted: 0, kept_live: 0, kept_in_grace: 0 }
+    }
+  }
+  // 2) 桶内全部 slabseg-* 段目录（去重）。
+  let dirs : Array[String] = Array()
+  let seen : Set[String] = Set([])
+  for key in store.list(sprefix) {
+    if !key.has_prefix(sprefix) {
+      continue
+    }
+    let rest = key[sprefix.length():]
+    let seg_id = match rest.find("/") {
+      Some(i) => rest[:i].to_owned()
+      None => continue
+    }
+    if !is_l0_slab_segment(seg_id) || seen.contains(seg_id) {
+      continue
+    }
+    seen.add(seg_id)
+    dirs.push(seg_id)
+  }
+  // 3) 删前重新读一次 head 确认（TOCTOU 防护：扫描后 head 若又引用该段则跳过）。
+  let meta = match read_namespace(store, ns) {
+    Some(m) => m
+    None => return { deleted: 0, kept_live: 0, kept_in_grace: 0 }
+  }
+  if meta.head_manifest == "" {
+    return { deleted: 0, kept_live: 0, kept_in_grace: 0 }
+  }
+  let head_mm : @format.ManifestData? = try {
+    Some(load_manifest(store, ns, meta.head_manifest))
+  } catch {
+    _ => None
+  }
+  let head_m = match head_mm {
+    Some(m) => m
+    None => return { deleted: 0, kept_live: 0, kept_in_grace: 0 }
+  }
+  let head_segs : Set[String] = Set([])
+  for s in head_m.segments {
+    head_segs.add(s.id)
+    live_refs.add(s.id)
+  }
+  // 4) 分类 + 删除。
+  let mut deleted = 0
+  let mut kept_live = 0
+  let mut kept_in_grace = 0
+  for seg_id in dirs {
+    if head_segs.contains(seg_id) {
+      kept_live += 1
+      continue
+    }
+    if live_refs.contains(seg_id) {
+      kept_in_grace += 1
+      continue
+    }
+    for key in store.list("\{sprefix}\{seg_id}/") {
+      store.delete(key)
+    }
+    deleted += 1
+  }
+  { deleted, kept_live, kept_in_grace }
+}
+
+///|
+/// 段数压力触发的前缀合并（薄封装，`compact_optimistic` 的写路径触发器）：
+/// 当前 manifest 段数 > `max_segments` 时调 `compact_optimistic` 合并前缀段，
+/// 直到 ≤ `max_segments` 或合并无法推进（返回 None / 段数不再下降）。
+/// 每次发布成功后按 `gc_superseded_segments` 回收被合并掉的旧段（grace 窗口
+/// 见 `SEGMENT_GC_GRACE_MS`）。
+///
+/// 返回 `SegCompactOutcome`：合并后的 head、合并次数、合并前后段数、被合并掉
+/// 的段 id（供调用方做 GC 计数观测）与本轮 GC 统计。不改 `ingest_l0_slab` /
+/// `compact_optimistic` 的语义。
+#derive(Debug)
+pub(all) struct SegCompactOutcome {
+  head : String // 合并后的 head manifest id（未触发 = 调用前 head；无 head = ""）
+  merges : Int // 成功发布的合并批次数
+  segs_before : Int
+  segs_after : Int
+  superseded : Array[String] // 被合并掉的段 id（GC 判定前的候选）
+  gc_deleted : Int
+  gc_kept_in_grace : Int
+}
+
+///|
+pub async fn[S : @store.ObjectStore] maybe_compact_segments(
+  store : S,
+  cfg : BuildConfig,
+  max_segments~ : Int = 8,
+) -> SegCompactOutcome {
+  let ns = cfg.ns
+  let meta0 = match read_namespace(store, ns) {
+    Some(m) => m
+    None =>
+      return {
+        head: "",
+        merges: 0,
+        segs_before: 0,
+        segs_after: 0,
+        superseded: [],
+        gc_deleted: 0,
+        gc_kept_in_grace: 0,
+      }
+  }
+  if meta0.head_manifest == "" {
+    return {
+      head: "",
+      merges: 0,
+      segs_before: 0,
+      segs_after: 0,
+      superseded: [],
+      gc_deleted: 0,
+      gc_kept_in_grace: 0,
+    }
+  }
+  let m0 = load_manifest(store, ns, meta0.head_manifest)
+  let segs_before = m0.segments.length()
+  let mut head = meta0.head_manifest
+  let mut segs = segs_before
+  let superseded : Array[String] = Array()
+  let mut merges = 0
+  let mut gc_deleted = 0
+  let mut gc_kept_in_grace = 0
+  while segs > max_segments {
+    // 合并前的段集合：差集 = 本次被合并掉的段。
+    let old_segs : Set[String] = Set([])
+    for s in load_manifest(store, ns, head).segments {
+      old_segs.add(s.id)
+    }
+    match compact_optimistic(store, cfg) {
+      Some(new_head) => {
+        merges += 1
+        head = new_head
+        let m = load_manifest(store, ns, new_head)
+        let keep : Set[String] = Set([])
+        for s in m.segments {
+          keep.add(s.id)
+        }
+        for id in old_segs {
+          if !keep.contains(id) {
+            superseded.push(id)
+          }
+        }
+        let old_count = segs
+        segs = m.segments.length()
+        // 发布成功后回收 superseded 段（grace 窗口内的一律保留）。
+        let stat = gc_superseded_segments(store, ns)
+        gc_deleted += stat.deleted
+        gc_kept_in_grace += stat.kept_in_grace
+        // 安全阀：段数没降 ⇒ 合并无法推进，退出避免死循环。
+        if segs >= old_count {
+          break
+        }
+      }
+      // 合并无法推进（无可合并 / CAS 全部冲突）。
+      None => break
+    }
+  }
+  {
+    head,
+    merges,
+    segs_before,
+    segs_after: segs,
+    superseded,
+    gc_deleted,
+    gc_kept_in_grace,
+  }
+}
+
+///|
+pub extend SegGcStat with Debug::{to_repr}
+pub extend SegCompactOutcome with Debug::{to_repr}

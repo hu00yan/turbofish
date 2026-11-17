@@ -8,8 +8,8 @@
 //   batch 1..N-1   : @build.ingest_delta_opts(store, cfg, batch, 0, false)
 //                    ⇒ 只追加 delta，**禁自动合并**（max_deltas=0/auto_compact=false）
 //   全部批次后     : 一次 @build.compact_global（把 base + 全部 deltas 折成新 base）
-//   可选最后一步   : BENCH_SEG_COMPACT=1 ⇒ 再调一次 @build.compact（把全部段合并成 1 段），
-//                    用来量化「段数 ⇒ 查询 GET/q」的收益（默认 0 不做）
+//   每批写入后     : 一次 @build.maybe_compact_segments（段数 > 8 触发 compact_optimistic
+//                    前缀合并；合并批的 PUT/耗时单独计；合并后 GC 回收 superseded 段）
 //
 // 查询路径（样本全部来自第一批 docs，不依赖后续 docs）：
 //   cold-metadata : resident 关闭，每查询 @query.open + bm25/vec，逐查询计量后恢复
@@ -31,7 +31,6 @@
 //
 // 环境变量：
 //   BENCH_DOCS=50000 BENCH_DIM=128 BENCH_BATCH=1000 BENCH_QUERIES=20 BENCH_SEED=7
-//   BENCH_SEG_COMPACT=0|1  （1 = compact_global 之后再 @build.compact 一次）
 //   BENCH_CONTROL=0|1      （1 = 查询走 @control.ControlPlane 复用 Namespace）
 //   BENCH_NPROBE=8         （vec_search 的 nprobe；默认 8）
 //   BENCH_RECALL=0|1       （1 = 查询表之后追加 recall@10 vs nprobe 实验）
@@ -213,6 +212,20 @@ fn avg_i(arr : Array[Int]) -> Double {
     sum += v
   }
   sum.to_double() / arr.length().to_double()
+}
+
+///|
+/// 合并批合计：(puts, put_bytes, latency_ms)。
+fn merge_totals(rows : Array[MergeStat]) -> (Int, Int, Double) {
+  let mut puts = 0
+  let mut bytes = 0
+  let mut ms = 0.0
+  for r in rows {
+    puts += r.puts
+    bytes += r.put_bytes
+    ms += r.latency_ms
+  }
+  (puts, bytes, ms)
 }
 
 ///|
@@ -427,6 +440,21 @@ fn collect_queries(
     }
   }
   (bm, vecs)
+}
+
+///|
+/// 合并批单独计量（常规批只含 ingest 的 PUT；合并批 = maybe_compact_segments
+/// 触发的前缀合并 + superseded 段 GC 的 PUT/耗时）。
+priv struct MergeStat {
+  batch : Int
+  merges : Int
+  put_bytes : Int
+  puts : Int
+  latency_ms : Double
+  segs_before : Int
+  segs_after : Int
+  gc_deleted : Int
+  gc_kept_in_grace : Int
 }
 
 ///|
@@ -757,11 +785,10 @@ priv struct BuildSummary {
   build_ms : Double
   compact_put_bytes : Int
   compact_ms : Double
-  seg_compact : Bool
-  segc_put_bytes : Int
-  segc_puts : Int
-  segc_ms : Double
-  segc_before : String
+  merge_batches : Int
+  merge_put_bytes : Int
+  merge_puts : Int
+  merge_ms : Double
   storage_before : Int
   storage_after : Int
   global_objs_before : Int
@@ -993,8 +1020,6 @@ async fn run() -> Unit {
   let batch_size = env_int("BENCH_BATCH", 1000)
   let nq = env_int("BENCH_QUERIES", 20)
   let seed = env_int("BENCH_SEED", 7)
-  // env_int 把 "0"/非法/缺失都折回默认值 0 ⇒ 这里 !0 即“开关打开”。
-  let seg_compact = env_int("BENCH_SEG_COMPACT", 0) != 0
   // 写路径：legacy（ingest + ingest_delta_opts，历史多对象写）或 slab（serve 线上路径）。
   let write_slab = env_int("BENCH_WRITE_SLAB", 0) != 0
   // 同理：BENCH_CONTROL 默认 0（关）；!0 即开启 ControlPlane 复用 Namespace。
@@ -1040,11 +1065,9 @@ async fn run() -> Unit {
       "write path: batch0=ingest, batch1..=ingest_delta_opts(max_deltas=0, auto_compact=false), then 1x compact_global",
     )
   }
-  if seg_compact {
-    println(
-      "  then 1x @build.compact (BENCH_SEG_COMPACT=1: 全部段合并成 1 段，重建 global base)",
-    )
-  }
+  println(
+    "  每批写入后 @build.maybe_compact_segments：段数 > 8 触发 compact_optimistic 前缀合并（合并批单独计）+ superseded 段 GC",
+  )
   if bench_control {
     println(
       "  query entry: @control.ControlPlane acquire/release (BENCH_CONTROL=1, TTL=\{ttl_ms}ms via BENCH_TTL_MS, head 指针 GET 探测) ⇒ 复用 Namespace 快照",
@@ -1063,6 +1086,9 @@ async fn run() -> Unit {
   store.inner.require_latency()
   let gen = DocGen::new(seed.reinterpret_as_uint(), dim, n_clusters, noise)
   let stats : Array[BatchStat] = Array(capacity=batches)
+  // 合并批单独计量 + superseded 段 GC 观测（(seg_id, 被合并时刻)）。
+  let merge_rows : Array[MergeStat] = Array()
+  let superseded_log : Array[(String, UInt64)] = Array()
   let bm25_qs : Array[String] = Array()
   let vec_qvs : Array[Array[Float]] = Array()
   // 精确 GT 的工作集（BENCH_EXACT_GT=1 才填充）：全量 id + 原始 f32 向量。
@@ -1107,6 +1133,30 @@ async fn run() -> Unit {
     let snap = store.inner.cost()
     let put_bytes = store.put_bytes
     let batch_us = snap.total_latency_us
+    // 段数压力触发的前缀合并（单独计量：合并批的 PUT/耗时不混进常规批）。
+    // superseded 时刻取合并前（≤ 最后引用该段的 manifest 时刻），保证
+    // 「grace 期内旧段数」的口径 ⊇ GC 的保留口径（判定只会偏安全）。
+    let superseded_at = @env.now()
+    store.reset_writes()
+    store.inner.reset_cost()
+    let outcome = @build.maybe_compact_segments(store, cfg)
+    let msnap = store.inner.cost()
+    if outcome.merges > 0 {
+      for id in outcome.superseded {
+        superseded_log.push((id, superseded_at))
+      }
+      merge_rows.push({
+        batch: stats.length() + 1,
+        merges: outcome.merges,
+        put_bytes: store.put_bytes,
+        puts: msnap.puts,
+        latency_ms: msnap.total_latency_us / 1000.0,
+        segs_before: outcome.segs_before,
+        segs_after: outcome.segs_after,
+        gc_deleted: outcome.gc_deleted,
+        gc_kept_in_grace: outcome.gc_kept_in_grace,
+      })
+    }
     // 逐批 manifest 观测（段数 / centroid_version，供后续步骤断言）。只读且
     // 放在计量快照之后：不计入本批 puts/延迟，下一批开头的 reset 清掉这批 GET。
     let (seg_count, centroid_version) = batch_manifest_info(store, ns)
@@ -1136,29 +1186,7 @@ async fn run() -> Unit {
   let csnap = store.inner.cost()
   let compact_put = store.put_bytes
   let compact_ms = csnap.total_latency_us / 1000.0
-  let mut storage_after = csnap.storage_bytes
-
-  // ---- 可选：最后做一次 segment 级 compact（BENCH_SEG_COMPACT=1）----
-  // 消除 per-segment 局部性放大：vec 读 part 数 = nprobe × 段数，bm25 读 = 段数 × 列文件。
-  // 计量口径与 compact_global 一致：reset_writes/reset_cost 后单独统计，
-  // 但 total put / write_amp 会把这次写入算进去。
-  let mut segc_put = 0
-  let mut segc_puts = 0
-  let mut segc_ms = 0.0
-  let mut segc_before = ""
-  if seg_compact {
-    // 先记 compact 前的段状态（这一步只有 GET，不含写；放在查询前，
-    // 查询档位各自 reset_cost / burn-in，不会污染计量）。
-    segc_before = manifest_line(store, ns)
-    store.reset_writes()
-    store.inner.reset_cost()
-    @build.compact(store, cfg, ns)
-    let ssnap = store.inner.cost()
-    segc_put = store.put_bytes
-    segc_puts = ssnap.puts
-    segc_ms = ssnap.total_latency_us / 1000.0
-    storage_after = ssnap.storage_bytes
-  }
+  let storage_after = csnap.storage_bytes
 
   // ---- 逐批表（批次数多时省略中段）----
   println(
@@ -1179,6 +1207,31 @@ async fn run() -> Unit {
     } else if i == 5 {
       println("  ... (\{nb - 10} batches elided)")
     }
+  }
+  println("")
+  // ---- 合并批表（段数 > 8 触发的前缀合并 + superseded 段 GC，单独计）----
+  if merge_rows.is_empty() {
+    println("merge batches      = none（段数始终 ≤ 8，未触发 maybe_compact_segments）")
+  } else {
+    println(
+      "merge batches（常规批 PUT 不含下列合并开销；每行 = 该批写入后的 maybe_compact_segments：compact_optimistic 前缀合并 + superseded 段 GC）:",
+    )
+    println(
+      pad("batch", 6) + pad("merges", 8) + pad_left("put MB", 14) +
+      pad_left("puts", 8) + pad_left("virt ms", 14) + pad(" segs", 14) +
+      pad("gc(del/keep)", 14),
+    )
+    for r in merge_rows {
+      let segs = "\{r.segs_before} -> \{r.segs_after}"
+      let gc = "\{r.gc_deleted}/\{r.gc_kept_in_grace}"
+      println(
+        "\{pad_left(r.batch.to_string(), 6)}\{pad_left(r.merges.to_string(), 8)}\{pad_left(mb(r.put_bytes), 14)}\{pad_left(r.puts.to_string(), 8)}\{pad_left(fmt(r.latency_ms, 1), 14)}\{pad(segs, 14)}\{pad(gc, 14)}",
+      )
+    }
+    let (mt_puts, mt_bytes, mt_ms) = merge_totals(merge_rows)
+    println(
+      "merge total        = \{merge_rows.length()} 合并批, \{mt_puts} PUTs, \{mb(mt_bytes)} MB, virt \{fmt(mt_ms, 1)} ms",
+    )
   }
   println("")
 
@@ -1274,6 +1327,7 @@ async fn run() -> Unit {
   println("")
 
   // ---- 汇总（manifest/LIST 放在查询之后，避免预热缓存影响查询档位）----
+  let (merge_puts_total, merge_bytes_total, merge_ms_total) = merge_totals(merge_rows)
   let summary : BuildSummary = {
     docs: docs_done,
     batches: stats.length(),
@@ -1282,11 +1336,10 @@ async fn run() -> Unit {
     build_ms: build_us / 1000.0,
     compact_put_bytes: compact_put,
     compact_ms,
-    seg_compact,
-    segc_put_bytes: segc_put,
-    segc_puts,
-    segc_ms,
-    segc_before,
+    merge_batches: merge_rows.length(),
+    merge_put_bytes: merge_bytes_total,
+    merge_puts: merge_puts_total,
+    merge_ms: merge_ms_total,
     storage_before,
     storage_after,
     global_objs_before,
@@ -1297,41 +1350,29 @@ async fn run() -> Unit {
   }
   let s = summary
   let vector_bytes = s.docs * dim * 2 // use_f16 ⇒ 2 字节/维
-  // total put / write_amp 含：逐批写入 + compact_global + （可选）segment compact。
-  let total_put = s.put_bytes + s.compact_put_bytes + s.segc_put_bytes
-  let total_ms = s.build_ms + s.compact_ms + s.segc_ms
+  // total put / write_amp 含：逐批写入 + 合并批（前缀合并 + 段 GC）+ compact_global。
+  let total_put = s.put_bytes + s.merge_put_bytes + s.compact_put_bytes
+  let total_ms = s.build_ms + s.merge_ms + s.compact_ms
   println("== summary ==")
   println("total docs           = \{s.docs} (dim=\{dim}, batches=\{s.batches})")
   println(
     "build put            = \{mb(s.put_bytes)} MB (\{s.put_bytes} bytes, \{s.puts} PUTs, virt \{fmt(s.build_ms, 1)} ms)",
   )
   println(
+    "merge put            = \{mb(s.merge_put_bytes)} MB (\{s.merge_puts} PUTs, virt \{fmt(s.merge_ms, 1)} ms) (\{s.merge_batches} 合并批)",
+  )
+  println(
     "compact put          = \{mb(s.compact_put_bytes)} MB (\{s.compact_put_bytes} bytes, virt \{fmt(s.compact_ms, 1)} ms)",
   )
-  if s.seg_compact {
-    println(
-      "seg compact put      = \{mb(s.segc_put_bytes)} MB (\{s.segc_put_bytes} bytes, \{s.segc_puts} PUTs, virt \{fmt(s.segc_ms, 1)} ms)",
-    )
-  } else {
-    println("seg compact          = skipped (BENCH_SEG_COMPACT=0)")
-  }
-  let total_line = if s.seg_compact {
-    "total put            = \{mb(total_put)} MB (build+compact_global+seg compact; virt total \{fmt(total_ms, 1)} ms)"
-  } else {
-    "total put            = \{mb(total_put)} MB (build+compact; virt total \{fmt(total_ms, 1)} ms)"
-  }
-  println(total_line)
+  println(
+    "total put            = \{mb(total_put)} MB (build+merge+compact_global; virt total \{fmt(total_ms, 1)} ms)",
+  )
   println(
     "write_amp            = \{fmt(total_put.to_double() / vector_bytes.to_double(), 2)}x vector_bytes (f16 \{mb(vector_bytes)} MB)",
   )
   println(
-    "write_amp (build)    = \{fmt(s.put_bytes.to_double() / vector_bytes.to_double(), 2)}x (excl. final compact)",
+    "write_amp (build)    = \{fmt(s.put_bytes.to_double() / vector_bytes.to_double(), 2)}x (excl. merge & final compact)",
   )
-  if s.seg_compact {
-    println(
-      "write_amp (no segc)  = \{fmt((s.put_bytes + s.compact_put_bytes).to_double() / vector_bytes.to_double(), 2)}x (excl. segment compact)",
-    )
-  }
   println(
     "global objects       = before compact \{s.global_objs_before}, after compact \{s.global_objs_after} (list(\{ns}/vec/global/)，含 grace 期内旧代)",
   )
@@ -1339,19 +1380,9 @@ async fn run() -> Unit {
     "global versions      = before compact \{s.global_versions_before}, after compact \{s.global_versions_after} (live=1 代：global_gen=None)",
   )
   println("manifest             = \{s.gen}")
-  if s.seg_compact {
-    println("  seg compact: before = \{s.segc_before}")
-    println(
-      "  seg compact: after  = \{s.gen}  (上面 manifest 行即 seg compact 后的 head)",
-    )
-    println(
-      "  (compact_global 只折 global 链；BENCH_SEG_COMPACT=1 之后额外一次 @build.compact 把段合并成 1)",
-    )
-  } else {
-    println(
-      "  (compact_global 只把 base+全部 deltas 折成一个新 base；segment 级合并是 @build.compact，不在本骨架内)",
-    )
-  }
+  println(
+    "  (每批写入后的段数压力合并走 @build.maybe_compact_segments → compact_optimistic；compact_global 在 slab 写路径下恒 no-op)",
+  )
   println(
     "storage bytes        = before compact \{mb(s.storage_before)} MB -> after compact \{mb(s.storage_after)} MB",
   )
@@ -1360,6 +1391,55 @@ async fn run() -> Unit {
   )
   println(
     "   旧代在 GLOBAL_GC_GRACE_MS 后由后续 ingest/compact 的 grace GC 回收)",
+  )
+  // ---- superseded 段 GC 计数（50k 档结束时点；只读 LIST/GET 放查询之后）----
+  let seg_prefix = "\{ns}/_segments/"
+  let dir_seen : Set[String] = Set([])
+  for key in store.list(seg_prefix) {
+    if key.has_prefix(seg_prefix) {
+      let rest = key[seg_prefix.length():]
+      match rest.find("/") {
+        Some(i) => {
+          let id = rest[:i].to_owned()
+          if id.has_prefix(@build.SLAB_SEG_PREFIX + "-") {
+            dir_seen.add(id)
+          }
+        }
+        None => ()
+      }
+    }
+  }
+  let (segs_end, _cv) = batch_manifest_info(store, ns)
+  let now_ms = @env.now()
+  let grace_ms = @build.SEGMENT_GC_GRACE_MS
+  let mut in_grace = 0
+  let mut gc_deleted_total = 0
+  for kv in superseded_log {
+    let (_id, t) = kv
+    if t + grace_ms > now_ms {
+      in_grace += 1
+    }
+  }
+  for r in merge_rows {
+    gc_deleted_total += r.gc_deleted
+  }
+  let dirs = dir_seen.length()
+  let verdict = if dirs <= segs_end + in_grace {
+    "OK"
+  } else {
+    "VIOLATION"
+  }
+  println("== superseded 段 GC（50k 档结束时点）==")
+  println("slabseg-* 目录数     = \{dirs}（桶里 _segments/ 下的 slabseg 段目录）")
+  println("live 段数            = \{segs_end}（manifest.segments.length()）")
+  println(
+    "grace 期内旧段数     = \{in_grace}（被合并掉 < \{grace_ms / 1000UL}s 的旧段；GC 保留，宽限在途读者）",
+  )
+  println(
+    "GC 判定              = \{verdict}（要求：slabseg-* 目录数 ≤ live 段数 + grace 期内旧段数）",
+  )
+  println(
+    "GC 累计              = 合并路径回收 \{gc_deleted_total} 个 superseded 段目录（grace 到期后删段 slab + meta.json + vec/part-* 等全部对象）",
   )
   println(
     "  (1M: BENCH_DOCS=1000000 BENCH_QUERIES=100 moon run cmd/bench1m --target native --release)",

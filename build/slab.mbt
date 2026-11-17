@@ -85,7 +85,9 @@ pub async fn[S : @store.ObjectStore] read_slab_index_from_tail(
 /// 自适应单次 Range GET 读取 Slab Index：
 /// 1. 先尝试拉取头部 [0..1024)；
 /// 2. 若 index_offset == 14（固定偏移），则在同一响应内完成解码（1 次请求）；
-/// 3. 若 index_offset 位于末尾，则按 size_bytes 拉取末尾完成解码。
+/// 3. 若 index_offset 位于末尾，则按 size_bytes 精确拉取 [index_offset, size)
+///    （Index + Trailer）完成解码——索引表随组件数增长（合并段可达数 KB），
+///    不能用固定小窗口截断。
 pub async fn[S : @store.ObjectStore] read_slab_index(
   store : S,
   ns : String,
@@ -100,6 +102,11 @@ pub async fn[S : @store.ObjectStore] read_slab_index(
       let off = index_offset.to_int()
       if off == @format.SLAB_HEADER_LEN {
         @format.decode_slab_index(hdr_bs, @format.SLAB_HEADER_LEN)
+      } else if off > 0 && off < size_bytes {
+        // Index 在文件末尾：tail 切片 = [index_offset, size_bytes)（Index + Trailer），
+        // 精确一次 Range GET，索引表再大也不会越界。
+        let tail_len = size_bytes - off
+        read_slab_index_from_tail(store, ns, seg_id, size_bytes, tail_len=tail_len)
       } else {
         read_slab_index_from_tail(store, ns, seg_id, size_bytes)
       }

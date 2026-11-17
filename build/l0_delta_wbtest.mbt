@@ -409,3 +409,128 @@ async test "l0 slab: 每个 manifest 段都有可读 meta.json（含 compact_opt
     assert_eq(mem.get(key) is Some(_), true)
   }
 }
+
+///|
+/// 段数压力触发的前缀合并：段数压到 ≤ max_segments，行无丢失，superseded
+/// 段在 grace 窗口内保留（gc_deleted 恒 0），合并批信息记录在 outcome 里。
+async test "maybe_compact_segments caps segments at max_segments" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0cap"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  // 10 个小段（每批 3 行）
+  for b in 0..<10 {
+    let _ = ingest_l0_slab(
+      mem,
+      cfg,
+      mkdocs(3, 8, (b * 100 + 1).to_uint64(), (20 + b).reinterpret_as_uint()),
+      [],
+    )
+  }
+  let m0 = head_manifest_of(mem, "l0cap")
+  assert_eq(m0.segments.length(), 10)
+  let outcome = maybe_compact_segments(mem, cfg, max_segments=3)
+  assert_eq(outcome.merges > 0, true)
+  assert_eq(outcome.segs_before, 10)
+  assert_eq(outcome.segs_after <= 3, true)
+  assert_eq(outcome.head != "", true)
+  let m1 = head_manifest_of(mem, "l0cap")
+  assert_eq(m1.segments.length() <= 3, true)
+  // 30 行一个不少（合并只物理化 tombstone，本例无删除）
+  let ids = visible_ids(mem, "l0cap", m1)
+  assert_eq(ids.length(), 30)
+  // 被合并掉的段 id 记录在 outcome；grace 默认 300s ⇒ 刚合并不回收
+  assert_eq(outcome.superseded.length() > 0, true)
+  assert_eq(outcome.gc_deleted, 0)
+  assert_eq(outcome.gc_kept_in_grace, outcome.superseded.length())
+  for id in outcome.superseded {
+    assert_eq(mem.list("l0cap/_segments/\{id}/").length() > 0, true)
+  }
+}
+
+///|
+/// superseded 段 GC：只删不在任何 live manifest 里的段；grace 窗口内保留；
+/// 超窗后连 slab + meta.json + 该段 vec/part-* 组件一并回收；live 段不受影响。
+async test "gc_superseded_segments reclaims only out-of-grace segments" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0gc"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(3, 8, 1UL, 31U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(3, 8, 100UL, 32U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(3, 8, 200UL, 33U), [])
+  let m_before = head_manifest_of(mem, "l0gc")
+  assert_eq(m_before.segments.length(), 3)
+  let seg0 = m_before.segments[0].id
+  let seg1 = m_before.segments[1].id
+  // 旧布局兼容对象：GC 必须把段目录下的 vec/part-* 组件一并回收
+  mem.put("l0gc/_segments/\{seg0}/vec/part-0.bin", b"stub")
+  // 合并前 2 段 → 1 段（第 3 段是 tail 保留）
+  let merged = compact_optimistic(mem, cfg, max_prefix_segments=2)
+  assert_eq(merged is Some(_), true)
+  let m = head_manifest_of(mem, "l0gc")
+  assert_eq(m.segments.length(), 2)
+  // ① 刚合并（grace 默认 300s）⇒ superseded 段仍在 grace 窗口，保留
+  let stat1 = gc_superseded_segments(mem, "l0gc")
+  assert_eq(stat1.deleted, 0)
+  assert_eq(stat1.kept_live, 2)
+  assert_eq(stat1.kept_in_grace, 2)
+  assert_eq(mem.list("l0gc/_segments/\{seg0}/").length() > 0, true)
+  // ② now 超窗（+400s）⇒ 不在任何 live manifest 里的段被回收
+  let later = @env.now() + 400000UL
+  let stat2 = gc_superseded_segments(mem, "l0gc", now_ms=later)
+  assert_eq(stat2.deleted, 2)
+  assert_eq(stat2.kept_live, 2)
+  assert_eq(stat2.kept_in_grace, 0)
+  assert_eq(mem.list("l0gc/_segments/\{seg0}/").length(), 0)
+  assert_eq(mem.list("l0gc/_segments/\{seg1}/").length(), 0)
+  // live 段的 slab + meta.json 完好，行无丢失
+  let m2 = head_manifest_of(mem, "l0gc")
+  assert_eq(m2.segments.length(), 2)
+  for s in m2.segments {
+    assert_eq(mem.get(segment_slab_key("l0gc", s.id)) is Some(_), true)
+    assert_eq(mem.get(segment_meta_key("l0gc", s.id)) is Some(_), true)
+  }
+  let ids = visible_ids(mem, "l0gc", m2)
+  assert_eq(ids.length(), 9)
+}
+
+///|
+/// 回归：slab index 表超过 1024B（组件数随 nlist 增长）的段在合并读取时
+/// 不再被固定 tail 窗口截断（旧 read_slab_index 在这里 Truncated）。
+async test "compact_optimistic merges segments with large slab index" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("l0bigidx"),
+    segment_rows: 2000,
+    nlist: 64,
+    use_f16: false,
+    vector_dim: 8,
+  }
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(300, 8, 1UL, 41U), [])
+  let _ = ingest_l0_slab(mem, cfg, mkdocs(300, 8, 1000UL, 42U), [])
+  let m0 = head_manifest_of(mem, "l0bigidx")
+  assert_eq(m0.segments.length(), 2)
+  // 段 index 表含 64 个 vec/part-* 条目，> 1024B（旧固定 tail 窗口会截断）
+  let idx0 = read_slab_index(
+    mem,
+    "l0bigidx",
+    m0.segments[0].id,
+    m0.segments[0].size_bytes,
+  )
+  assert_eq(idx0.entries.length() > 30, true)
+  let merged = compact_optimistic(mem, cfg, max_prefix_segments=2)
+  assert_eq(merged is Some(_), true)
+  let m1 = head_manifest_of(mem, "l0bigidx")
+  assert_eq(m1.segments.length(), 1)
+  let ids = visible_ids(mem, "l0bigidx", m1)
+  assert_eq(ids.length(), 600)
+}

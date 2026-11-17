@@ -2527,6 +2527,8 @@ async fn direct_ingest(
 /// 组提交 flush_fn：把本批所有 payload 解码聚合，一次 `ingest_l0_slab` 落盘，
 /// 返回新的 head manifest id。成功后同步刷新进程内 ns state、head 指针与
 /// metad 元数据，并 `mark_dirty`（后台合并由 cmd/compactd 消费）。
+/// flush 之后调一次 `maybe_compact_segments`：段数 > 8 触发 `compact_optimistic`
+/// 前缀合并（把读放大压回 nprobe × 段数的低段数区）并回收 superseded 段。
 async fn flush_batch(
   store : AnyStore,
   ns : String,
@@ -2569,6 +2571,14 @@ async fn flush_batch(
   store.put(@store.head_pointer_key(ns), @utf8.encode(head))
   commit_ns_state(store, ns, head, docs, deletes, dim)
   meta_mark_dirty(ns)
+  // 组提交 flush 之后：段数压力触发的前缀合并（段数 ≤ 8 时恒 no-op）。
+  // 合并后 head 前移时同步 head 指针与 ns state（同 POST /compact 口径）。
+  let outcome = @build.maybe_compact_segments(store, cfg)
+  if outcome.head != "" && outcome.head != head {
+    store.put(@store.head_pointer_key(ns), @utf8.encode(outcome.head))
+    commit_ns_state(store, ns, outcome.head, [], [], dim)
+    meta_mark_dirty(ns)
+  }
   head
 }
 

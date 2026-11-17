@@ -805,7 +805,9 @@ async fn run() -> Unit {
     if segs > 1 {
       transport.reset()
       let t0 = now_us()
-      @build.compact(store, cfg, ns)
+      // @build.compact 已废弃（只识 rows/*.bin，slab 段不可用）；段级合并走
+      // compact_optimistic，一次把全部前缀段折成 1 段（max_prefix=segs）。
+      let _ = @build.compact_optimistic(store, cfg, max_prefix_segments=segs)
       let dt = now_us() - t0
       put_bytes_total += transport.put_bytes
       println(

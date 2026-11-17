@@ -7,6 +7,14 @@
 // - 新 manifest 只含 1 段、deleted=[]、parent=旧 manifest，CAS 发布
 //
 // 收益：消除 per-segment 局部性放大（向量查询读 part 文件数 = nprobe × 段数）。
+//
+// 【已废弃 · 仅 legacy 多文件布局】本文件的 `compact` / `compact_load_docs`
+// 读 `rows/*.bin` 碎片（见下方 compact_load_docs），而 slab 段（`slabseg-*` /
+// `segment.slab`）根本没有这些对象——对 slab 段调用会直接 NotFound。
+// **slab 段的合并只能走 `compact_optimistic`**（乐观 rebase 前缀合并，见
+// l0_delta.mbt；写路径触发器是 `maybe_compact_segments`）。
+// 保留仅为 legacy 历史布局的数据与测试；不要修它，也不要让它在写路径被调用，
+// Step 2 随 legacy 布局一起删除。
 
 ///|
 /// 读一个 segment 的六列并重建 Doc 数组（顺序 = 段内行号）。
@@ -75,8 +83,11 @@ async fn[S : @store.ObjectStore] compact_load_docs(
 }
 
 ///|
-/// 合并 namespace 的全部 live 段为一个新段并 CAS 发布新 manifest。
+/// 【已废弃】把 namespace 的全部 live 段合并为一个新段并 CAS 发布新 manifest。
 /// 空 live 集（全部被 tombstone）时发布空段列表 manifest。
+///
+/// 只对 legacy 多文件布局（`rows/*.bin`）可用；slab 段的合并只能走
+/// `compact_optimistic`（见本文件头部注释）。禁止在 slab 写路径调用。
 pub async fn[S : @store.ObjectStore] compact(
   store : S,
   cfg : BuildConfig,

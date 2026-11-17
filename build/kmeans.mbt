@@ -37,7 +37,9 @@ fn normalize_center(data : Array[Float], base : Int, dim : Int) -> Unit {
 /// - 确定性采样 min(nlist*8, docs.length()) 条向量（Rng 种子 42）
 /// - k 收缩为 min(nlist, 样本数)，避免重复中心导致的常驻空簇
 /// - 迭代 iters 轮：分配（距离最小）→ 均值更新 → （cosine 时）归一化
-/// - 空簇用随机样本重置
+/// - 空簇用「离当前中心最远的样本点」重置（确定性；比随机样本更能
+///   打散簇行数分布——簇越均衡，probe 命中行数的尺寸偏置
+///   E[size²]/E[size] 越小，冷 vec KB/q 越低）
 /// - docs 为空 / dim 为 0 / nlist<=0 时返回空中心（dim=0 或 k=0）
 /// euclidean=true：l2sq 分配、中心取原始均值不归一化（欧氏 IVF 语义）；
 /// 否则 cosine 分配、中心归一化（默认，旧行为）。
@@ -94,12 +96,38 @@ pub fn train_centroids(
   for _ in 0..<k {
     counts.push(0)
   }
+  // 分配时同步维护「离当前中心最远的样本」候选（按 best_d 降序前 k 个），
+  // 供空簇确定性重置；不额外遍历样本。
+  let far_d : Array[Double] = Array(capacity=k)
+  let far_i : Array[Int] = Array(capacity=k)
+  for _ in 0..<k {
+    far_d.push(-1.0)
+    far_i.push(-1)
+  }
+  let consider_far = fn(d : Double, si : Int) -> Unit {
+    // 插入到 far_d 降序的前 k 位（k 个候选足够覆盖单轮空簇数）
+    if d <= far_d[k - 1] {
+      return
+    }
+    let mut pos = k - 1
+    while pos > 0 && far_d[pos - 1] < d {
+      far_d[pos] = far_d[pos - 1]
+      far_i[pos] = far_i[pos - 1]
+      pos = pos - 1
+    }
+    far_d[pos] = d
+    far_i[pos] = si
+  }
   for _ in 0..<iters {
     for i in 0..<(k * dim) {
       sums[i] = 0.0
     }
     for c in 0..<k {
       counts[c] = 0
+    }
+    for i in 0..<k {
+      far_d[i] = -1.0
+      far_i[i] = -1
     }
     // 分配：归一化中心内积最大 = cosine 距离最小；euclidean 时 l2sq 最小
     for si in 0..<sample_n {
@@ -122,16 +150,24 @@ pub fn train_centroids(
         }
       }
       counts[best] = counts[best] + 1
+      consider_far(best_d, si)
       let base = best * dim
       for f in 0..<dim {
         sums[base + f] = sums[base + f] + v[f].to_double()
       }
     }
-    // 更新：均值 → （cosine）归一化；空簇用随机样本重置
+    // 更新：均值 → （cosine）归一化；空簇用「离当前中心最远的样本点」
+    // 确定性重置（far 按 best_d 降序，多个空簇取不同的远点）。
+    let mut far_slot = 0
     for c in 0..<k {
       let base = c * dim
       if counts[c] == 0 {
-        let v = docs[idx[(rng.next_u32() % sample_n.reinterpret_as_uint()).reinterpret_as_int()]].vector
+        let mut si = far_i[far_slot]
+        if si < 0 {
+          si = (rng.next_u32() % sample_n.reinterpret_as_uint()).reinterpret_as_int()
+        }
+        far_slot = far_slot + 1
+        let v = docs[idx[si]].vector
         for f in 0..<dim {
           data[base + f] = v[f]
         }

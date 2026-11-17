@@ -60,6 +60,17 @@ fn merge_sorted_ids(a : Array[UInt64], b : Array[UInt64]) -> Array[UInt64] {
 }
 
 ///|
+/// 合并/重分区输出按 doc id 升序（稳定语义：id 唯一）。
+///
+/// 同一合并集的 id 区间在顺序写入下相邻，排序后即满足 `min_id + row`
+/// 稠密条件 ⇒ 段可标 `dense_u64`，读侧 row_id 走 min_id+row、免读 id 列。
+/// id 列读取按段整列计费，是冷 vec KB/q 随 N 膨胀的主要项；带删除的段
+/// id 有空洞时仍写 id 列（行序仍有序，扫描/编码友好）。
+pub fn sort_docs_by_id(docs : Array[@core.Doc]) -> Unit {
+  docs.sort_by(fn(a, b) { a.id.compare(b.id) })
+}
+
+///|
 /// 两个已排序 id 数组是否逐元素相等。
 fn same_ids(a : Array[UInt64], b : Array[UInt64]) -> Bool {
   if a.length() != b.length() {
@@ -727,6 +738,10 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
       }
     }
   }
+  // 合并输出按 doc id 升序：同一合并集的 id 区间在顺序写入下相邻时，
+  // 排序后即满足 min_id+row 稠密条件 ⇒ 段标 dense_u64，读侧 row_id 免读
+  // id 列（每查询每段省一整列 GET，是冷 vec KB/q 的主要随 N 膨胀项）。
+  sort_docs_by_id(live)
   let cent = load_centroids(store, ns, m_start.centroid_version)
   // 合并段：只上传一次；重试期间复用（乐观 rebase 的关键）
   let merged_seg : @format.SegmentMeta? = if live.length() > 0 {

@@ -2527,7 +2527,9 @@ async fn direct_ingest(
 /// 组提交 flush_fn：把本批所有 payload 解码聚合，一次 `ingest_l0_slab` 落盘，
 /// 返回新的 head manifest id。成功后同步刷新进程内 ns state、head 指针与
 /// metad 元数据，并 `mark_dirty`（后台合并由 cmd/compactd 消费）。
-/// flush 之后调一次 `maybe_compact_segments`：size-tiered 同档合并（同 tier
+/// flush 之后调一次 `maybe_cutover`（IVF 重分区：num_docs/nlist > 2×target_rows
+/// 时重训新中心、全量重写段分区）与一次 `maybe_compact_segments`：size-tiered 同档
+/// 合并（同 tier
 /// 段数 ≥ fanout=3 时合并该档最旧 3 段；安全阀段数 > tiers×fanout×2 退回
 /// 一次前缀合并，把读放大压回 nprobe × 段数的低段数区）并回收 superseded 段。
 async fn flush_batch(
@@ -2572,6 +2574,19 @@ async fn flush_batch(
   store.put(@store.head_pointer_key(ns), @utf8.encode(head))
   commit_ns_state(store, ns, head, docs, deletes, dim)
   meta_mark_dirty(ns)
+  // 组提交 flush 之后：IVF 重分区（cutover）——num_docs/nlist > 2×target_rows
+  // 时以 nlist'=ceil(num_docs/target_rows) 重训新中心、全量重写段分区并乐观
+  // rebase 发布；head 前移时同步 head 指针与 ns state。在段压力合并之前跑：
+  // cutover 重写全部段，先合并会白费合并写放大。
+  let cut_head = match @build.maybe_cutover(store, cfg) {
+    Some(o) => o.head
+    None => ""
+  }
+  if cut_head != "" {
+    store.put(@store.head_pointer_key(ns), @utf8.encode(cut_head))
+    commit_ns_state(store, ns, cut_head, [], [], dim)
+    meta_mark_dirty(ns)
+  }
   // 组提交 flush 之后：段数压力触发的前缀合并（段数 ≤ 8 时恒 no-op）。
   // 合并后 head 前移时同步 head 指针与 ns state（同 POST /compact 口径）。
   let outcome = @build.maybe_compact_segments(store, cfg)

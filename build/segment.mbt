@@ -85,7 +85,7 @@ async fn[S : @store.ObjectStore] load_manifest(
 
 ///|
 /// 按 centroid_version 读中心对象；缺失 raise NotFound。
-async fn[S : @store.ObjectStore] load_centroids(
+pub async fn[S : @store.ObjectStore] load_centroids(
   store : S,
   ns : String,
   centroid_version : String,

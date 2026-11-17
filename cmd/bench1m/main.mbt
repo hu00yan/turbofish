@@ -8,7 +8,10 @@
 //   batch 1..N-1   : @build.ingest_delta_opts(store, cfg, batch, 0, false)
 //                    ⇒ 只追加 delta，**禁自动合并**（max_deltas=0/auto_compact=false）
 //   全部批次后     : 一次 @build.compact_global（把 base + 全部 deltas 折成新 base）
-//   每批写入后     : 一次 @build.maybe_compact_segments（size-tiered 同档合并：
+//   每批写入后     : 一次 @build.maybe_cutover（IVF 重分区：num_docs/nlist >
+//                    2×target_rows 时以 nlist'=ceil(num_docs/target_rows) 重训
+//                    新中心、全量重写段分区并乐观 rebase 发布；cutover 批单独计）
+//                    + 一次 @build.maybe_compact_segments（size-tiered 同档合并：
 //                    同 tier 段数 ≥ fanout（默认 3，BENCH_FANOUT 可覆盖）时合并
 //                    该档最旧 fanout 段；安全阀段数
 //                    > tiers×fanout×2 退回一次前缀合并；合并批的 PUT/耗时单独计；
@@ -259,7 +262,8 @@ impl @store.ObjectStore for CountingStore with fn get(
   self : CountingStore,
   key : String,
 ) -> Bytes? {
-  self.inner.get(key)
+  let r = self.inner.get(key)
+  r
 }
 
 ///|
@@ -296,7 +300,8 @@ impl @store.ObjectStore for CountingStore with fn get_range(
 ) -> Bytes? {
   let offset = br.off
   let len = br.len
-  self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
+  let r = self.inner.get_range(key, @store.ByteRange::{ off: offset, len: len })
+  r
 }
 
 ///|
@@ -471,6 +476,17 @@ priv struct MergeDetail {
   rows_in : Int
   rows_out : Int
   fallback : Bool
+}
+
+///|
+/// cutover 批单独计量（常规批只含 ingest 的 PUT；cutover 批 = maybe_cutover
+/// 的全量重分区：重训中心 + 重写全部段 + 乐观 rebase 发布 + superseded 段 GC）。
+priv struct CutoverStat {
+  batch : Int
+  puts : Int
+  put_bytes : Int
+  latency_ms : Double
+  outcome : @build.CutoverOutcome
 }
 
 ///|
@@ -772,6 +788,33 @@ async fn batch_manifest_info(
     _ => return (-1, "<n/a>")
   }
   (m.segments.length(), m.centroid_version)
+}
+
+///|
+/// head manifest 的 (num_docs, centroid_version)（IVF 结束态报告用）。
+/// 任何一步不可用返回 (-1, "<n/a>")，不抛错。
+async fn manifest_ivf_info(
+  store : CountingStore,
+  ns : String,
+) -> (Int, String) {
+  let (head, _newer) = @store.read_head_state(store, ns, "")
+  if head == "" {
+    return (-1, "<n/a>")
+  }
+  let body = match store.get("\{ns}/_manifest/\{head}.json") {
+    Some(bs) =>
+      @utf8.decode(bs.exact_view()) catch {
+        _ => return (-1, "<n/a>")
+      }
+    None => return (-1, "<n/a>")
+  }
+  let j = @json.parse(body) catch {
+    _ => return (-1, "<n/a>")
+  }
+  let m = @format.manifest_from_json(j) catch {
+    _ => return (-1, "<n/a>")
+  }
+  (m.num_docs, m.centroid_version)
 }
 
 ///|
@@ -1210,6 +1253,8 @@ async fn run() -> Unit {
   // 合并批单独计量 + superseded 段 GC 观测（(seg_id, 被合并时刻)）。
   let merge_rows : Array[MergeStat] = Array()
   let merge_details : Array[MergeDetail] = Array()
+  // cutover 批单独计量（常规批 PUT 不含 cutover 开销）。
+  let cutover_rows : Array[CutoverStat] = Array()
   let superseded_log : Array[(String, UInt64)] = Array()
   let bm25_qs : Array[String] = Array()
   let vec_qvs : Array[Array[Float]] = Array()
@@ -1255,6 +1300,30 @@ async fn run() -> Unit {
     let snap = store.inner.cost()
     let put_bytes = store.put_bytes
     let batch_us = snap.total_latency_us
+    // IVF 重分区（cutover）：触发批单独计量（常规批 PUT 不含 cutover 开销）。
+    // 在段压力合并之前跑：cutover 全量重写所有段，先合并再 cutover 会白费
+    // 合并写放大；cutover 产出的 segment_rows 小段由紧随其后的合并收拢。
+    // superseded 时刻取 cutover 前（同合并的口径，判定只会偏安全）。
+    let cut_at = @env.now()
+    store.reset_writes()
+    store.inner.reset_cost()
+    let cut = @build.maybe_cutover(store, cfg)
+    let cusnap = store.inner.cost()
+    match cut {
+      Some(o) => {
+        for id in o.superseded {
+          superseded_log.push((id, cut_at))
+        }
+        cutover_rows.push({
+          batch: stats.length() + 1,
+          puts: cusnap.puts,
+          put_bytes: store.put_bytes,
+          latency_ms: cusnap.total_latency_us / 1000.0,
+          outcome: o,
+        })
+      }
+      None => ()
+    }
     // 段数压力触发的前缀合并（单独计量：合并批的 PUT/耗时不混进常规批）。
     // superseded 时刻取合并前（≤ 最后引用该段的 manifest 时刻），保证
     // 「grace 期内旧段数」的口径 ⊇ GC 的保留口径（判定只会偏安全）。
@@ -1385,6 +1454,46 @@ async fn run() -> Unit {
     }
     println(
       "merge rows total   = \{merge_details.length()} 次合并, 输入 \{rows_in_total} rows, 输出 \{rows_out_total} rows（写入放大分子）",
+    )
+  }
+  println("")
+  // ---- cutover 批（IVF 全量重分区；常规批 PUT 不含下列开销）----
+  println(
+    "== cutover（IVF 重分区；每批之后 maybe_cutover；触发条件 num_docs/nlist > 2×target_rows）==",
+  )
+  if cutover_rows.is_empty() {
+    println("cutover batches   = none（未触发重分区）")
+  } else {
+    println(
+      "cutover batches（常规批 PUT 不含下列开销；每行 = 该批的 maybe_cutover：重训中心 + 全段重写 + 乐观 rebase 发布 + superseded 段 GC）:",
+    )
+    println(
+      pad("batch", 6) + pad("nlist", 13) + pad_left("target", 8) +
+        pad_left("rows", 10) + pad("segs", 13) + pad_left("puts", 8) +
+        pad_left("put MB", 12) + pad_left("virt ms", 12) +
+        pad_left("cent KB", 10) + pad_left("tries", 7) + pad("gc(del/keep)", 14),
+    )
+    for r in cutover_rows {
+      let o = r.outcome
+      let nlist_s = "\{o.nlist_old} -> \{o.nlist_new}"
+      let segs_s = "\{o.segs_in} -> \{o.segs_out}"
+      let gc_s = "\{o.gc_deleted}/\{o.gc_kept_in_grace}"
+      println(
+        "\{pad_left(r.batch.to_string(), 6)}\{pad(nlist_s, 13)}\{pad_left(o.target_rows.to_string(), 8)}\{pad_left(o.rows.to_string(), 10)}\{pad(segs_s, 13)}\{pad_left(r.puts.to_string(), 8)}\{pad_left(mb(r.put_bytes), 12)}\{pad_left(fmt(r.latency_ms, 1), 12)}\{pad_left(fmt(o.centroid_bytes.to_double() / 1024.0, 1), 10)}\{pad_left(o.attempts.to_string(), 7)}\{pad(gc_s, 14)}",
+      )
+    }
+    let mut cut_puts = 0
+    let mut cut_bytes = 0
+    let mut cut_ms = 0.0
+    let mut cut_rows = 0
+    for r in cutover_rows {
+      cut_puts += r.puts
+      cut_bytes += r.put_bytes
+      cut_ms += r.latency_ms
+      cut_rows += r.outcome.rows
+    }
+    println(
+      "cutover total     = \{cutover_rows.length()} 次, \{cut_puts} PUTs, \{mb(cut_bytes)} MB, virt \{fmt(cut_ms, 1)} ms, 重写 \{cut_rows} rows（cutover 批口径，不含后续段合并）",
     )
   }
   println("")
@@ -1549,6 +1658,55 @@ async fn run() -> Unit {
   println(
     "   旧代在 GLOBAL_GC_GRACE_MS 后由后续 ingest/compact 的 grace GC 回收)",
   )
+  // ---- IVF 分区规模（cutover 结束态；判据：nlist 与 num_docs/target_rows 偏差 ≤ 2x）----
+  let (end_docs, end_cv) = manifest_ivf_info(store, ns)
+  let end_cent : @format.Centroids? = try {
+    Some(@build.load_centroids(store, ns, end_cv))
+  } catch {
+    _ => None
+  }
+  let end_k = match end_cent {
+    Some(c) => if c.dim > 0 { c.k() } else { 0 }
+    None => 0
+  }
+  let cent_bytes = @build.centroid_table_bytes(store, ns, end_cv)
+  let target_end = @build.cutover_target_rows(cfg, end_docs, dim)
+  let want_k = if target_end > 0 && end_docs > 0 {
+    (end_docs + target_end - 1) / target_end
+  } else {
+    0
+  }
+  let dev = if end_k > 0 && want_k > 0 {
+    let a = end_k.to_double() / want_k.to_double()
+    let b = want_k.to_double() / end_k.to_double()
+    if a > b {
+      a
+    } else {
+      b
+    }
+  } else {
+    0.0
+  }
+  let target_src = if cfg.target_rows > 0 {
+    "BuildConfig.target_rows 覆盖值"
+  } else {
+    "target_rows_for(num_docs, dim, nprobe=\{@build.CUTOVER_NPROBE}) 公式值"
+  }
+  let dev_v = if dev <= 2.0 {
+    "≤ 2x ✓"
+  } else {
+    "> 2x ✗"
+  }
+  println("== IVF 分区规模（cutover 结束态）==")
+  println("target_rows        = \{target_end}（\{target_src}）")
+  println(
+    "nlist              = \{end_k}（centroid_version=\{end_cv}）；num_docs/target_rows = \{fmt(want_k.to_double(), 1)}，偏差 \{fmt(dev, 2)}x \{dev_v}",
+  )
+  println("中心表字节         = \{cent_bytes}（\{end_k} 中心 × \{dim} 维 f32 + 头）")
+  println(
+    "cutover 触发次数   = \{cutover_rows.length()}（每批之后 maybe_cutover；阈值 num_docs/nlist > 2×target_rows）",
+  )
+  println("")
   // ---- size-tiered 段分布与段数轨迹（写入结束时点；只读 GET 放查询之后）----
   println("== size-tiered 段分布（写入结束时点）==")
   for line in tier_dist_lines(store, ns, cfg.segment_rows, fanout) {

@@ -255,6 +255,7 @@ async test "ingest small batch: objects complete and columns roundtrip" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -435,6 +436,7 @@ async test "second ingest appends and reuses centroids" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs1 = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs1)
@@ -531,6 +533,7 @@ async test "delete_docs merges and dedups tombstones" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -608,6 +611,7 @@ async test "delete_docs on missing namespace raises" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   try {
     delete_docs(store, cfg, [1UL])
@@ -656,6 +660,7 @@ async test "delete_docs before first publish raises" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   try {
     delete_docs(store, cfg, [1UL])
@@ -703,6 +708,7 @@ async test "stats, dense id, dict/bitmap encodings, sq8 and blockmax" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -797,6 +803,7 @@ async test "vec_storage pq16 writes SPNDPQP1 parts" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   ingest(store, cfg, mkdocs(20, 8, 1UL, 9U))
   let man = head_manifest_of(store, "b1pq")
@@ -841,6 +848,7 @@ async test "compact merges segments and physicalizes tombstones" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -903,6 +911,7 @@ async test "CAS conflict: stale writer loses, build reports CommitConflict" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   ingest(store, cfg, mkdocs(8, 8, 1UL, 7U))
   let h1 = head_manifest_of(store, "b1cas").id
@@ -1134,6 +1143,7 @@ async test "normalize_vecs stores unit vectors and meta flag" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   ingest(store, cfg, mkdocs(12, 8, 1UL, 7U))
   let man = head_manifest_of(store, "b1n")
@@ -1180,6 +1190,7 @@ async test "delete_docs writes roaring tombstone object" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   ingest(store, cfg, mkdocs(20, 8, 1UL, 7U))
   delete_docs(store, cfg, [2UL, 4UL, 999UL])
@@ -1219,6 +1230,7 @@ async test "blockstats stores 256-row ts min/max" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1256,6 +1268,7 @@ async test "global vec parts merge segments" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   ingest(store, cfg, mkdocs(20, 8, 1UL, 7U))
   let man = head_manifest_of(store, "b1g")
@@ -1318,6 +1331,7 @@ async test "seg meta embeds FTS bloom" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1364,6 +1378,7 @@ async test "compact global single-copy keeps one generation" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1433,6 +1448,7 @@ async test "no-CAS store falls back to append-only head log" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1470,6 +1486,7 @@ async test "publish_head uses build baseline, not publish-time head" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   ingest(store, cfg, mkdocs(8, 8, 1UL, 7U))
   let base = head_manifest_of(store, "b1base")
@@ -1523,6 +1540,7 @@ async test "legacy namespace without head log can still publish" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let docs = mkdocs(20, 8, 1UL, 7U)
   ingest(store, cfg, docs)
@@ -1882,6 +1900,7 @@ async test "ingest_delta appends one delta and leaves base untouched" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   // 第一次：全量 base（旧 ingest 行为不变：global_gen = None，单向全量代）
   ingest(store, cfg, mkdocs(400, 8, 1UL, 7U))
@@ -2002,6 +2021,7 @@ async test "ingest_delta without old global writes full base" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   // 首次写者用 ingest_delta：没有旧 global ⇒ 全量 base，deltas 为空
   ingest_delta(store, cfg, mkdocs(16, 8, 1UL, 7U))
@@ -2133,6 +2153,7 @@ async test "S2b ingest after ingest_delta keeps delta rows in new base" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)
@@ -2224,6 +2245,7 @@ async test "S2b compact reads global delta chain and folds it into one base" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)
@@ -2304,6 +2326,7 @@ async test "S3 ingest_delta auto compacts global chain at third delta" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)
@@ -2384,6 +2407,7 @@ async test "S3 compact_global folds one delta and no-ops on empty chain" {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
   let d1 = mkdocs(400, 8, 1UL, 7U)
   let d2 = mkdocs(12, 8, 101UL, 11U)

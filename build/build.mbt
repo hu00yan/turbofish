@@ -35,6 +35,7 @@ pub(all) struct BuildConfig {
   global_pack_size : Int // 全局分区分包：>1 时相邻 cid 打包成 pack-{i}.bin（1 = 每 cid 一对象）
   fts_tokenizer : @core.Tokenizer // 全文分词器（默认 Word = 旧行为；CJK 命名空间选 smartcn/kuromoji/nori）
   distance_metric : String // "cosine"（默认，写入归一化）| "euclidean"（l2sq，不归一化）
+  target_rows : Int // 目标簇行数 TARGET_ROWS（cutover 重分区目标）：0 = 初值按公式 target_rows_for(num_docs, dim, nprobe) 取（cutover.mbt）
 }
 
 ///|
@@ -60,6 +61,7 @@ pub fn BuildConfig::default(ns : String) -> BuildConfig {
     global_pack_size: 1,
     fts_tokenizer: @core.Word,
     distance_metric: "cosine",
+    target_rows: 0,
   }
 }
 
@@ -159,6 +161,16 @@ pub fn BuildConfig::with_fts_tokenizer(
   v : @core.Tokenizer,
 ) -> BuildConfig {
   { ..self, fts_tokenizer: v }
+}
+
+///|
+/// 函数式更新：目标簇行数 TARGET_ROWS（cutover 重分区目标）。0 = 自动按
+/// 公式 `target_rows_for(num_docs, dim, nprobe)` 取初值（见 cutover.mbt）。
+pub fn BuildConfig::with_target_rows(
+  self : BuildConfig,
+  v : Int,
+) -> BuildConfig {
+  { ..self, target_rows: if v < 0 { 0 } else { v } }
 }
 
 ///|

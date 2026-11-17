@@ -684,3 +684,72 @@ async test "maybe_compact_segments safety valve falls back once to prefix merge"
   let ids = visible_ids(mem, "l0valve", m1)
   assert_eq(ids.length(), 30)
 }
+
+///|
+/// 合并输出按 doc id 升序（`sort_docs_by_id`）：来源段在 manifest 里逆 id
+/// 序时，合并行排序后 id 连续 ⇒ 段标 `dense_u64`（读侧 row_id 走
+/// min_id+row、免读 id 列，冷 vec KB/q 不随 N 膨胀的关键）；id 有空洞时
+/// 排序后仍不稠密、不标 dense_u64（负向对照，防检查被放宽）。
+async test "compact 输出按 id 排序：连续 id 合并段标 dense_u64，空洞不标" {
+  let store = WbStore::new()
+  let cfg = {
+    ..BuildConfig::default("mrgsort"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+    id_dense: true,
+  }
+  // 先写高 id 段（1300..1599）再写低 id 段（1000..1299）：manifest 顺序
+  // = [高, 低]，按 manifest 顺序直接拼接是乱序的，必须排序才稠密。
+  let _ = ingest_l0_slab(store, cfg, mkdocs(300, 8, 1300UL, 41U), [])
+  let _ = ingest_l0_slab(store, cfg, mkdocs(300, 8, 1000UL, 42U), [])
+  let merged = compact_optimistic(store, cfg, max_prefix_segments=2)
+  assert_eq(merged is Some(_), true)
+  let m = head_manifest_of(store, "mrgsort")
+  assert_eq(m.segments.length(), 1)
+  let seg = m.segments[0]
+  let index = read_slab_index(store, "mrgsort", seg.id, seg.size_bytes)
+  let meta_bs = read_slab_component_by_name(store, "mrgsort", seg.id, index, "meta")
+  assert_eq(meta_id_encoding(meta_bs), "dense_u64")
+  let ids = seg_ids(store, "mrgsort", seg)
+  assert_eq(ids.length(), 600)
+  // 排序 + 连续：ids[i] == 1000 + i
+  for i in 0..<ids.length() {
+    assert_eq(ids[i], 1000UL + i.to_uint64())
+  }
+  // 负向对照：id 有空洞（1000..1299 + 1600..1899）⇒ 排序后仍不稠密。
+  let store2 = WbStore::new()
+  let cfg2 = {
+    ..BuildConfig::default("mrgsortgap"),
+    segment_rows: 2000,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+    id_dense: true,
+  }
+  let _ = ingest_l0_slab(store2, cfg2, mkdocs(300, 8, 1000UL, 43U), [])
+  let _ = ingest_l0_slab(store2, cfg2, mkdocs(300, 8, 1600UL, 44U), [])
+  let merged2 = compact_optimistic(store2, cfg2, max_prefix_segments=2)
+  assert_eq(merged2 is Some(_), true)
+  let m2 = head_manifest_of(store2, "mrgsortgap")
+  assert_eq(m2.segments.length(), 1)
+  let seg2 = m2.segments[0]
+  let index2 = read_slab_index(store2, "mrgsortgap", seg2.id, seg2.size_bytes)
+  let meta2 = read_slab_component_by_name(store2, "mrgsortgap", seg2.id, index2, "meta")
+  assert_eq(meta_id_encoding(meta2), "")
+}
+
+///|
+/// 读 seg meta.json 的 id_encoding（无该字段时返回空串）。
+fn meta_id_encoding(bs : Bytes) -> String raise @core.SpndError {
+  let j = bytes_to_json(bs, "seg meta")
+  match j {
+    Object(m) =>
+      match m.get("id_encoding") {
+        Some(String(s)) => s
+        _ => ""
+      }
+    _ => raise @core.Corrupt("seg meta not object")
+  }
+}

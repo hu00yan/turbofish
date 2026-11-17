@@ -114,6 +114,40 @@ Turbopuffer 公开单价（Launch/Scale，2026-11-15）：
 | 运维 | 全托管、多租户、复制、限流 | 单机 metad，无复制/failover/限流 |
 | 写入 | WAL + 秒级 group commit，~10k vectors/s/ns | 直接写 S3 + 同步 compaction；50k 写入 942 docs/s direct |
 
+### 5.1 实测分解（当前 main，50k × 128，`cmd/bench1m`）
+
+同一把尺子分别跑线上写路径（`BENCH_WRITE_SLAB=1`，`ingest_l0_slab`）与 legacy
+路径（`ingest` + `ingest_delta_opts`）：
+
+| 指标 | legacy | slab（线上） |
+| --- | ---: | ---: |
+| PUT / 1000 文档批 | ~75 | ~68 |
+| vec 冷查询 GET/q | 114 | 164 |
+| vec 冷查询 KB/q | 1717 | 1934 |
+| vec 热查询 GET/q | 50 | 0 |
+| vec 热查询 p50（虚拟时钟） | 1657 ms | 10.4 ms |
+
+**每批 ~68 个 PUT 的构成**：1 个 segment slab + 64 个全局 IVF delta part
+（`write_global_delta_parts` 每个簇一个对象，`global_pack_size` 默认 1）
++ manifest + head 记录。也就是说段格式（W3 的「4 PUT/批」）只占 6%，
+成本主项是全局 IVF 的增量派生对象。
+
+**每次查询的读放大**：
+
+```
+bytes/query ≈ nprobe × (N / nlist) × dim × 2B
+```
+
+50k × 128、nprobe=8、nlist=64 时为 8 × 780 行 × 128 × 2B ≈ 1.6 MB，
+实测 1934 KB/q（含列与倒排）吻合。按同一公式外推到 10M × 768 且 nlist 仍为
+64 时是 **≈1.9 GB/查询**，比 Turbopuffer 的冷读量高三个数量级。所以 TP-1
+（10M warm ≤12 ms）在固定 `nlist` 下不可达，先把 `nlist` 随 N 增长做出来，
+才谈得上同规模对比。
+
+**packing 不是成本杠杆**：`BENCH_PACK=8` 把 PUT 降到 22/批、`PACK=16` 降到
+18/批，但 vec 冷查询 KB/q 从 1717 涨到 12505（读放大 7 倍）。在「PUT 计费、
+字节不计费」的模型里它看起来划算，实际是把成本挪到延迟上。
+
 ## 6. 下一步计划
 
 ### P0：先把“可比”做出来（1 周）
@@ -128,7 +162,10 @@ Turbopuffer 公开单价（Launch/Scale，2026-11-15）：
 
 ### P1：补规模化和稳态存储（2–4 周）
 
-5. **自适应 IVF/分片**：`nlist` 随 N 增长，支持 namespace sharding；
+5. **自适应 IVF/分片**：`nlist` 随 N 增长（目标是每簇行数 ≤ 2k，10M 时需要
+   nlist ≈ 5k，而不是 64），支持 namespace sharding。验收看 §5.1 的公式：
+   同 recall 下 `KB/q` 不随 N 增长。当前 `nlist` 在首次建 namespace 时训好就
+   冻结，所以要带「compact 时重训中心并重分片」这一半，否则规模一涨就退化。
    目标 1M/10M × 768 在 recall≈0.95 时 warm p50 <20 ms（单节点）。
 6. **NVMe block cache**：缓存 probe 命中的 cluster/global part，而不只是
    metadata；目标 10M 文档、64 GB SSD 下 warm 命中率 >90%。

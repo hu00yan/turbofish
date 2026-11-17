@@ -1,5 +1,14 @@
 # Results: Turbofish (MinIO + local metadata service) vs Qdrant
 
+> **版本注记（先读这段）**：本文件是一次真实运行的历史记录，测的是 commit
+> `291b260`。该 commit 早于 W1–W8（异步 store、L0 单文件 slab、group commit、
+> 独立 compactd、`metad`）。文中的写入数字（942 docs/s、92 S3 请求/1000 文档、
+> 其中 84 个 `PutObject`）属于 **legacy 多对象写路径**，不是现在 `cmd/serve`
+> 的线上路径。用 `cmd/bench1m` 加 `BENCH_WRITE_SLAB=1` 才能测到线上路径；
+> 当前口径见 [`docs/TURBOPUFFER.md`](../docs/TURBOPUFFER.md) §5.1。
+> 查询侧数字（warm p50 0.66 ms、冷窗 31 次 GET、recall 0.945）仍代表当时的
+> 架构，重测之前不要当作当前值引用。
+
 This file reports one real run of `perf/run_compare.py`. All numbers below are
 read from
 [`results/compare-20261115T101916Z-33642.json`](results/compare-20261115T101916Z-33642.json),

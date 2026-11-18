@@ -1,5 +1,7 @@
 // namespace.json / manifest-{id}.json 的结构体与 JSON 互转。
-// u64 id 经 Double 往返在 2^53 内无损（MVP 约束）。
+// u64 id（min_id/max_id/deleted）不许过 JSON Double（> 2^53 即损）：写侧
+// min_id/max_id 十进制字符串、deleted 内嵌二进制 roaring（deleted_bin）；
+// 读侧兼容旧格式（JSON number ≤ 2^53），超界一律报错（不静默截断）。
 
 ///|
 #derive(Debug)
@@ -32,6 +34,8 @@ pub(all) struct ManifestData {
   id : String
   parent : String?
   segments : Array[SegmentMeta]
+  /// 墓碑 id 集（升序去重）；JSON 侧以 `deleted_bin`（内嵌二进制 roaring）
+  /// 精确承载，逐 id 的 JSON number 数组已废除（> 2^53 过 Double 即损）。
   deleted : Array[UInt64]
   deleted_roar : String? // 可选：roaring tombstone 对象 key（新读路径优先）
   vec_global_version : String? // Some(v) = 向量在 vec/global/{v} 单副本；None = per-segment
@@ -110,6 +114,112 @@ fn jnum_at(m : Map[String, Json], key : String) -> Double raise @core.SpndError 
 }
 
 ///|
+/// 十进制 / "0x" hex 字符串 → u64（全范围精确）；溢出或非法返回 None。
+pub fn parse_u64_str(s : String) -> UInt64? {
+  let chars : Array[Char] = []
+  for c in s {
+    chars.push(c)
+  }
+  if chars.is_empty() {
+    return None
+  }
+  let mut base = 10UL
+  let mut i = 0
+  if chars.length() >= 3 &&
+    chars[0].to_int() == 48 &&
+    (chars[1].to_int() == 120 || chars[1].to_int() == 88) {
+    base = 16UL
+    i = 2
+  }
+  if i >= chars.length() {
+    return None
+  }
+  let max : UInt64 = 18446744073709551615UL
+  let mut n = 0UL
+  while i < chars.length() {
+    let c = chars[i].to_int()
+    let d = if c >= 48 && c <= 57 {
+      (c - 48).to_uint64()
+    } else if base == 16UL && c >= 97 && c <= 102 {
+      (c - 87).to_uint64()
+    } else if base == 16UL && c >= 65 && c <= 70 {
+      (c - 55).to_uint64()
+    } else {
+      return None
+    }
+    if n > (max - d) / base {
+      return None
+    }
+    n = n * base + d
+    i = i + 1
+  }
+  Some(n)
+}
+
+///|
+/// 旧格式 JSON number → u64：必须是 [0, 2^53] 内的整数（Double 无损往返
+/// 上界）；超界**报错**而不是静默截断（2^53+1 等在旧写入侧即已损）。
+pub fn u64_from_legacy_num(d : Double) -> UInt64 raise @core.SpndError {
+  if d < 0.0 || d != d.floor() || d > 9007199254740992.0 {
+    raise @core.Corrupt("legacy u64 JSON number exceeds exact range (>2^53)")
+  }
+  d.to_uint64()
+}
+
+///|
+/// JSON → u64（id 精确读取）：字符串（十进制 / 0x hex）u64 全范围精确；
+/// 旧格式 number 只接受 ≤ 2^53 的整数，超界报错。
+pub fn u64_from_json_exact(j : Json) -> UInt64 raise @core.SpndError {
+  match j {
+    String(s) =>
+      match parse_u64_str(s) {
+        Some(v) => v
+        None => raise @core.Corrupt("invalid u64 string: \{s}")
+      }
+    Number(d, ..) => u64_from_legacy_num(d)
+    _ => raise @core.Corrupt("u64 must be string or number")
+  }
+}
+
+///|
+/// Bytes → 小写 hex 字符串（deleted_bin 内嵌二进制的 JSON 载体）。
+fn bytes_to_hex(bs : Bytes) -> String {
+  let out = Buffer()
+  for i in 0..<bs.length() {
+    let v = bs[i].to_int()
+    out.write_string_utf8(hex_digit(v >> 4))
+    out.write_string_utf8(hex_digit(v & 15))
+  }
+  @utf8.decode(out.to_bytes().exact_view()) catch {
+    _ => ""
+  }
+}
+
+///|
+/// hex 字符串 → Bytes；奇数长度或非法字符返回 None。
+fn hex_to_bytes(s : String) -> Bytes? {
+  let chars : Array[Char] = []
+  for c in s {
+    chars.push(c)
+  }
+  if chars.length() % 2 != 0 {
+    return None
+  }
+  let out = Buffer()
+  let mut i = 0
+  while i < chars.length() {
+    let hi = hex_val(chars[i])
+    let lo = hex_val(chars[i + 1])
+    if hi < 0 || lo < 0 {
+      return None
+    }
+    out.write_byte(((hi << 4) | lo).to_byte())
+    i = i + 2
+  }
+  Some(out.to_bytes())
+}
+
+///|
 fn jopt_str_at(m : Map[String, Json], key : String) -> String? {
   match m.get(key) {
     Some(String(s)) => Some(s)
@@ -168,15 +278,11 @@ pub fn ManifestData::to_json(self : ManifestData) -> Json {
     let sm : Map[String, Json] = Map([])
     sm.set("id", Json::string(s.id))
     sm.set("row_count", Json::number(s.row_count.to_double()))
-    sm.set("min_id", Json::number(s.min_id.to_double()))
-    sm.set("max_id", Json::number(s.max_id.to_double()))
+    sm.set("min_id", Json::string(s.min_id.to_string()))
+    sm.set("max_id", Json::string(s.max_id.to_string()))
     sm.set("doc_len_sum", Json::number(s.doc_len_sum.to_double()))
     sm.set("size_bytes", Json::number(s.size_bytes.to_double()))
     segs.push(Json::object(sm))
-  }
-  let dels : Array[Json] = Array()
-  for d in self.deleted {
-    dels.push(Json::number(d.to_double()))
   }
   let m : Map[String, Json] = Map([])
   m.set("id", Json::string(self.id))
@@ -188,7 +294,14 @@ pub fn ManifestData::to_json(self : ManifestData) -> Json {
     },
   )
   m.set("segments", Json::array(segs))
-  m.set("deleted", Json::array(dels))
+  // deleted：内嵌二进制 roaring（hex 载体，u64 全范围精确）；逐 id 的 JSON
+  // number 数组已废除。空集不写字段（省字节）。
+  if !self.deleted.is_empty() {
+    m.set(
+      "deleted_bin",
+      Json::string(bytes_to_hex(encode_roaring(self.deleted))),
+    )
+  }
   m.set(
     "deleted_roar",
     match self.deleted_roar {
@@ -224,15 +337,32 @@ pub fn manifest_from_json(j : Json) -> ManifestData raise @core.SpndError {
     segs.push({
       id: jstr_at(sm, "id"),
       row_count: jnum_at(sm, "row_count").to_int(),
-      min_id: jnum_at(sm, "min_id").to_uint64(),
-      max_id: jnum_at(sm, "max_id").to_uint64(),
+      min_id: u64_from_json_exact(jfield(sm, "min_id")),
+      max_id: u64_from_json_exact(jfield(sm, "max_id")),
       doc_len_sum: jnum_at(sm, "doc_len_sum").to_int(),
       size_bytes: jnum_at(sm, "size_bytes").to_int(),
     })
   }
+  // deleted：优先 deleted_bin（内嵌二进制 roaring，新格式）；旧格式逐 id
+  // JSON number 数组兼容读取，> 2^53 的 number 报错（不静默截断）。
   let dels : Array[UInt64] = Array()
-  for dj in jarr(jfield(m, "deleted")) {
-    dels.push(jnum(dj).to_uint64())
+  match m.get("deleted_bin") {
+    Some(String(h)) =>
+      match hex_to_bytes(h) {
+        Some(bs) =>
+          for d in decode_roaring(bs) {
+            dels.push(d)
+          }
+        None => raise @core.Corrupt("manifest deleted_bin is not hex")
+      }
+    _ =>
+      match m.get("deleted") {
+        Some(Array(a)) =>
+          for dj in a {
+            dels.push(u64_from_json_exact(dj))
+          }
+        _ => ()
+      }
   }
   {
     id: jstr_at(m, "id"),

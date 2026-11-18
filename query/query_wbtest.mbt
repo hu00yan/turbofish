@@ -1413,3 +1413,30 @@ async test "warm_namespace preloads metadata, global parts load lazily" {
   assert_eq(s.cost().gets, 0)
   assert_eq(s.cost().ranged_gets, 0)
 }
+
+///|
+/// Defect A 回归（seg meta）：`min_id` 字符串精确读取（dense 段 row→id =
+/// min_id+row 的前提）；旧格式 JSON number > 2^53 必须报错而不是静默截断。
+test "seg meta min_id: string exact beyond 2^53, legacy number raises" {
+  let m : Map[String, Json] = Map([])
+  m.set("id", Json::string("s1"))
+  m.set("row_count", Json::number(1.0))
+  m.set("min_id", Json::string("18446744073709551615"))
+  m.set("max_id", Json::string("0xffffffffffffffff"))
+  m.set("partitions", Json::array([]))
+  let info = parse_seg_meta(@utf8.encode(Json::object(m).stringify()))
+  assert_eq(info.min_id, 18446744073709551615UL)
+  // 旧格式 number > 2^53：报错不截断
+  let m2 : Map[String, Json] = Map([])
+  m2.set("id", Json::string("s2"))
+  m2.set("row_count", Json::number(1.0))
+  m2.set("min_id", Json::number(9223372036854775808.0))
+  m2.set("partitions", Json::array([]))
+  let mut raised = false
+  try {
+    let _ = parse_seg_meta(@utf8.encode(Json::object(m2).stringify()))
+  } catch {
+    _ => raised = true
+  }
+  assert_eq(raised, true)
+}

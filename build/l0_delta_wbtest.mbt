@@ -826,3 +826,76 @@ async test "空洞合并段 id 组件 runs_u64，非连续 id 段保持逐行" {
     assert_eq(ids2[i], (i * 2).to_uint64())
   }
 }
+
+///|
+/// Defect A 回归（全链路）：id 取 2^53+1 / 2^63 / u64::MAX 走
+/// 「写入 → 删除若干 → 合并 → 读回」：manifest 的 min_id/max_id/deleted 与
+/// seg meta 的 min_id 全部精确（u64 主键不许过 JSON Double），被删行不复活、
+/// 行不重复。
+async test "u64 ids > 2^53 survive write→delete→merge→readback" {
+  let mem = @store.MemStore::new()
+  let cfg = {
+    ..BuildConfig::default("u64edge"),
+    segment_rows: 8,
+    nlist: 4,
+    use_f16: false,
+    vector_dim: 8,
+    id_dense: true,
+  }
+  let p1 = 9007199254740993UL // 2^53+1（过 JSON Double 即损）
+  let p3 = 9223372036854775808UL // 2^63
+  let umax = 18446744073709551615UL // u64::MAX
+  let _ = ingest_l0_slab(mem, cfg, [
+    one_doc(7UL, 8, "small", 34U),
+    one_doc(p1, 8, "p53p1", 31U),
+    one_doc(p3, 8, "p63", 32U),
+    one_doc(umax, 8, "umax", 33U),
+  ], [])
+  // 删除 2^53+1 与 2^63
+  let _ = ingest_l0_slab(mem, cfg, [], [p1, p3])
+  let _ = ingest_l0_slab(mem, cfg, [
+    one_doc(10UL, 8, "small2", 35U),
+    one_doc(9007199254740995UL, 8, "p53p3", 36U),
+  ], [])
+  // 合并前：墓碑与段边界必须精确（否则 prune/裁剪会永久丢 id）
+  let m0 = head_manifest_of(mem, "u64edge")
+  assert_eq(m0.deleted.length(), 2)
+  assert_eq(m0.deleted[0], p1)
+  assert_eq(m0.deleted[1], p3)
+  let mut has_umax_bound = false
+  for s in m0.segments {
+    if s.min_id == 7UL && s.max_id == umax {
+      has_umax_bound = true
+    }
+  }
+  assert_eq(has_umax_bound, true)
+  // 合并（墓碑物理化）
+  let res = compact_optimistic(mem, cfg)
+  assert_eq(res is Some(_), true)
+  let m = head_manifest_of(mem, "u64edge")
+  assert_eq(m.segments.length(), 1)
+  assert_eq(m.segments[0].min_id, 7UL)
+  assert_eq(m.segments[0].max_id, umax)
+  assert_eq(m.deleted.length(), 0) // 已物理化
+  // 读回：id 精确、被删行不复活、无重复（length 精确即无重复）
+  let ids = visible_ids(mem, "u64edge", m)
+  assert_eq(ids.length(), 4)
+  assert_eq(has_id(ids, 7UL), true)
+  assert_eq(has_id(ids, 10UL), true)
+  assert_eq(has_id(ids, 9007199254740995UL), true)
+  assert_eq(has_id(ids, umax), true)
+  assert_eq(has_id(ids, p1), false)
+  assert_eq(has_id(ids, p3), false)
+  // 合并段 meta.json 的 min_id/max_id 是精确字符串（dense 段 row→id 前提）
+  let meta = seg_meta_map(mem, "u64edge/_segments/\{m.segments[0].id}")
+  let min_s = match meta.get("min_id") {
+    Some(String(s)) => s
+    _ => fail("min_id must be a precise string")
+  }
+  assert_eq(min_s, "7")
+  let max_s = match meta.get("max_id") {
+    Some(String(s)) => s
+    _ => fail("max_id must be a precise string")
+  }
+  assert_eq(max_s, "18446744073709551615")
+}

@@ -1774,15 +1774,17 @@ fn parse_row_vector(arr : Array[Json]) -> Array[Float] raise @core.SpndError {
 }
 
 ///|
+/// JSON → u64 id（精确）：字符串（十进制 / 0x hex）u64 全范围精确；兼容旧
+/// 客户端的 JSON number，但只接受 ≤ 2^53 的整数，超界**报错**不静默截断。
 fn u64_from_json(j : Json) -> UInt64 raise @core.SpndError {
   match j {
-    Number(d, ..) => {
-      if d < 0.0 || d >= 18446744073709551616.0 {
-        raise @core.Corrupt("id out of uint64 range")
+    String(s) =>
+      match @format.parse_u64_str(s) {
+        Some(v) => v
+        None => raise @core.Corrupt("id must be a decimal/hex u64 string: \{s}")
       }
-      d.to_int64().reinterpret_as_uint64()
-    }
-    _ => raise @core.Corrupt("id must be number")
+    Number(d, ..) => @format.u64_from_legacy_num(d)
+    _ => raise @core.Corrupt("id must be a decimal string or number")
   }
 }
 
@@ -2382,7 +2384,7 @@ async fn handle_query(
   for r in rows {
     let attr = lookup_doc_attrs(store, ns, n, r.id)
     let row_map : Map[String, Json] = Map([])
-    row_map.set("id", Json::number(r.id.to_double()))
+    row_map.set("id", Json::string(r.id.to_string()))
     row_map.set("score", Json::number(r.score))
     if attr_wanted(include_attrs, exclude, "text") {
       row_map.set("text", Json::string(attr.text))
@@ -2450,7 +2452,7 @@ fn encode_rows_body(
   let rows : Array[Json] = Array(capacity=docs.length())
   for d in docs {
     let m : Map[String, Json] = Map([])
-    m.set("id", Json::number(d.id.to_double()))
+    m.set("id", Json::string(d.id.to_string()))
     m.set("text", Json::string(d.text))
     m.set("category", Json::string(d.category))
     m.set("ts", Json::number(d.ts.to_double()))
@@ -2466,7 +2468,7 @@ fn encode_rows_body(
   }
   let del : Array[Json] = Array(capacity=deletes.length())
   for id in deletes {
-    del.push(Json::number(id.to_double()))
+    del.push(Json::string(id.to_string()))
   }
   let root : Map[String, Json] = Map([])
   root.set("rows", Json::array(rows))

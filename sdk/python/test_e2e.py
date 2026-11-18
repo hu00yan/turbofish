@@ -68,11 +68,11 @@ def main() -> int:
     print("[3/7] query text=食べる (kuromoji FTS) & assert enriched attributes ...")
     qout = client.query(ns, text="食べる", top_k=5)
     qrows = qout.get("rows", [])
-    ids = [r.get("id") for r in qrows]
+    ids = [int(r.get("id")) for r in qrows]
     assert qout.get("count", 0) >= 1 and len(qrows) >= 1, f"query text=食べる: no hits, got {qout}"
     assert 1 in ids, f"query text=食べる: expected id 1 (食べました) among hits, got ids={ids} out={qout}"
     # Assert enriched attributes (text, category)
-    hit1 = next((r for r in qrows if r.get("id") == 1), None)
+    hit1 = next((r for r in qrows if int(r.get("id")) == 1), None)
     assert hit1 is not None, f"expected hit with id 1, got {qrows}"
     assert hit1.get("text") == "今日は寿司を食べました", f"expected original text for id 1, got {hit1.get('text')}"
     assert hit1.get("category") == "food", f"expected category 'food' for id 1, got {hit1.get('category')}"
@@ -80,7 +80,7 @@ def main() -> int:
     print("[4/7] query vector=[1,0,0,0] top_k=1 & assert enriched attributes ...")
     vout = client.query(ns, vector=[1.0, 0.0, 0.0, 0.0], top_k=1)
     vrows = vout.get("rows", [])
-    assert len(vrows) >= 1 and vrows[0].get("id") == 1, f"query vector: expected nearest id 1, got {vout}"
+    assert len(vrows) >= 1 and int(vrows[0].get("id")) == 1, f"query vector: expected nearest id 1, got {vout}"
     assert vrows[0].get("text") == "今日は寿司を食べました", f"expected original text, got {vrows[0].get('text')}"
     assert vrows[0].get("category") == "food", f"expected original category, got {vrows[0].get('category')}"
 

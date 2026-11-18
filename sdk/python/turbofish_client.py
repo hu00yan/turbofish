@@ -15,6 +15,7 @@ Contract (JSON):
                                                "fusion"?, "weights"?, "include_attributes"?,
                                                "exclude_attributes"?, "consistency"?}
         -> {"rows": [{"id", "score", "text", "category", "ts", "public"}...], "count": <n>}
+           (row ``id`` is a decimal string — u64 全范围精确)
            (aggregations=["Count"] -> {"count": <n>, "rows": []})
            (aggregations=[{"Sum": "field"}] -> {"count": <n>, "aggregations": {"field": {"sum": S}}, "rows": []})
     GET  {endpoint}/v1/namespaces/{ns}/health
@@ -26,9 +27,10 @@ Contract (JSON):
     POST {endpoint}/v1/namespaces/{ns}/branch {"destination": "dest_ns"}
         -> {"ok": true}
 
-A write row is ``{"id": <uint64>, "text": str, "vector": [f32...],
+A write row is ``{"id": <uint64 或十进制字符串>, "text": str, "vector": [f32...],
 "category": str, "ts": <int64>, "public": bool}``.  Fields other than ``id``
-are passed through verbatim; the server validates them.
+are passed through verbatim; the server validates them.  ``id`` 以字符串形式
+可承载 u64 全范围；number 形式仅接受 ≤ 2^53 的整数（超出报错，不静默截断）。
 
 Authentication: if ``api_key`` is supplied, every request carries
 ``Authorization: Bearer <key>``.

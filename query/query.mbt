@@ -1285,8 +1285,15 @@ fn parse_seg_meta(bs : Bytes) -> SegMetaInfo raise @core.SpndError {
       }
     _ => ()
   }
+  // min_id：新格式十进制字符串（u64 全范围精确，dense 段 row→id = min_id+row
+  // 的前提）；旧格式 JSON number 兼容 ≤ 2^53，超界报错不截断。
   let min_id = match m.get("min_id") {
-    Some(Number(d, ..)) => d.to_uint64()
+    Some(String(s)) =>
+      match @format.parse_u64_str(s) {
+        Some(v) => v
+        None => raise @core.Corrupt("seg meta min_id is not a valid u64 string")
+      }
+    Some(Number(d, ..)) => @format.u64_from_legacy_num(d)
     _ => 0UL
   }
   let id_dense = match m.get("id_encoding") {

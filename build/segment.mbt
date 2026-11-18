@@ -250,7 +250,8 @@ async fn[S : @store.ObjectStore] publish_head_expect(
 ///   fts/doc_len.bin：ColU32（每行 token 数）
 /// - vec/part-{cid}.bin：每行按 cosine 最近中心分配（查询侧同语义），
 ///   只写非空分区，meta.json partitions 为实际写出的 cid 升序列表
-/// - meta.json：{"id","row_count","min_id","max_id","partitions"}（JSON 数字）
+/// - meta.json：{"id","row_count","min_id","max_id","partitions"}（min_id/
+///   max_id 十进制字符串，u64 全范围精确；其余 JSON 数字）
 /// size_bytes = 该段所有对象字节数之和（含 meta.json）。
 
 ///|
@@ -626,8 +627,8 @@ async fn[S : @store.ObjectStore] write_segment(
   let mj : Map[String, Json] = Map([])
   mj.set("id", Json::string(seg_id))
   mj.set("row_count", Json::number(n.to_double()))
-  mj.set("min_id", Json::number(min_id.to_double()))
-  mj.set("max_id", Json::number(max_id.to_double()))
+  mj.set("min_id", Json::string(min_id.to_string()))
+  mj.set("max_id", Json::string(max_id.to_string()))
   mj.set("partitions", Json::array(partitions))
   if cfg.write_fts_bloom {
     let terms : Array[String] = Array()

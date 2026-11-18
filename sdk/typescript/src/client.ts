@@ -17,6 +17,7 @@
  *                                              "weights"?, "include_attributes"?, "exclude_attributes"?,
  *                                              "consistency"?}
  *     -> {"rows": [{"id","score","text","category"}...], "count": number}
+ *        (row `id` is a decimal string — u64 全范围精确；写入侧 id 可为 number（≤2^53）或字符串)
  *        (aggregations=["Count"] -> {"count": number, "rows": []})
  *        (aggregations=[{"Sum":"field"}] -> {"count": number, "aggregations": {"field":{"sum":S}}, "rows": []})
  *   GET  {endpoint}/v1/namespaces/{ns}/health
@@ -58,7 +59,7 @@ export class TurboFishError extends Error {
 
 /** One row of a `write` call: contract field names passed through verbatim; the server validates them. */
 export interface TurboFishRow {
-  id: number;
+  id: number | string;
   text?: string;
   vector?: number[];
   category?: string;
@@ -77,7 +78,7 @@ export interface WriteResult {
 }
 
 export interface QueryResultRow {
-  id: number;
+  id: number | string;
   score: number;
   text?: string;
   category?: string;
@@ -120,7 +121,7 @@ export interface CopyBranchResult {
 }
 
 export interface TurboFishPatch {
-  id: number;
+  id: number | string;
   text?: string;
   category?: string;
   ts?: number;
@@ -186,7 +187,7 @@ export class TurboFishClient {
   async write(
     ns: string,
     rows: readonly TurboFishRow[],
-    deletes?: readonly number[],
+    deletes?: readonly (number | string)[],
     distance_metric?: DistanceMetric,
   ): Promise<WriteResult> {
     const payload: Record<string, unknown> = { rows: [...rows] };
@@ -236,7 +237,7 @@ export class TurboFishClient {
   /** Delete document IDs in batches of `batchSize`. */
   async batch_delete(
     ns: string,
-    ids: readonly number[],
+    ids: readonly (number | string)[],
     batchSize = 1000,
   ): Promise<BatchDeleteResult> {
     if (batchSize <= 0) throw new Error("batchSize must be positive");
@@ -257,7 +258,7 @@ export class TurboFishClient {
   }
 
   /** Convenience alias for `batch_delete`. */
-  async delete(ns: string, ids: readonly number[], batchSize = 1000): Promise<BatchDeleteResult> {
+  async delete(ns: string, ids: readonly (number | string)[], batchSize = 1000): Promise<BatchDeleteResult> {
     return this.batch_delete(ns, ids, batchSize);
   }
 

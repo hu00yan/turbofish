@@ -453,8 +453,8 @@ pub fn build_segment_slab(
   let mj : Map[String, Json] = Map([])
   mj.set("id", Json::string(seg_id))
   mj.set("row_count", Json::number(n.to_double()))
-  mj.set("min_id", Json::number(min_id.to_double()))
-  mj.set("max_id", Json::number(max_id.to_double()))
+  mj.set("min_id", Json::string(min_id.to_string()))
+  mj.set("max_id", Json::string(max_id.to_string()))
   mj.set("partitions", Json::array(partitions))
   mj.set("format", Json::string("slab_v2"))
   if cfg.write_fts_bloom {

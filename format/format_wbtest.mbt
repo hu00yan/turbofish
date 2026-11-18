@@ -339,3 +339,92 @@ test "format: decode_id_runs 坏 run 表 Corrupt" {
   let col = decode_id_col(ok)
   assert_eq(col.at(2), 44UL)
 }
+
+///|
+/// Defect A 回归：u64 id（> 2^53）经 manifest JSON 必须精确往返。写侧
+/// `min_id`/`max_id` 十进制字符串、`deleted` 内嵌二进制 roaring（逐 id 的
+/// JSON number 数组废除）；读侧 u64 全范围精确。
+test "manifest u64 ids beyond 2^53 roundtrip exact" {
+  let m : ManifestData = {
+    id: "manifest-02BIG",
+    parent: None,
+    segments: [
+      {
+        id: "seg-02BIG",
+        row_count: 3,
+        min_id: 9007199254740993UL,
+        max_id: 18446744073709551615UL,
+        doc_len_sum: 30,
+        size_bytes: 1,
+      },
+    ],
+    deleted: [9223372036854775808UL, 18446744073709551615UL],
+    deleted_roar: None,
+    vec_global_version: None,
+    global_gen: None,
+    centroid_version: "centroids-02C",
+    num_docs: 1,
+    avg_doc_len: 10.0,
+  }
+  let j = m.to_json()
+  let text = j.stringify()
+  // 写侧：id 走字符串；逐 id 的 deleted 数组彻底不存在
+  assert_eq(text.find("\"min_id\":\"9007199254740993\"") is Some(_), true)
+  assert_eq(text.find("\"deleted\":[") is Some(_), false)
+  // 读侧：u64 全范围精确（JSON Double 在 2^53 内才无损，这里全超界）
+  let parsed = manifest_from_json(j)
+  assert_eq(parsed.segments[0].min_id, 9007199254740993UL)
+  assert_eq(parsed.segments[0].max_id, 18446744073709551615UL)
+  assert_eq(parsed.deleted, m.deleted)
+}
+
+///|
+/// 旧格式（逐 id JSON number）兼容与超界报错：≤ 2^53 的 number 精确读回；
+/// > 2^53 必须**报错**而不是静默截断。字符串（十进制 / 0x hex）u64 全范围精确。
+test "manifest legacy numeric ids: <=2^53 exact, >2^53 raises" {
+  let good = @json.parse(
+    "{\"id\":\"m\",\"parent\":null,\"segments\":[{\"id\":\"s\",\"row_count\":1,\"min_id\":9007199254740992,\"max_id\":4503599627370496,\"doc_len_sum\":1,\"size_bytes\":1}],\"deleted\":[5,9007199254740992],\"deleted_roar\":null,\"vec_global_version\":null,\"centroid_version\":\"c\",\"num_docs\":1,\"avg_doc_len\":1.0}",
+  ) catch {
+    _ => panic()
+  }
+  let m = manifest_from_json(good)
+  assert_eq(m.segments[0].min_id, 9007199254740992UL)
+  assert_eq(m.segments[0].max_id, 4503599627370496UL)
+  assert_eq(m.deleted.length(), 2)
+  assert_eq(m.deleted[1], 9007199254740992UL)
+  // > 2^53 的 number（min_id）：必须报错
+  let bad_seg = @json.parse(
+    "{\"id\":\"m\",\"parent\":null,\"segments\":[{\"id\":\"s\",\"row_count\":1,\"min_id\":9223372036854775808,\"max_id\":1,\"doc_len_sum\":1,\"size_bytes\":1}],\"deleted\":[],\"deleted_roar\":null,\"vec_global_version\":null,\"centroid_version\":\"c\",\"num_docs\":1,\"avg_doc_len\":1.0}",
+  ) catch {
+    _ => panic()
+  }
+  let mut raised_seg = false
+  try {
+    let _ = manifest_from_json(bad_seg)
+  } catch {
+    _ => raised_seg = true
+  }
+  assert_eq(raised_seg, true)
+  // > 2^53 的 number（deleted 逐 id）：必须报错
+  let bad_del = @json.parse(
+    "{\"id\":\"m\",\"parent\":null,\"segments\":[],\"deleted\":[18446744073709551615],\"deleted_roar\":null,\"vec_global_version\":null,\"centroid_version\":\"c\",\"num_docs\":0,\"avg_doc_len\":0.0}",
+  ) catch {
+    _ => panic()
+  }
+  let mut raised_del = false
+  try {
+    let _ = manifest_from_json(bad_del)
+  } catch {
+    _ => raised_del = true
+  }
+  assert_eq(raised_del, true)
+  // 字符串形式（0x hex / 十进制）：u64 全范围精确
+  let hexj = @json.parse(
+    "{\"id\":\"m\",\"parent\":null,\"segments\":[{\"id\":\"s\",\"row_count\":1,\"min_id\":\"0xffffffffffffffff\",\"max_id\":\"18446744073709551615\",\"doc_len_sum\":1,\"size_bytes\":1}],\"deleted\":[],\"deleted_roar\":null,\"vec_global_version\":null,\"centroid_version\":\"c\",\"num_docs\":1,\"avg_doc_len\":1.0}",
+  ) catch {
+    _ => panic()
+  }
+  let mh = manifest_from_json(hexj)
+  assert_eq(mh.segments[0].min_id, 18446744073709551615UL)
+  assert_eq(mh.segments[0].max_id, 18446744073709551615UL)
+}

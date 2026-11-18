@@ -1,0 +1,14 @@
+// specguard：需要 @fs 才能读源码做静态断言；moon 无法在空 moon.pkg 里引入 fs。
+// 本包只在 native / llvm 下编译（是 gate 用的检查器，不是运行时库）。
+supported_targets = "+native"
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async/fs",
+  "moonbitlang/async/io",
+}
+
+#cfg(any(target="native", target="llvm"))
+import {
+  "moonbitlang/async",
+} for "wbtest"

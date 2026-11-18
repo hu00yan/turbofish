@@ -1628,7 +1628,7 @@ async fn static_decomposition(
     let size_biased = s_sq / s_sum.to_double() // E[s²]/E[s]
     let rowb = part_bytes.to_double() / part_rows.to_double()
     println(
-      "  簇规模分布:有行 cid=\{ncid} 总 rows=\{part_rows} mean=\{fmt(mean, 1)} max=\{s_max} max/mean=\{fmt(s_max.to_double() / mean, 2)} E[s²]/E[s]=\{fmt(size_biased, 1)} E[s²]/E[s]/mean=\{fmt(size_biased / mean, 3)}",
+      "  簇规模分布:有行 cid=\{ncid} 总 rows=\{part_rows} mean=\{fmt(mean, 1)} max=\{s_max} max/mean=\{fmt(s_max.to_double() / mean, 2)} E[s²]/E[s]=\{fmt(size_biased, 1)}",
     )
     println(
       "  part 行字节 = \{fmt(rowb, 1)}（rows u32 + payload 实测均值）；probe 分区每 probe 字节:均匀探测 = mean×rowb = \{fmt(mean * rowb, 0)} B；size 偏置（查询落大簇）≈ E[s²]/E[s]×rowb = \{fmt(size_biased * rowb, 0)} B",

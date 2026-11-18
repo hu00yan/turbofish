@@ -86,6 +86,7 @@ UX/DX/AX：`MetadataCache` 暴露 `hits/misses/invalidate`；`open_cached` 文�
 - 输入：当前 head、live docs（跳过 tombstones）。
 - 输出：1 个新段；centroids 复用；global IVF/bloom 重建；旧代 GC。
 - 失败：任一步失败，旧 head 仍有效；新对象成为孤儿（GC）。
+- 不变量：`compact_optimistic` rebase 发布前必须校验 `M_curr.centroid_version == M_start.centroid_version` 且被合并的每个前缀段仍在 `M_curr.segments`，任一失败则整次合并放弃并重试（防并发 cutover 产生混合中心 manifest / 行重复；测试 `build/cutover_wbtest.mbt`）。
 - 全局模式：`compact` 从 global parts 预加载旧段向量；新段不写 per-segment
   vector；发布后 GC 旧 global 代。
 - 测试：`format/compact_wbtest.mbt`、`format/globalpack_wbtest.mbt`。

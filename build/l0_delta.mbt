@@ -636,12 +636,20 @@ fn prune_tombstones(
 /// 2. 段数 ≤ 1 且 `M_start.deleted` 为空 ⇒ `None`（无可合并）；
 /// 3. 把前缀段的存活行合并成 **1 个** SlabV2 单文件段并上传（`global_vec_parts`
 ///    时同时写新的全量 global IVF packs）；
-/// 4. **乐观 rebase 发布**：重读当前 head `M_curr`，把不在 prefix 里的并发新段
-///    `tail_new_segs` 拼在合并段之后，墓碑只保留 tail 段范围内的；CAS 发布
-///    `M_next`。冲突则重读 `M_curr` 重新拼 manifest JSON 重试（最多 5 次），
+/// 4. **乐观 rebase 发布**：重读当前 head `M_curr`，**先校验再发布**：
+///    a. `M_curr.centroid_version == M_start.centroid_version`——合并段按
+///       `M_start` 的中心分区，并发 cutover 会重训中心并全量重写段，把旧合并
+///       段挂在新 `centroid_version` 之下就是「混合中心」manifest；
+///    b. 被合并的每个前缀段仍存在于 `M_curr.segments`——缺失说明它已被并发
+///       cutover/合并替换，其行已在 tail 新段里，再拼合并段会「行重复」；
+///    任一校验失败 ⇒ **整次合并整体放弃并重试**（不修补：放弃已上传的合并段
+///    （孤儿由 superseded 段 GC 回收），重新拍快照、重新合并，≤ 5 轮）——
+///    分区语义已变，修补只会带伤发布。校验通过才把不在 prefix 里的并发新段
+///    `tail_new_segs` 拼在合并段之后、墓碑只保留 tail 段范围内的，CAS 发布
+///    `M_next`。发布冲突只重读 `M_curr` 重新校验/重拼（最多 5 次），
 ///    **绝不重传已上传的合并段**，也不会丢并发新写。
 ///
-/// 返回新 manifest id；无需合并或 5 次 CAS 全部冲突时返回 None。
+/// 返回新 manifest id；无需合并、5 轮整体重试耗尽或 5 次 CAS 全部冲突时 None。
 ///
 /// 【子集合并的限制】rebase 拼接固定把合并段排在段列表最前（前缀合并时
 /// 天然保持段序）；`merge_ids` 非前缀子集时 manifest 段序会被重排。段序
@@ -654,245 +662,279 @@ pub async fn[S : @store.ObjectStore] compact_optimistic(
   merge_ids? : Array[String] = [],
 ) -> String? {
   let ns = cfg.ns
-  let meta0 = match read_namespace(store, ns) {
-    Some(m) => m
-    None => return None
-  }
-  if meta0.head_manifest == "" {
-    return None
-  }
-  let m_start = load_manifest(store, ns, meta0.head_manifest)
-  if m_start.segments.length() <= 1 && m_start.deleted.is_empty() {
-    return None
-  }
-  // 合并集合：merge_ids 非空 = 指定子集（同 tier 不相邻段也可以）；
-  // 默认 = manifest 顺序的前 N 段（前缀合并）。rebase 拼接两种情况共用。
-  let in_prefix : Map[String, Bool] = Map([])
-  if merge_ids.length() > 0 {
-    let wanted : Map[String, Bool] = Map([])
-    for id in merge_ids {
-      wanted.set(id, true)
-    }
-    let mut picked = 0
-    for s in m_start.segments {
-      let hit = match wanted.get(s.id) {
-        Some(_) => true
-        None => false
-      }
-      if hit {
-        in_prefix.set(s.id, true)
-        picked += 1
-      }
-    }
-    if picked == 0 {
-      return None
-    }
-  } else {
-    let maxp = if max_prefix_segments > 0 {
-      max_prefix_segments
-    } else {
-      m_start.segments.length()
-    }
-    let mut taken = 0
-    for s in m_start.segments {
-      if taken < maxp {
-        in_prefix.set(s.id, true)
-        taken += 1
-      }
-    }
-  }
-  // 读前缀段的存活行（兼容传统多文件段与单文件 slab 段）
-  let tomb : Set[UInt64] = Set([])
-  for d in m_start.deleted {
-    tomb.add(d)
-  }
-  let has_global = m_start.vec_global_version is Some(_) ||
-    m_start.global_gen is Some(_)
-  let (gvecs, gdim) : (Map[Int, Array[Float]], Int) = if has_global {
-    load_global_vec_rows(store, ns, m_start)
-  } else {
-    (Map([]), 0)
-  }
-  let live : Array[@core.Doc] = Array()
-  for si in 0..<m_start.segments.length() {
-    let seg = m_start.segments[si]
-    if !in_prefix.contains(seg.id) {
-      continue
-    }
-    let pre : Array[Float]? = if has_global {
-      if seg.row_count == 0 {
-        Some(Array())
-      } else {
-        match gvecs.get(si) {
-          Some(a) => Some(a)
-          None =>
-            raise @core.Corrupt("missing preloaded vectors for segment \{si}")
-        }
-      }
-    } else {
-      None
-    }
-    for d in load_segment_docs(store, ns, seg, pre, gdim) {
-      if !tomb.contains(d.id) {
-        live.push(d)
-      }
-    }
-  }
-  // 合并输出按 doc id 升序：同一合并集的 id 区间在顺序写入下相邻时，
-  // 排序后即满足 min_id+row 稠密条件 ⇒ 段标 dense_u64，读侧 row_id 免读
-  // id 列（每查询每段省一整列 GET，是冷 vec KB/q 的主要随 N 膨胀项）。
-  sort_docs_by_id(live)
-  let cent = load_centroids(store, ns, m_start.centroid_version)
-  // 合并段：只上传一次；重试期间复用（乐观 rebase 的关键）
-  let merged_seg : @format.SegmentMeta? = if live.length() > 0 {
-    let seg_id = new_slab_segment_id()
-    let (slab_bytes, meta_bytes, meta) = build_segment_slab(
-      cfg, cent, live, 0, live.length(), seg_id~,
-    )
-    store.put_many([
-      (segment_slab_key(ns, seg_id), slab_bytes),
-      (segment_meta_key(ns, seg_id), meta_bytes),
-    ])
-    Some(meta)
-  } else {
-    None
-  }
-  let merged_id : String = match merged_seg {
-    Some(s) => s.id
-    None => ""
-  }
-  let want_global = false // 全局代际链已停写（Step 1）：同 ingest_l0_slab。
-  let mut last_tomb : (Array[UInt64], String)? = None
-  let mut tries = 0
   let mut result : String? = None
-  while tries < 5 && result is None {
-    tries += 1
-    // 乐观 rebase：读发布时刻的当前 head
-    let meta_curr = match read_namespace(store, ns) {
+  // 外层 = 整体重建轮次：rebase 校验失败（并发 cutover 换了中心 / 前缀段被
+  // 替换）时整次合并放弃并重试，从新快照重新拍、重新合并。
+  let mut builds = 0
+  while builds < 5 && result is None {
+    builds += 1
+    let meta0 = match read_namespace(store, ns) {
       Some(m) => m
       None => return result
     }
-    if meta_curr.head_manifest == "" {
+    if meta0.head_manifest == "" {
       return result
     }
-    let m_curr = load_manifest(store, ns, meta_curr.head_manifest)
-    // 并发新增 tail 段：不在合并集合、也不是本次的合并段
-    let tails : Array[@format.SegmentMeta] = Array()
-    for s in m_curr.segments {
-      if in_prefix.contains(s.id) || s.id == merged_id {
+    let m_start = load_manifest(store, ns, meta0.head_manifest)
+    if m_start.segments.length() <= 1 && m_start.deleted.is_empty() {
+      return result
+    }
+    // 合并集合：merge_ids 非空 = 指定子集（同 tier 不相邻段也可以）；
+    // 默认 = manifest 顺序的前 N 段（前缀合并）。rebase 拼接两种情况共用。
+    let in_prefix : Map[String, Bool] = Map([])
+    if merge_ids.length() > 0 {
+      let wanted : Map[String, Bool] = Map([])
+      for id in merge_ids {
+        wanted.set(id, true)
+      }
+      let mut picked = 0
+      for s in m_start.segments {
+        let hit = match wanted.get(s.id) {
+          Some(_) => true
+          None => false
+        }
+        if hit {
+          in_prefix.set(s.id, true)
+          picked += 1
+        }
+      }
+      if picked == 0 {
+        return result
+      }
+    } else {
+      let maxp = if max_prefix_segments > 0 {
+        max_prefix_segments
+      } else {
+        m_start.segments.length()
+      }
+      let mut taken = 0
+      for s in m_start.segments {
+        if taken < maxp {
+          in_prefix.set(s.id, true)
+          taken += 1
+        }
+      }
+    }
+    // 读前缀段的存活行（兼容传统多文件段与单文件 slab 段）
+    let tomb : Set[UInt64] = Set([])
+    for d in m_start.deleted {
+      tomb.add(d)
+    }
+    let has_global = m_start.vec_global_version is Some(_) ||
+      m_start.global_gen is Some(_)
+    let (gvecs, gdim) : (Map[Int, Array[Float]], Int) = if has_global {
+      load_global_vec_rows(store, ns, m_start)
+    } else {
+      (Map([]), 0)
+    }
+    let live : Array[@core.Doc] = Array()
+    for si in 0..<m_start.segments.length() {
+      let seg = m_start.segments[si]
+      if !in_prefix.contains(seg.id) {
         continue
       }
-      tails.push(s)
-    }
-    // 合并段固定排最前（前缀合并时天然保持段序）；merge_ids 非前缀子集时
-    // 段序会重排，但段序不承载语义（见函数头「子集合并的限制」）。
-    let next_segs : Array[@format.SegmentMeta] = Array()
-    match merged_seg {
-      Some(s) => next_segs.push(s)
-      None => ()
-    }
-    for t in tails {
-      next_segs.push(t)
-    }
-    // 墓碑：只保留 tail 段范围内的（prefix 的已经被物理化）
-    let deleted_next = prune_tombstones(m_curr.deleted, tails)
-    let mut deleted_roar : String? = None
-    let mut tomb_write : (String, Bytes)? = None
-    if !deleted_next.is_empty() {
-      if same_ids(deleted_next, m_curr.deleted) {
-        deleted_roar = m_curr.deleted_roar
-      } else {
-        let reused = match last_tomb {
-          Some(t) => if same_ids(t.0, deleted_next) { Some(t.1) } else { None }
-          None => None
+      let pre : Array[Float]? = if has_global {
+        if seg.row_count == 0 {
+          Some(Array())
+        } else {
+          match gvecs.get(si) {
+            Some(a) => Some(a)
+            None =>
+              raise @core.Corrupt("missing preloaded vectors for segment \{si}")
+          }
         }
-        match reused {
-          Some(k) => deleted_roar = Some(k)
-          None => {
-            let tid = new_manifest_id()
-            tomb_write = Some((
-              tombstone_key(ns, tid),
-              @format.encode_roaring(deleted_next),
-            ))
-            deleted_roar = Some(tid)
-            last_tomb = Some((deleted_next, tid))
+      } else {
+        None
+      }
+      for d in load_segment_docs(store, ns, seg, pre, gdim) {
+        if !tomb.contains(d.id) {
+          live.push(d)
+        }
+      }
+    }
+    // 合并输出按 doc id 升序：同一合并集的 id 区间在顺序写入下相邻时，
+    // 排序后即满足 min_id+row 稠密条件 ⇒ 段标 dense_u64，读侧 row_id 免读
+    // id 列（每查询每段省一整列 GET，是冷 vec KB/q 的主要随 N 膨胀项）。
+    sort_docs_by_id(live)
+    let cent = load_centroids(store, ns, m_start.centroid_version)
+    // 合并段：CAS 发布冲突的重试期间只上传一次、复用（乐观 rebase 的关键）；
+    // 整体放弃重试（rebase 校验失败）会重建合并段——分区语义已变，旧合并段
+    // 不可用（孤儿段由 superseded 段 GC 回收）。
+    let merged_seg : @format.SegmentMeta? = if live.length() > 0 {
+      let seg_id = new_slab_segment_id()
+      let (slab_bytes, meta_bytes, meta) = build_segment_slab(
+        cfg, cent, live, 0, live.length(), seg_id~,
+      )
+      store.put_many([
+        (segment_slab_key(ns, seg_id), slab_bytes),
+        (segment_meta_key(ns, seg_id), meta_bytes),
+      ])
+      Some(meta)
+    } else {
+      None
+    }
+    let merged_id : String = match merged_seg {
+      Some(s) => s.id
+      None => ""
+    }
+    let want_global = false // 全局代际链已停写（Step 1）：同 ingest_l0_slab。
+    let mut last_tomb : (Array[UInt64], String)? = None
+    let mut tries = 0
+    let mut abandoned = false
+    while tries < 5 && result is None && !abandoned {
+      tries += 1
+      // 乐观 rebase：读发布时刻的当前 head
+      let meta_curr = match read_namespace(store, ns) {
+        Some(m) => m
+        None => return result
+      }
+      if meta_curr.head_manifest == "" {
+        return result
+      }
+      let m_curr = load_manifest(store, ns, meta_curr.head_manifest)
+      // rebase 校验 1：中心分区语义一致。失败 = 并发 cutover 已重训中心并
+      // 全量重写段 ⇒ 整次合并整体放弃（外层重建），绝不修补。
+      if m_curr.centroid_version != m_start.centroid_version {
+        abandoned = true
+        break
+      }
+      // rebase 校验 2：被合并的每个前缀段仍存在于 M_curr.segments。缺失 =
+      // 被并发 cutover/合并替换（其行已在 tail 新段里，拼上合并段会行重复）
+      // ⇒ 整次合并整体放弃（外层重建）。
+      for s in m_start.segments {
+        if in_prefix.contains(s.id) {
+          let mut found = false
+          for c in m_curr.segments {
+            if c.id == s.id {
+              found = true
+            }
+          }
+          if !found {
+            abandoned = true
           }
         }
       }
-    }
-    let new_id = new_manifest_id()
-    let mut total_rows = 0
-    let mut total_doclen = 0
-    for s in next_segs {
-      total_rows += s.row_count
-      total_doclen += s.doc_len_sum
-    }
-    let avg_doc_len = if total_rows > 0 {
-      total_doclen.to_double() / total_rows.to_double()
-    } else {
-      0.0
-    }
-    let manifest : @format.ManifestData = {
-      id: new_id,
-      parent: Some(m_curr.id),
-      segments: next_segs,
-      deleted: deleted_next,
-      deleted_roar,
-      // 全局代际链已停写（Step 1）：恒为 None。
-      vec_global_version: None,
-      global_gen: None,
-      centroid_version: m_curr.centroid_version,
-      num_docs: total_rows,
-      avg_doc_len,
-    }
-    // 全局 IVF：M_next 全量新 base（合并段 + tail 段），段序已重排
-    if want_global && next_segs.length() > 0 {
-      let curr_has_global = m_curr.vec_global_version is Some(_) ||
-        m_curr.global_gen is Some(_)
-      let (tvecs, tdim) : (Map[Int, Array[Float]], Int) = if curr_has_global {
-        load_global_vec_rows(store, ns, m_curr)
-      } else {
-        (Map([]), gdim)
+      if abandoned {
+        break
       }
-      let seg_docs : Array[Array[@core.Doc]] = Array(capacity=next_segs.length())
+      // 并发新增 tail 段：不在合并集合、也不是本次的合并段
+      let tails : Array[@format.SegmentMeta] = Array()
+      for s in m_curr.segments {
+        if in_prefix.contains(s.id) || s.id == merged_id {
+          continue
+        }
+        tails.push(s)
+      }
+      // 合并段固定排最前（前缀合并时天然保持段序）；merge_ids 非前缀子集时
+      // 段序会重排，但段序不承载语义（见函数头「子集合并的限制」）。
+      let next_segs : Array[@format.SegmentMeta] = Array()
       match merged_seg {
-        Some(_) => seg_docs.push(live)
+        Some(s) => next_segs.push(s)
         None => ()
       }
       for t in tails {
-        // tvecs 以 m_curr.segments 的下标为键（tail 在 m_curr 里的真实位置）
-        let mut idx = -1
-        for si in 0..<m_curr.segments.length() {
-          if m_curr.segments[si].id == t.id {
-            idx = si
+        next_segs.push(t)
+      }
+      // 墓碑：只保留 tail 段范围内的（prefix 的已经被物理化）
+      let deleted_next = prune_tombstones(m_curr.deleted, tails)
+      let mut deleted_roar : String? = None
+      let mut tomb_write : (String, Bytes)? = None
+      if !deleted_next.is_empty() {
+        if same_ids(deleted_next, m_curr.deleted) {
+          deleted_roar = m_curr.deleted_roar
+        } else {
+          let reused = match last_tomb {
+            Some(t) => if same_ids(t.0, deleted_next) { Some(t.1) } else { None }
+            None => None
+          }
+          match reused {
+            Some(k) => deleted_roar = Some(k)
+            None => {
+              let tid = new_manifest_id()
+              tomb_write = Some((
+                tombstone_key(ns, tid),
+                @format.encode_roaring(deleted_next),
+              ))
+              deleted_roar = Some(tid)
+              last_tomb = Some((deleted_next, tid))
+            }
           }
         }
-        let pre : Array[Float]? = if curr_has_global && t.row_count > 0 && idx >= 0 {
-          tvecs.get(idx)
-        } else {
-          None
-        }
-        seg_docs.push(load_segment_docs(store, ns, t, pre, tdim))
       }
-      let _ = write_global_base_from_segs(
-        store, cfg, ns, cent, new_id, next_segs, seg_docs,
-      )
-    }
-    let items : Array[(String, Bytes)] = Array()
-    match tomb_write {
-      Some(kv) => items.push(kv)
-      None => ()
-    }
-    items.push((manifest_key(ns, new_id), json_bytes(manifest.to_json())))
-    store.put_many(items)
-    let published = try {
-      publish_head(store, ns, m_curr.id, new_id)
-      true
-    } catch {
-      _ => false
-    }
-    if published {
-      result = Some(new_id)
+      let new_id = new_manifest_id()
+      let mut total_rows = 0
+      let mut total_doclen = 0
+      for s in next_segs {
+        total_rows += s.row_count
+        total_doclen += s.doc_len_sum
+      }
+      let avg_doc_len = if total_rows > 0 {
+        total_doclen.to_double() / total_rows.to_double()
+      } else {
+        0.0
+      }
+      let manifest : @format.ManifestData = {
+        id: new_id,
+        parent: Some(m_curr.id),
+        segments: next_segs,
+        deleted: deleted_next,
+        deleted_roar,
+        // 全局代际链已停写（Step 1）：恒为 None。
+        vec_global_version: None,
+        global_gen: None,
+        centroid_version: m_curr.centroid_version,
+        num_docs: total_rows,
+        avg_doc_len,
+      }
+      // 全局 IVF：M_next 全量新 base（合并段 + tail 段），段序已重排
+      if want_global && next_segs.length() > 0 {
+        let curr_has_global = m_curr.vec_global_version is Some(_) ||
+          m_curr.global_gen is Some(_)
+        let (tvecs, tdim) : (Map[Int, Array[Float]], Int) = if curr_has_global {
+          load_global_vec_rows(store, ns, m_curr)
+        } else {
+          (Map([]), gdim)
+        }
+        let seg_docs : Array[Array[@core.Doc]] = Array(capacity=next_segs.length())
+        match merged_seg {
+          Some(_) => seg_docs.push(live)
+          None => ()
+        }
+        for t in tails {
+          // tvecs 以 m_curr.segments 的下标为键（tail 在 m_curr 里的真实位置）
+          let mut idx = -1
+          for si in 0..<m_curr.segments.length() {
+            if m_curr.segments[si].id == t.id {
+              idx = si
+            }
+          }
+          let pre : Array[Float]? = if curr_has_global && t.row_count > 0 && idx >= 0 {
+            tvecs.get(idx)
+          } else {
+            None
+          }
+          seg_docs.push(load_segment_docs(store, ns, t, pre, tdim))
+        }
+        let _ = write_global_base_from_segs(
+          store, cfg, ns, cent, new_id, next_segs, seg_docs,
+        )
+      }
+      let items : Array[(String, Bytes)] = Array()
+      match tomb_write {
+        Some(kv) => items.push(kv)
+        None => ()
+      }
+      items.push((manifest_key(ns, new_id), json_bytes(manifest.to_json())))
+      store.put_many(items)
+      let published = try {
+        publish_head(store, ns, m_curr.id, new_id)
+        true
+      } catch {
+        _ => false
+      }
+      if published {
+        result = Some(new_id)
+      }
     }
   }
   result

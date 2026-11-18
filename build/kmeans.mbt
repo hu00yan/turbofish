@@ -32,11 +32,25 @@ fn normalize_center(data : Array[Float], base : Int, dim : Int) -> Unit {
 }
 
 ///|
+/// balanced k-means 容量约束 slack：每簇训练样本上限
+/// `ceil(sample_n/k) × KMEANS_CAPACITY_SLACK`（1.25 = 允许簇超均值 25%）。
+/// 等大小约束把簇行数偏置 E[s²]/E[s] 压向 mean ⇒ 每 probe 字节从
+/// `E[s²]/E[s]×行字节`（尺寸偏置，≈4×mean）压到 `mean×行字节`。
+pub const KMEANS_CAPACITY_SLACK : Double = 1.25
+
 ///|
-/// Lloyd kmeans：
+/// 平衡分配每样本保留的候选簇数上界（全局距离升序贪心的截断深度；超过
+/// 前 K 的候选只有在前 K 全满时才会用到，此时由兜底扫描补位）。
+pub const KMEANS_TOP_C : Int = 128
+
+///|
+///|
+/// Lloyd kmeans（balanced 等大小约束）：
 /// - 确定性采样 min(nlist*8, docs.length()) 条向量（Rng 种子 42）
 /// - k 收缩为 min(nlist, 样本数)，避免重复中心导致的常驻空簇
-/// - 迭代 iters 轮：分配（距离最小）→ 均值更新 → （cosine 时）归一化
+/// - 迭代 iters 轮：分配（所有 (样本, 簇) 候选对按距离全局升序贪心：
+///   样本未分配且簇未满则落位；簇满则落到该样本次近的未满簇）
+///   → 均值更新 → （cosine 时）归一化
 /// - 空簇用「离当前中心最远的样本点」重置（确定性；比随机样本更能
 ///   打散簇行数分布——簇越均衡，probe 命中行数的尺寸偏置
 ///   E[size²]/E[size] 越小，冷 vec KB/q 越低）
@@ -88,6 +102,39 @@ pub fn train_centroids(
       append_normalized(data, docs[idx[c]].vector, dim)
     }
   }
+  // 每簇容量上限（等大小约束）：ceil(sample_n/k) × KMEANS_CAPACITY_SLACK，
+  // floor 取整。floor(1.25m) ≥ m = ceil(sample_n/k) ⇒ k×cap ≥ sample_n，
+  // 贪心分配恒有未满簇可放（cap ≥ 1）。
+  let m = (sample_n + k - 1) / k
+  let cap = (m.to_double() * KMEANS_CAPACITY_SLACK).floor().to_int()
+  // 平衡分配的全局距离升序贪心缓冲：每样本保留最近 ctop 个候选（距离+簇号），
+  // 全部样本的 top-c 候选对做距离→桶计数排序（升序、确定性），再按序落位。
+  // 内存 O(sample_n × ctop)；候选表之外的簇仅在前 ctop 全满时经兜底扫描补。
+  let ctop = if k < KMEANS_TOP_C { k } else { KMEANS_TOP_C }
+  let scratch : Array[(Double, Int)] = Array(capacity=k)
+  for _ in 0..<k {
+    scratch.push((0.0, 0))
+  }
+  let pair_n = sample_n * ctop
+  let top_d : Array[Double] = Array(capacity=pair_n)
+  for _ in 0..<pair_n {
+    top_d.push(0.0)
+  }
+  let top_c : Array[Int] = Array(capacity=pair_n)
+  let order : Array[Int] = Array(capacity=pair_n)
+  for _ in 0..<pair_n {
+    top_c.push(0)
+    order.push(0)
+  }
+  let assigned : Array[Int] = Array(capacity=sample_n)
+  for _ in 0..<sample_n {
+    assigned.push(-1)
+  }
+  let nb = 65536
+  let bcounts : Array[Int] = Array(capacity=nb)
+  for _ in 0..<nb {
+    bcounts.push(0)
+  }
   let sums : Array[Double] = Array(capacity=k * dim)
   for _ in 0..<(k * dim) {
     sums.push(0.0)
@@ -129,31 +176,133 @@ pub fn train_centroids(
       far_d[i] = -1.0
       far_i[i] = -1
     }
-    // 分配：归一化中心内积最大 = cosine 距离最小；euclidean 时 l2sq 最小
+    for i in 0..<sample_n {
+      assigned[i] = -1
+    }
+    // 分配（带容量，全局按距离升序贪心）：
+    // 1) 每样本按距离升序取前 ctop 个候选簇（归一化中心内积最大 =
+    //    cosine 距离最小；euclidean 时 l2sq 最小）；
     for si in 0..<sample_n {
       let v = docs[idx[si]].vector
-      let mut best = 0
-      let mut best_d = if euclidean {
-        @core.l2sq_f32(v, 0, data, 0, dim)
-      } else {
-        @core.cosine_dist_f32(v, 0, data, 0, dim)
-      }
-      for c in 1..<k {
+      for c in 0..<k {
         let d = if euclidean {
           @core.l2sq_f32(v, 0, data, c * dim, dim)
         } else {
           @core.cosine_dist_f32(v, 0, data, c * dim, dim)
         }
-        if d < best_d {
-          best_d = d
-          best = c
-        }
+        scratch[c] = (d, c)
       }
-      counts[best] = counts[best] + 1
-      consider_far(best_d, si)
-      let base = best * dim
+      scratch.sort_by(fn(a, b) {
+        let cmp = a.0.compare(b.0)
+        if cmp != 0 {
+          cmp
+        } else {
+          a.1.compare(b.1)
+        }
+      })
+      let base = si * ctop
+      for r in 0..<ctop {
+        let (d, c) = scratch[r]
+        top_d[base + r] = d
+        top_c[base + r] = c
+      }
+    }
+    // 2) 全部候选对按距离升序（桶计数排序近似全排序，同桶内按 (样本, 序)
+    //    升序，确定性）；
+    let mut max_d = 0.0
+    for p in 0..<pair_n {
+      let d = top_d[p]
+      if d > max_d {
+        max_d = d
+      }
+    }
+    let scale = if max_d > 0.0 {
+      (nb.to_double() - 1.0) / max_d
+    } else {
+      0.0
+    }
+    for b in 0..<nb {
+      bcounts[b] = 0
+    }
+    for p in 0..<pair_n {
+      let b = (top_d[p] * scale).to_int()
+      bcounts[b] = bcounts[b] + 1
+    }
+    let mut acc = 0
+    for b in 0..<nb {
+      let n = bcounts[b]
+      bcounts[b] = acc
+      acc = acc + n
+    }
+    for p in 0..<pair_n {
+      let b = (top_d[p] * scale).to_int()
+      order[bcounts[b]] = p
+      bcounts[b] = bcounts[b] + 1
+    }
+    // 3) 按升序贪心落位：样本已分配或簇已满则跳过——簇满则该样本落到其
+    //    候选表中下一个（次近）未满簇。
+    for slot in 0..<pair_n {
+      let p = order[slot]
+      let si = p / ctop
+      let c = top_c[p]
+      if assigned[si] >= 0 || counts[c] >= cap {
+        continue
+      }
+      assigned[si] = c
+      counts[c] = counts[c] + 1
+      let d = top_d[p]
+      consider_far(d, si)
+      let base = c * dim
+      let v = docs[idx[si]].vector
       for f in 0..<dim {
         sums[base + f] = sums[base + f] + v[f].to_double()
+      }
+    }
+    // 兜底：候选表前 ctop 全满的样本（cap ≥ 1 且 k×cap ≥ sample_n 时极罕见）
+    // ——全量扫最近未满簇。
+    for si in 0..<sample_n {
+      if assigned[si] < 0 {
+        let v = docs[idx[si]].vector
+        let mut best = -1
+        let mut best_d = 0.0
+        for c in 0..<k {
+          let d = if euclidean {
+            @core.l2sq_f32(v, 0, data, c * dim, dim)
+          } else {
+            @core.cosine_dist_f32(v, 0, data, c * dim, dim)
+          }
+          if counts[c] < cap && (best < 0 || d < best_d) {
+            best = c
+            best_d = d
+          }
+        }
+        if best < 0 {
+          // 理论不可达：全部满也得放——取距离最小簇。
+          best = 0
+          best_d = if euclidean {
+            @core.l2sq_f32(v, 0, data, 0, dim)
+          } else {
+            @core.cosine_dist_f32(v, 0, data, 0, dim)
+          }
+          for c in 1..<k {
+            let d = if euclidean {
+              @core.l2sq_f32(v, 0, data, c * dim, dim)
+            } else {
+              @core.cosine_dist_f32(v, 0, data, c * dim, dim)
+            }
+            if d < best_d {
+              best_d = d
+              best = c
+            }
+          }
+        }
+        assigned[si] = best
+        counts[best] = counts[best] + 1
+        consider_far(best_d, si)
+        let base = best * dim
+        for f in 0..<dim {
+          sums[base + f] = sums[base + f] + v[f].to_double()
+        }
       }
     }
     // 更新：均值 → （cosine）归一化；空簇用「离当前中心最远的样本点」
